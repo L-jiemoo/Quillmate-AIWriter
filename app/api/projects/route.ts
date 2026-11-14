@@ -1,0 +1,40 @@
+import { NextResponse } from "next/server";
+import { createProject, listProjects } from "@/lib/store";
+import { errorMessage } from "@/lib/utils";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function text(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+export async function GET() {
+  return NextResponse.json(await listProjects());
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    const title = text(body.title)?.trim();
+    if (!title) {
+      return NextResponse.json({ error: "请填写书名" }, { status: 400 });
+    }
+
+    const detail = await createProject({
+      title,
+      slug: text(body.slug),
+      genre: text(body.genre),
+      tone: text(body.tone),
+      idea: text(body.idea),
+      author: text(body.author),
+      language: text(body.language),
+      targetChapters: body.targetChapters === undefined ? undefined : Number(body.targetChapters),
+      wordsPerChapter: body.wordsPerChapter === undefined ? undefined : Number(body.wordsPerChapter),
+    });
+
+    return NextResponse.json({ slug: detail.meta.slug }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: 400 });
+  }
+}
