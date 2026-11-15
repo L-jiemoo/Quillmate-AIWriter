@@ -1,16 +1,29 @@
+import { normalizeExtractedFacts, normalizeReviewResult } from "./canon";
 import { getRuntimeConfig } from "./config";
 import { LLMClient } from "./llm";
 import { mockChapter, mockCharacters, mockExtendedChapters, mockPlan, mockReview } from "./mock";
 import {
   architectMessages,
+  auditMessages,
+  chapterRepairMessages,
   characterMessages,
   extendMessages,
-  reviewerMessages,
+  factExtractorMessages,
   titleRepairMessages,
   writerMessages,
 } from "./prompts";
 import { normalizeCharacter } from "./store";
-import type { ChapterPlan, Character, ProjectMeta, ProjectPlan, ReviewResult } from "./types";
+import type {
+  CanonFacts,
+  ChapterPlan,
+  ChapterWriteOptions,
+  Character,
+  ContinuityIssue,
+  ExtractedFacts,
+  ProjectMeta,
+  ProjectPlan,
+  ReviewResult,
+} from "./types";
 import type { GeneratedPlan } from "./mock";
 
 function str(value: unknown, fallback = ""): string {
@@ -202,39 +215,112 @@ export async function extendPlan(
   return chapters;
 }
 
-export async function writeChapter(
-  meta: ProjectMeta,
-  bible: string,
-  characters: Character[],
-  chapter: ChapterPlan,
-  history: string[],
-): Promise<string> {
-  if (isMock()) return mockChapter(meta, chapter);
-
-  const llm = new LLMClient();
-  const raw = await llm.chat(writerMessages(meta, bible, characters, chapter, history));
-  // 部分模型会用 ```markdown 包裹正文，写入章节文件前去掉首尾围栏。
+// 部分模型会用 ```markdown 包裹正文，写入章节文件前去掉首尾围栏。
+function stripFences(raw: string): string {
   return raw
     .replace(/^```[^\n]*\n/, "")
     .replace(/\n```\s*$/, "")
     .trim();
 }
 
-export async function reviewChapter(
+export async function writeChapter(
+  meta: ProjectMeta,
+  bible: string,
+  characters: Character[],
+  chapter: ChapterPlan,
+  previousEnding: string,
+  history: string[],
+  options: ChapterWriteOptions = {},
+): Promise<string> {
+  if (isMock()) return mockChapter(meta, chapter);
+
+  const llm = new LLMClient();
+  const raw = await llm.chat(
+    writerMessages(meta, bible, characters, chapter, previousEnding, history, options),
+  );
+  return stripFences(raw);
+}
+
+export async function extractChapterFacts(
   meta: ProjectMeta,
   bible: string,
   chapter: ChapterPlan,
   chapterText: string,
+  canon: CanonFacts,
+): Promise<ExtractedFacts> {
+  if (isMock()) {
+    return {
+      summary: chapter.summary,
+      characters: [],
+      items: [],
+      timeline: null,
+      rules: [],
+    };
+  }
+
+  const llm = new LLMClient();
+  const data = await llm.json<Record<string, unknown>>(
+    factExtractorMessages(meta, bible, chapter, chapterText, canon),
+    // 事实抽取要稳定复现，不用创作时的高温参数。
+    { temperature: 0.1 },
+  );
+  return normalizeExtractedFacts(data, chapter.summary);
+}
+
+export async function auditChapter(
+  meta: ProjectMeta,
+  canon: CanonFacts,
+  chapter: ChapterPlan,
+  chapterText: string,
+  previousContext: string,
+  suspicions: ContinuityIssue[],
+  nextContext: string,
 ): Promise<ReviewResult> {
   if (isMock()) return mockReview(chapter);
 
   const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
-    reviewerMessages(meta, bible, chapter, chapterText),
+    auditMessages(
+      meta,
+      canon,
+      chapter,
+      chapterText,
+      previousContext,
+      suspicions,
+      nextContext,
+    ),
+    { temperature: 0.1 },
   );
-  return {
-    summary: str(data.summary, chapter.summary),
-    issues: arr(data.issues),
-    continuityOk: Boolean(data.continuityOk ?? data.continuity_ok ?? true),
-  };
+  return normalizeReviewResult(data, chapter.summary);
+}
+
+export async function repairChapter(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  chapterText: string,
+  issues: ContinuityIssue[],
+  canon: CanonFacts,
+  previousEnding: string,
+  nextOpening: string,
+  rewriteInstruction: string,
+  reviewFeedback: string,
+): Promise<string> {
+  if (isMock()) return chapterText;
+
+  const llm = new LLMClient();
+  const raw = await llm.chat(
+    chapterRepairMessages(
+      meta,
+      chapter,
+      chapterText,
+      issues,
+      canon,
+      previousEnding,
+      nextOpening,
+      rewriteInstruction,
+      reviewFeedback,
+    ),
+    { temperature: 0.2 },
+  );
+  return stripFences(raw);
 }

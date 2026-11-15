@@ -6,6 +6,20 @@ export interface ChatMessage {
   content: string;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 连接中断、限流和服务端 5xx 都属于可重试错误；鉴权、参数错误重试没有意义。
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof OpenAI.APIConnectionError) return true;
+  if (error instanceof OpenAI.APIError) {
+    const status = error.status ?? 0;
+    return status === 429 || status >= 500;
+  }
+  return false;
+}
+
 function extractJson<T>(raw: string): T {
   // 兼容三类常见输出：纯 JSON、```json 围栏、正文前后夹带解释。
   // 先剥围栏，失败后再从第一个 { 截到最后一个 } 尝试解析。
@@ -47,24 +61,47 @@ export class LLMClient {
     return this.client;
   }
 
-  async chat(messages: ChatMessage[], options: { json?: boolean } = {}): Promise<string> {
+  async chat(
+    messages: ChatMessage[],
+    options: { json?: boolean; temperature?: number } = {},
+  ): Promise<string> {
     return this.complete(messages, options, this.config.maxTokens, 0);
   }
 
   private async complete(
     messages: ChatMessage[],
-    options: { json?: boolean },
+    options: { json?: boolean; temperature?: number },
     maxTokens: number,
     attempt: number,
   ): Promise<string> {
-    const client = this.getClient();
-    const response = await client.chat.completions.create({
-      model: this.config.model,
-      messages,
-      temperature: this.config.temperature,
-      max_tokens: maxTokens,
-      ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
-    });
+    // 长任务里一次瞬时断连就会毁掉整章；这里对连接错误做带退避的重试。
+    const maxAttempts = 4;
+    let response: OpenAI.Chat.Completions.ChatCompletion;
+    for (let attemptNo = 1; ; attemptNo += 1) {
+      try {
+        response = await this.getClient().chat.completions.create({
+          model: this.config.model,
+          messages,
+          // 事实抽取/审校需要稳定复现，允许调用方覆盖默认的高温创作参数。
+          temperature: options.temperature ?? this.config.temperature,
+          max_tokens: maxTokens,
+          ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
+        });
+        break;
+      } catch (error) {
+        if (attemptNo >= maxAttempts || !isRetryableError(error)) {
+          if (error instanceof OpenAI.APIConnectionError) {
+            throw new Error(
+              `无法连接模型服务（${this.config.baseUrl}），已尝试 ${maxAttempts} 次：${error.message}`,
+            );
+          }
+          throw error;
+        }
+        // 丢弃旧连接，下一次 getClient() 会重新建连。
+        this.client = null;
+        await sleep(800 * 2 ** (attemptNo - 1));
+      }
+    }
 
     const choice = response.choices[0];
     const content = choice?.message?.content?.trim();
@@ -99,8 +136,8 @@ export class LLMClient {
     );
   }
 
-  async json<T>(messages: ChatMessage[]): Promise<T> {
-    const raw = await this.chat(messages, { json: true });
+  async json<T>(messages: ChatMessage[], options: { temperature?: number } = {}): Promise<T> {
+    const raw = await this.chat(messages, { json: true, ...options });
     try {
       return extractJson<T>(raw);
     } catch {
@@ -115,7 +152,7 @@ export class LLMClient {
             content: "上面的输出不是合法 JSON。请只输出修正后的合法 JSON，不要附加任何解释。",
           },
         ],
-        { json: true },
+        { json: true, ...options },
       );
       return extractJson<T>(repaired);
     }

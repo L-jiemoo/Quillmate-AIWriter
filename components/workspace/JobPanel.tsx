@@ -6,6 +6,7 @@ import type { Job, ProjectDetail, StartJobFn } from "@/lib/types";
 const STATUS_LABEL: Record<Job["status"], string> = {
   queued: "排队中",
   running: "执行中",
+  paused: "已暂停",
   done: "已完成",
   error: "失败",
 };
@@ -14,25 +15,58 @@ const TYPE_LABEL: Record<Job["type"], string> = {
   plan: "生成架构",
   extend: "补充大纲",
   write: "自动写作",
+  rewrite: "重写章节",
+  repair: "定点修复",
+  recanon: "重建事实台账",
+  audit: "总体审校",
   export: "导出全书",
   "fanqie-login": "登录番茄",
   "fanqie-publish": "发布番茄",
 };
 
+// 支持 "3"、"3,5"、"8-10" 以及中文逗号/顿号分隔的章节选择。
+function parseChapterSelection(input: string): number[] {
+  const indices = new Set<number>();
+  for (const token of input.split(/[\s,，、]+/).filter(Boolean)) {
+    const range = token.match(/^(\d+)\s*[-~—]\s*(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (start < 1 || end < start || end - start > 200) continue;
+      for (let index = start; index <= end; index += 1) indices.add(index);
+      continue;
+    }
+    const index = Number(token);
+    if (Number.isInteger(index) && index > 0) indices.add(index);
+  }
+  return [...indices].sort((a, b) => a - b);
+}
+
 export function JobPanel({
   detail,
   job,
   onStartJob,
+  onPauseJob,
 }: {
   detail: ProjectDetail;
   job: Job | null;
   onStartJob: StartJobFn;
+  onPauseJob?: () => void;
 }) {
   const [count, setCount] = useState("1");
   const [extendCount, setExtendCount] = useState("10");
+  const [rewriteInput, setRewriteInput] = useState("");
+  const [rewriteInstruction, setRewriteInstruction] = useState("");
+  const [useReview, setUseReview] = useState(false);
+  const [rewriteError, setRewriteError] = useState("");
   const consoleRef = useRef<HTMLDivElement>(null);
   const running = Boolean(job && (job.status === "queued" || job.status === "running"));
   const pending = detail.chapters.filter((chapter) => !chapter.written).length;
+  const writtenIndexes = new Set(
+    detail.chapters
+      .filter((chapter) => chapter.written && chapter.content.trim())
+      .map((chapter) => chapter.index),
+  );
   const nextIndex = detail.plan.chapters.length
     ? Math.max(...detail.plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
@@ -62,6 +96,73 @@ export function JobPanel({
     void onStartJob("extend", { count: Math.max(1, Number(extendCount) || 10) });
   }
 
+  function startRewrite() {
+    const indices = parseChapterSelection(rewriteInput);
+    if (!indices.length) {
+      setRewriteError("请输入要重写的章节，如 3、5 或 8-10");
+      return;
+    }
+
+    const missing = indices.filter((index) => !writtenIndexes.has(index));
+    if (missing.length) {
+      setRewriteError(`第 ${missing.join("、")} 章还没有正文，无法重写`);
+      return;
+    }
+
+    const published = new Set(
+      (detail.state.publishHistory ?? [])
+        .filter(
+          (record) =>
+            record.platform === "fanqie" &&
+            record.status === "success" &&
+            record.mode === "publish",
+        )
+        .flatMap((record) => record.chapters),
+    );
+    const publishedTargets = indices.filter((index) => published.has(index));
+    const warning = publishedTargets.length
+      ? `\n\n第 ${publishedTargets.join("、")} 章已发布到番茄；重写只改本地稿，不会自动发布，之后请自行到番茄后台更新。`
+      : "";
+    const reviewTargets = indices.filter((index) =>
+      (detail.state.reviews[String(index)]?.issues ?? []).some(
+        (issue) => issue.severity === "critical",
+      ),
+    );
+    const reviewNote = useReview
+      ? reviewTargets.length
+        ? `\n\n将参考第 ${reviewTargets.join("、")} 章的上一版严重审校问题。`
+        : "\n\n所选章节没有严重审校记录，勾选项不会生效。"
+      : "";
+
+    if (
+      !window.confirm(
+        `将用 AI 重写第 ${indices.join("、")} 章；通过连续性检查后才会覆盖原稿，未通过则保留原稿，不会触发发布。${warning}${reviewNote}\n\n继续？`,
+      )
+    ) {
+      return;
+    }
+
+    setRewriteError("");
+    void onStartJob("rewrite", {
+      indices,
+      instruction: rewriteInstruction.trim(),
+      useReview,
+    });
+  }
+
+  function startAudit() {
+    const total = writtenIndexes.size;
+    if (!total) return;
+    if (
+      !window.confirm(
+        `将逐章抽取事实并审校全书 ${total} 章，每章约 2 次模型调用，耗时和费用会随章节数增加。\n\n审校只读，不会修改正文、台账或审校记录。继续？`,
+      )
+    ) {
+      return;
+    }
+    void onStartJob("audit");
+  }
+
   const statusText = job
     ? running
       ? `${TYPE_LABEL[job.type]} · ${STATUS_LABEL[job.status]}`
@@ -82,6 +183,16 @@ export function JobPanel({
       </div>
       <div className="panel-body">
         <div className="job-actions">
+          {running && job?.type === "repair" ? (
+            <button
+              className="btn btn-block"
+              onClick={onPauseJob}
+              disabled={job.pauseRequested}
+            >
+              {job.pauseRequested ? "正在暂停…（当前章节完成后停止）" : "暂停定点修复"}
+            </button>
+          ) : null}
+
           <button className="btn btn-primary btn-block" onClick={startPlan} disabled={running}>
             生成架构与角色
           </button>
@@ -135,6 +246,62 @@ export function JobPanel({
               补充 {extendCount} 章大纲
             </button>
           </div>
+
+          <div className="job-divider" />
+
+          <p className="hint">
+            重写只修改本地正文，不会自动发布；支持单个、多个或范围，如 3、5、8-10。
+          </p>
+          <div className="job-rewrite-row">
+            <input
+              className="input"
+              value={rewriteInput}
+              onChange={(event) => {
+                setRewriteInput(event.target.value);
+                setRewriteError("");
+              }}
+              placeholder="章节号：3,5,8-10"
+              aria-label="要重写的章节号"
+            />
+            <button
+              className="btn"
+              onClick={startRewrite}
+              disabled={running || !writtenIndexes.size}
+            >
+              重写
+            </button>
+          </div>
+          <input
+            className="input"
+            value={rewriteInstruction}
+            onChange={(event) => setRewriteInstruction(event.target.value)}
+            placeholder="可选：重写要求，如加强打斗、删掉回忆"
+            maxLength={300}
+            aria-label="重写要求"
+          />
+          <label className="checkbox-row job-review-toggle">
+            <input
+              type="checkbox"
+              checked={useReview}
+              onChange={(event) => setUseReview(event.target.checked)}
+              disabled={running}
+            />
+            <span>按照章节审校重写（只带入该章上一版的严重问题）</span>
+          </label>
+          {rewriteError ? <p className="form-error">{rewriteError}</p> : null}
+
+          <div className="job-divider" />
+
+          <p className="hint">
+            总体审校会逐章抽取事实并以“截至上一章”的台账检查全书，只读不改稿；章节越多耗时越长。
+          </p>
+          <button
+            className="btn btn-block"
+            onClick={startAudit}
+            disabled={running || !writtenIndexes.size}
+          >
+            总体审校全书（{writtenIndexes.size} 章）
+          </button>
         </div>
 
         <div className="job-log" ref={consoleRef}>

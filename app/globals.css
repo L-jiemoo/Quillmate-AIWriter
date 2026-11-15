@@ -883,6 +883,9 @@ select {
 .side-column {
   position: sticky;
   top: 94px;
+  /* 任务台新增重写控件后可能超过一屏；让它自身滚动，避免底部按钮被裁掉。 */
+  max-height: calc(100vh - 118px);
+  overflow-y: auto;
 }
 
 .main-column {
@@ -1487,6 +1490,33 @@ select {
   outline: none;
 }
 
+.editor-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.editor-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 22px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(239, 233, 219, 0.02);
+}
+
+.editor-find-input {
+  width: 260px;
+}
+
+.editor-find-count {
+  min-width: 68px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 章节编辑器：深色稿纸 + 衬线正文，重点让长文阅读更稳。 */
 .editor-body {
   display: flex;
@@ -1522,6 +1552,390 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  flex-wrap: wrap;
+}
+
+.editor-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 连续性检查：章节编辑器和「连续性」页共用同一套状态样式。 */
+.chapter-review {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 233, 219, 0.02);
+}
+
+.chapter-review.bad {
+  border-color: rgba(216, 120, 104, 0.35);
+  background: rgba(216, 120, 104, 0.05);
+}
+
+.chapter-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.review-badge {
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.review-badge.ok {
+  background: rgba(127, 167, 156, 0.12);
+  color: var(--jade);
+}
+
+.review-badge.bad {
+  background: rgba(216, 120, 104, 0.13);
+  color: var(--danger);
+}
+
+.review-issue-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.review-severity {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.review-severity.critical {
+  background: rgba(216, 120, 104, 0.14);
+  color: var(--danger);
+}
+
+.review-severity.warning {
+  background: var(--gold-soft);
+  color: var(--gold-bright);
+}
+
+.review-severity.ignore {
+  background: rgba(239, 233, 219, 0.06);
+  color: var(--muted);
+}
+
+.review-issue-detail {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.review-evidence {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.chapter-review .hint {
+  margin-top: 8px;
+}
+
+.dot-bad {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(216, 120, 104, 0.12);
+}
+
+.continuity-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.continuity-actions .hint {
+  max-width: 560px;
+}
+
+.continuity .form-error {
+  margin: 0 0 14px;
+}
+
+.canon-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.canon-block h3 {
+  margin: 16px 0 7px;
+  color: var(--ink-soft);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.canon-block h3:first-child {
+  margin-top: 0;
+}
+
+.canon-label {
+  margin: 10px 0 4px;
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.canon-list {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.canon-list li {
+  margin: 3px 0;
+}
+
+.canon-name {
+  color: var(--ink);
+}
+
+.canon-meta {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.canon-line {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.continuity-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.continuity-chapter {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.continuity-chapter:first-child {
+  padding-top: 0;
+}
+
+.continuity-chapter:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.continuity-chapter.bad .canon-name {
+  color: var(--danger);
+}
+
+.rejected-drafts {
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.rejected-drafts .canon-label {
+  color: var(--danger);
+}
+
+.rejected-draft-path {
+  margin: 4px 0 8px;
+  word-break: break-all;
+}
+
+.continuity-chapter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+/* 连续性页：子页签 + 定高滚动区，避免台账和审校记录把页面拉得很长。 */
+.continuity-section-tabs {
+  margin-bottom: 14px;
+}
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 233, 219, 0.02);
+  flex-wrap: wrap;
+}
+
+.segmented-sm {
+  padding: 2px;
+}
+
+.segmented-item {
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 6px 11px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.segmented-sm .segmented-item {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+.segmented-item:hover {
+  color: var(--ink);
+}
+
+.segmented-item.active {
+  background: var(--panel-raised);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.segmented-count {
+  margin-left: 6px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.segmented-item.active .segmented-count {
+  color: var(--gold-bright);
+}
+
+.continuity-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.continuity-edit-hint {
+  margin: 0 0 12px;
+}
+
+.canon-scroll,
+.review-scroll,
+.audit-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.review-scroll {
+  max-height: 480px;
+}
+
+.audit-scroll {
+  max-height: 560px;
+}
+
+.canon-scroll::-webkit-scrollbar,
+.review-scroll::-webkit-scrollbar,
+.audit-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.canon-scroll::-webkit-scrollbar-thumb,
+.review-scroll::-webkit-scrollbar-thumb,
+.audit-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.canon-status-group + .canon-status-group {
+  margin-top: 14px;
+}
+
+.canon-edit-list {
+  display: grid;
+  gap: 12px;
+}
+
+.canon-edit-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 233, 219, 0.02);
+}
+
+.canon-edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.canon-edit-index {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.canon-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.field-row-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.input-sm {
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+
+.input-sm.textarea-sm {
+  min-height: 60px;
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
+.danger-text:hover {
+  border-color: rgba(216, 120, 104, 0.5);
+  color: var(--danger);
 }
 
 .job-panel {
@@ -1551,6 +1965,16 @@ select {
 }
 
 .job-input-row .input {
+  padding: 9px 10px;
+}
+
+.job-rewrite-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.job-rewrite-row .input {
   padding: 9px 10px;
 }
 
@@ -1651,6 +2075,14 @@ select {
 .checkbox-row input {
   margin-top: 3px;
   accent-color: var(--cinnabar);
+}
+
+.job-review-toggle {
+  margin-top: 8px;
+}
+
+.audit-auto-continue {
+  margin: 2px 0 12px;
 }
 
 .advanced {
@@ -1908,6 +2340,8 @@ select.input {
 
   .side-column {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 
   /* 窄屏把目录折叠成横向书签，粘在顶栏下方。 */
@@ -2088,12 +2522,45 @@ select.input {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .canon-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .field-row-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .continuity .panel-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .continuity .panel-head-tools {
+    flex-wrap: wrap;
+  }
+
+  .canon-scroll,
+  .review-scroll,
+  .audit-scroll {
+    max-height: 360px;
+  }
+
+  .continuity-chapter-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
   .char-toolbar {
     justify-content: flex-start;
   }
 
   .editor-textarea {
     min-height: 380px;
+  }
+
+  .editor-find-input {
+    width: 100%;
   }
 }
 

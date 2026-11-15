@@ -8,10 +8,12 @@ export function PublishTab({
   detail,
   onStartJob,
   onRefresh,
+  disabled = false,
 }: {
   detail: ProjectDetail;
   onStartJob: StartJobFn;
   onRefresh: () => Promise<void>;
+  disabled?: boolean;
 }) {
   const fanqie = detail.publish.fanqie;
   const slug = detail.meta.slug;
@@ -27,6 +29,9 @@ export function PublishTab({
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyNotice, setHistoryNotice] = useState("");
 
   const history = [...(detail.state.publishHistory ?? [])].reverse();
   // “已发布”只认成功且 mode=publish 的记录；草稿记录仍算待发布，
@@ -94,6 +99,31 @@ export function PublishTab({
       setError(errorMessage(err));
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function handleClearHistory() {
+    if (!history.length || clearing || disabled) return;
+    if (
+      !window.confirm(
+        `将清空全部 ${history.length} 条发布记录。\n\n发布记录同时用于去重：清空后系统会忘记哪些章节已成功发布，下次发布可能把已发布章节再次提交到番茄。\n\n仅建议在记录错误或确实需要重新发布时使用。继续？`,
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    setHistoryError("");
+    setHistoryNotice("");
+    try {
+      const response = await fetch(`/api/projects/${slug}/publish`, { method: "DELETE" });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "清空发布记录失败");
+      await onRefresh();
+      setHistoryNotice("发布记录已清空");
+    } catch (err) {
+      setHistoryError(errorMessage(err));
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -240,7 +270,7 @@ export function PublishTab({
         <div className="panel-head">
           <h2 className="panel-title">发布记录</h2>
           <div className="panel-head-tools">
-            <span className="muted small">记录</span>
+            <span className="muted small">{history.length} 条记录</span>
             {/* 发布记录可能由后台任务写入，刷新会重新拉取项目详情。 */}
             <button
               className="btn btn-ghost btn-sm"
@@ -249,9 +279,18 @@ export function PublishTab({
             >
               {refreshing ? "刷新中…" : "刷新"}
             </button>
+            <button
+              className="btn btn-ghost btn-sm danger-text"
+              onClick={handleClearHistory}
+              disabled={clearing || disabled || !history.length}
+            >
+              {clearing ? "清空中…" : "清空记录"}
+            </button>
           </div>
         </div>
         <div className="panel-body">
+          {historyError ? <p className="form-error">{historyError}</p> : null}
+          {historyNotice ? <p className="form-note">{historyNotice}</p> : null}
           {history.length ? (
             <div className="table-scroll">
               <table className="data-table">
