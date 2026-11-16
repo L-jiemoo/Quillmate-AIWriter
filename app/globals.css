@@ -1017,6 +1017,19 @@ select {
   letter-spacing: 0.1em;
 }
 
+.overview-tabs {
+  margin-bottom: 20px;
+}
+
+.overview-tabs + .panel {
+  margin-top: 0;
+}
+
+.overview-canon-line {
+  margin: -4px 0 20px;
+  padding: 0 2px;
+}
+
 .overview > .panel {
   margin-top: 20px;
 }
