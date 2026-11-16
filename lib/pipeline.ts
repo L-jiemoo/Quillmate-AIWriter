@@ -361,7 +361,8 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       auditCanon === input.canon
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
-    const issues = mergeIssues(audit.issues, merged.conflicts, mechanical);
+    // 机械线索只作为审校提示；模型核对后如果没有报问题，不能反过来再当成问题写回。
+    const issues = mergeIssues(audit.issues, merged.conflicts);
     const critical = countCritical(issues);
     const review: ReviewResult = {
       summary: extracted.summary || audit.summary || input.chapter.summary,
@@ -1240,7 +1241,8 @@ async function runAudit(job: Job): Promise<void> {
     }
 
     const merged = mergeCanon(canon, extracted, chapter.index, "write");
-    const issues = mergeIssues(audit.issues, merged.conflicts, mechanical);
+    // 机械线索只作为审校提示；模型核对后如果没有报问题，不能反过来再当成问题写回。
+    const issues = mergeIssues(audit.issues, merged.conflicts);
     const criticalIssues = issues.filter((issue) => issue.severity === "critical");
     const warningIssues = issues.filter((issue) => issue.severity === "warning");
     const ignoredIssues = issues.filter((issue) => issue.severity === "ignore");

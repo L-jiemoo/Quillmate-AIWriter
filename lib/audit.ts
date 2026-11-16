@@ -1,3 +1,4 @@
+import { isDiscardableIssue } from "./canon";
 import type { AuditChapterResult, AuditResult, ContinuityIssue } from "./types";
 
 const CHAPTER_HEADING = /^##\s+第\s*(\d+)\s*章\s*《(.+)》\s*$/;
@@ -12,7 +13,11 @@ export function parseAuditReport(content: string): AuditResult {
   let lastIssue: ContinuityIssue | null = null;
 
   const finishChapter = () => {
-    if (current) chapters.push(current);
+    if (current) {
+      // 旧报告里可能残留“模型自己判定不是问题”的条目；展示和修复时都过滤掉。
+      current.issues = current.issues.filter((issue) => !isDiscardableIssue(issue));
+      chapters.push(current);
+    }
     current = null;
     lastIssue = null;
   };

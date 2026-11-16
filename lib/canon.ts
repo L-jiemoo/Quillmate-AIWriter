@@ -331,6 +331,38 @@ export function groundExtractedFacts(
   };
 }
 
+// 机械检查只用于提示模型；模型核对后确认是尸体、回忆或转述时，
+// 不应把这些线索当成真实问题写进审校记录。
+const MECHANICAL_DEATH_NAME =
+  /本章正文仍出现该名字。请确认是回忆、尸体或幻象，否则属于复活。$/;
+const MECHANICAL_OPENING_REPEAT =
+  /本章开头与上一章结尾存在大段重复，可能是在复述上一章而没有推进场景。$/;
+const SELF_NEGATING_ISSUE =
+  /(?:不属问题|不属于问题|不是问题|确认无误|无需处理|无需修改|应标为\s*ignore|标为\s*ignore|应降级为\s*ignore|可以忽略|不构成任何问题)/i;
+const NEGATED_CONCLUSION =
+  /(?:不构成(?:复活|矛盾|冲突|问题)|不矛盾|无直接矛盾|未发现矛盾|与台账一致|误报|非活人出场|不是活人出场|属于(?:回忆|转述|遗物|尸体|幻象))/;
+const REAL_PROBLEM =
+  /(?:存在.{0,12}(?:矛盾|冲突)|与.{0,20}(?:矛盾|冲突|不符|不一致)|构成.{0,12}(?:矛盾|冲突)|实际改写|需要改写|建议(?:改|明确)|应(?:修改|改写|删除))/;
+
+export function isDiscardableIssue(issue: ContinuityIssue): boolean {
+  const detail = issue.detail.trim();
+  const text = `${issue.type} ${detail} ${issue.evidence}`;
+  if (issue.type === "死亡人物出现" && MECHANICAL_DEATH_NAME.test(detail)) {
+    return true;
+  }
+  if (issue.type === "章首重复" && MECHANICAL_OPENING_REPEAT.test(detail)) {
+    return true;
+  }
+  if (SELF_NEGATING_ISSUE.test(text)) return true;
+  // 严重/可忽略条目如果自己已经否定了问题，又没有指出真实矛盾，直接丢弃；
+  // 建议类保留，避免误删“需要人工确认”的弱提示。
+  return (
+    issue.severity !== "warning" &&
+    NEGATED_CONCLUSION.test(text) &&
+    !REAL_PROBLEM.test(text)
+  );
+}
+
 export function normalizeIssues(input: unknown): ContinuityIssue[] {
   // 兼容旧版 state.json 里的字符串建议，以及新版的 {severity,type,evidence,detail}。
   if (!Array.isArray(input)) return [];
@@ -371,7 +403,7 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
         };
       }
     }
-    if (!issue) continue;
+    if (!issue || isDiscardableIssue(issue)) continue;
     const key = `${issue.severity}|${issue.type}|${issue.detail}|${issue.evidence}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -384,9 +416,8 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
 export function normalizeReviewResult(input: unknown, fallbackSummary = ""): ReviewResult {
   const record = (input ?? {}) as Record<string, unknown>;
   const issues = normalizeIssues(record.issues);
-  const rawOk = record.continuityOk ?? record.continuity_ok;
-  const continuityOk =
-    typeof rawOk === "boolean" ? rawOk : !issues.some((issue) => issue.severity === "critical");
+  // 以过滤后的 issues 为准，避免模型一边报 critical 一边又声明本章没问题。
+  const continuityOk = !issues.some((issue) => issue.severity === "critical");
   const repaired = typeof record.repaired === "boolean" ? record.repaired : undefined;
   const repairAttempts =
     typeof record.repairAttempts === "number"
@@ -409,6 +440,7 @@ export function mergeIssues(...lists: ContinuityIssue[][]): ContinuityIssue[] {
   const seen = new Set<string>();
   for (const list of lists) {
     for (const issue of list) {
+      if (isDiscardableIssue(issue)) continue;
       const key = `${issue.severity}|${issue.type}|${issue.detail}|${issue.evidence}`;
       if (seen.has(key)) continue;
       seen.add(key);
