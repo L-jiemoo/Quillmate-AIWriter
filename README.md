@@ -114,6 +114,23 @@ npm run dev
 5. 在「章节」点「写下一章」，或回任务台一次写多章；章节不够时在任务台点「补充 N 章大纲」续排，无需重新生成整本架构。
 6. 在「发布」导出全书 Markdown，或登录番茄后自动发布。
 
+## 开发与测试
+
+```bash
+npm run typecheck   # TypeScript 类型检查
+npm run lint        # ESLint
+npm run test        # Vitest 单元 / 集成测试
+npm run build       # Next.js 生产构建
+```
+
+测试通过 `QUILLMATE_DATA_DIR` 指向临时目录，不会读写 `data/` 下的真实项目。测试覆盖：缺失/损坏 JSON 的差异化处理、读取失败不覆盖原文件、原子写入、写入前备份、项目完整性检查、mock 模式的“架构 → 写作 → 导出”全流程，以及并发锁、任务持久化/重启恢复、取消、超时和重试。
+
+数据安全行为：
+
+- 所有 JSON 与正文写入都先写同目录临时文件再 rename，避免进程中断留下半截文件。
+- 覆盖 `project.json`、`plan.json`、`state.json`、`canon.json`、`characters.json`、`world.md`、`outline.md`、`audit.md` 与章节正文前，会自动备份到 `data/projects/<slug>/backups/`，每个文件保留最近 20 份。
+- 文件损坏会直接抛错并返回明确错误，不会用空数据覆盖原文件；只有“文件确实不存在”才按缺失处理。
+
 ## 接入真实模型
 
 ### 方式一：浏览器设置（推荐）
@@ -174,9 +191,11 @@ Quillmate/
 │   ├── pipeline.ts                 # 后台任务编排
 │   ├── jobs.ts                     # 内存任务队列
 │   ├── store.ts                    # 项目文件读写
+│   ├── storage.ts                  # 严格读取、原子写入与备份
 │   ├── publishers/fanqie.ts        # 番茄 Playwright 适配器
 │   ├── types.ts
 │   └── utils.ts
+├── tests/                          # Vitest 测试
 ├── data/                           # 运行时生成，已在 .gitignore 中忽略
 │   ├── projects/<slug>/
 │   │   ├── project.json            # 作品元数据 + 发布设置
@@ -187,9 +206,13 @@ Quillmate/
 │   │   ├── state.json              # 已写章节、摘要、审校、发布历史
 │   │   ├── canon.json              # 事实台账：人物状态、物品、时间线、规则
 │   │   ├── audit.md                # 总体审校报告（只读检查，不覆盖章节审校记录）
-│   │   ├── chapters/001.md         # 章节正文（仅通过连续性检查的稿）
+│   │   ├── chapters/1.md           # 章节正文（仅通过连续性检查的稿）
 │   │   ├── drafts/                 # 未通过连续性检查、未写入正文的草稿
+│   │   ├── backups/                # 覆盖关键文件前的自动备份
 │   │   └── exports/全书.md
+│   ├── jobs/                       # 后台任务快照（<id>.json）
+│   │   ├── locks/<slug>.lock       # 项目级文件锁（pid + 心跳）
+│   │   └── control/<id>.json       # 跨进程暂停/取消信号
 │   ├── browser/fanqie/             # 持久化登录会话
 │   ├── publish-artifacts/          # 发布失败截图
 │   └── settings.json               # 浏览器保存的模型配置（含密钥）
@@ -209,7 +232,11 @@ Quillmate/
 | DELETE | `/api/projects/[slug]` | 删除项目及本地全部文件 |
 | PUT | `/api/projects/[slug]/chapters/[index]` | 保存章节标题与正文 |
 | PUT | `/api/projects/[slug]/characters` | 保存角色数组 |
-| POST | `/api/projects/[slug]/jobs` | 启动后台任务 |
+| POST | `/api/projects/[slug]/jobs` | 启动后台任务（同项目并发返回 409） |
+| GET | `/api/projects/[slug]/jobs` | 当前运行任务 + 重启后中断的任务 |
+| POST | `/api/projects/[slug]/jobs/[id]/pause` | 请求暂停（当前用于定点修复） |
+| POST | `/api/projects/[slug]/jobs/[id]/cancel` | 请求取消任务 |
+| POST | `/api/projects/[slug]/jobs/[id]/retry` | 按原参数重试失败/取消/中断的任务 |
 | GET | `/api/jobs/[id]` | 查询任务状态与日志 |
 | GET | `/api/projects/[slug]/export` | 下载合并后的全书 Markdown |
 | GET | `/api/projects/[slug]/audit` | 读取总体审校报告并返回按章结构化结果 |
@@ -219,7 +246,9 @@ Quillmate/
 
 任务类型：`plan`、`extend`、`write`、`rewrite`、`repair`、`recanon`、`audit`、`export`、`fanqie-login`、`fanqie-publish`。其中 `extend` 用于补充章节大纲，`repair` 可按总体审校记录或章节审校遗留问题做单章/批量定点修复，`recanon` 用于从已写正文重建事实台账，`audit` 用于只读的总体审校。
 
-任务队列保存在进程内存中，重启服务后历史任务日志会清空，小说文件不受影响。
+任务快照保存在 `data/jobs/<id>.json`，项目锁和跨进程控制文件在 `data/jobs/locks`、`data/jobs/control`。同一项目同一时间只允许一个任务，并发请求返回 409；Next.js 开发模式下页面与 API 可能在不同进程，因此锁和暂停/取消信号都通过文件共享。
+
+服务重启后，仍在排队/运行的任务会标记为 `interrupted`，可在任务台点击「重试任务」按原参数重新执行（已写章节会跳过）。取消是协作式的：在章节或模型调用边界停止，已完成章节保留。任务默认最长 30 分钟，可用 `QUILLMATE_JOB_TIMEOUT_MS` 调整；单次模型请求超时用 `LLM_TIMEOUT_MS`（默认 3 分钟）。
 
 ## 番茄小说自动发布
 

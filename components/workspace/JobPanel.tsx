@@ -9,7 +9,11 @@ const STATUS_LABEL: Record<Job["status"], string> = {
   paused: "已暂停",
   done: "已完成",
   error: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
 };
+
+const RETRYABLE: Job["status"][] = ["error", "cancelled", "interrupted", "paused"];
 
 const TYPE_LABEL: Record<Job["type"], string> = {
   plan: "生成架构",
@@ -47,11 +51,15 @@ export function JobPanel({
   job,
   onStartJob,
   onPauseJob,
+  onCancelJob,
+  onRetryJob,
 }: {
   detail: ProjectDetail;
   job: Job | null;
   onStartJob: StartJobFn;
   onPauseJob?: () => void;
+  onCancelJob?: () => void;
+  onRetryJob?: () => void;
 }) {
   const [count, setCount] = useState("1");
   const [extendCount, setExtendCount] = useState("10");
@@ -175,7 +183,14 @@ export function JobPanel({
         <h2 className="panel-title">AI 任务台</h2>
         <span
           className={`status-pill ${
-            running ? "running" : job?.status === "error" ? "bad" : "ok"
+            running
+              ? "running"
+              : job &&
+                  (job.status === "error" ||
+                    job.status === "cancelled" ||
+                    job.status === "interrupted")
+                ? "bad"
+                : "ok"
           }`}
         >
           {statusText}
@@ -190,6 +205,28 @@ export function JobPanel({
               disabled={job.pauseRequested}
             >
               {job.pauseRequested ? "正在暂停…（当前章节完成后停止）" : "暂停定点修复"}
+            </button>
+          ) : null}
+
+          {running ? (
+            <button
+              className="btn btn-block"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "将取消当前任务；已完成的章节会保留，正在生成的内容可能被丢弃。继续？",
+                  )
+                ) {
+                  onCancelJob?.();
+                }
+              }}
+              disabled={job?.cancelRequested}
+            >
+              {job?.cancelRequested ? "正在取消…（当前模型调用结束后停止）" : "取消任务"}
+            </button>
+          ) : job && RETRYABLE.includes(job.status) ? (
+            <button className="btn btn-block" onClick={onRetryJob}>
+              重试任务（{TYPE_LABEL[job.type]}）
             </button>
           ) : null}
 

@@ -21,6 +21,16 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "publish", label: "发布" },
 ];
 
+function isTerminalStatus(status: Job["status"]): boolean {
+  return (
+    status === "done" ||
+    status === "error" ||
+    status === "paused" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
+}
+
 export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
   const [detail, setDetail] = useState(initialDetail);
   const [tab, setTab] = useState<TabKey>("overview");
@@ -45,11 +55,14 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
           cache: "no-store",
         });
         if (!response.ok) return;
-        const data = (await response.json()) as { job?: Job | null };
-        if (cancelled || !data.job) return;
-        if (data.job.status === "queued" || data.job.status === "running") {
-          setJob(data.job);
-        }
+        const data = (await response.json()) as {
+          job?: Job | null;
+          interrupted?: Job[];
+        };
+        if (cancelled) return;
+        // 优先接回正在运行的任务；没有则展示最近一次被服务重启中断的任务，供用户重试。
+        const restored = data.job ?? data.interrupted?.[0] ?? null;
+        if (restored) setJob(restored);
       } catch {
         // 接不回任务时按普通工作台状态处理。
       }
@@ -61,12 +74,7 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
 
   // 任务结束后重新拉取项目详情，章节、发布记录和统计会一起同步。
   useEffect(() => {
-    if (
-      !job ||
-      job.status === "done" ||
-      job.status === "error" ||
-      job.status === "paused"
-    ) {
+    if (!job || isTerminalStatus(job.status)) {
       return;
     }
     const timer = setInterval(async () => {
@@ -75,12 +83,7 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
         if (!response.ok) return;
         const next = (await response.json()) as Job;
         setJob(next);
-        if (
-          (next.status === "done" ||
-            next.status === "error" ||
-            next.status === "paused") &&
-          completedJobRef.current !== next.id
-        ) {
+        if (isTerminalStatus(next.status) && completedJobRef.current !== next.id) {
           completedJobRef.current = next.id;
           await refresh();
         }
@@ -129,6 +132,44 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
       });
       const data = (await response.json()) as Job & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "暂停任务失败");
+      setJob(data);
+    } catch (error) {
+      setJobError(errorMessage(error));
+    }
+  }
+
+  async function cancelJob() {
+    if (!job) return;
+    setJobError("");
+    try {
+      const response = await fetch(`/api/projects/${slug}/jobs/${job.id}/cancel`, {
+        method: "POST",
+      });
+      const data = (await response.json()) as Job & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "取消任务失败");
+      setJob(data);
+    } catch (error) {
+      setJobError(errorMessage(error));
+    }
+  }
+
+  async function retryJob() {
+    if (!job) return;
+    setJobError("");
+    try {
+      const response = await fetch(`/api/projects/${slug}/jobs/${job.id}/retry`, {
+        method: "POST",
+      });
+      const data = (await response.json()) as Job & { error?: string; job?: Job };
+      if (!response.ok) {
+        if (data.job) {
+          completedJobRef.current = null;
+          setJob(data.job);
+          return;
+        }
+        throw new Error(data.error ?? "重试任务失败");
+      }
+      completedJobRef.current = null;
       setJob(data);
     } catch (error) {
       setJobError(errorMessage(error));
@@ -222,6 +263,8 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
             job={job}
             onStartJob={startJob}
             onPauseJob={() => void pauseJob()}
+            onCancelJob={() => void cancelJob()}
+            onRetryJob={() => void retryJob()}
           />
         </aside>
       </div>

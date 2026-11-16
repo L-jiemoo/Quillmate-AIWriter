@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getActiveJob } from "@/lib/jobs";
+import { getActiveJob, getInterruptedJobs, JobConflictError } from "@/lib/jobs";
 import { startJob } from "@/lib/pipeline";
 import { errorMessage } from "@/lib/utils";
 import type { Job } from "@/lib/types";
@@ -25,7 +25,11 @@ interface RouteContext {
 }
 
 export async function GET(_request: Request, { params }: RouteContext) {
-  return NextResponse.json({ job: getActiveJob(params.slug) ?? null });
+  return NextResponse.json({
+    job: getActiveJob(params.slug) ?? null,
+    // 服务重启后留下的未完成任务，供前端展示并提供重试。
+    interrupted: getInterruptedJobs(params.slug),
+  });
 }
 
 export async function POST(request: Request, { params }: RouteContext) {
@@ -76,6 +80,13 @@ export async function POST(request: Request, { params }: RouteContext) {
     });
     return NextResponse.json(job, { status: 202 });
   } catch (error) {
+    // 并发请求在 acquireProjectSlot 内被拦截；返回正在运行的任务，前端可直接接回。
+    if (error instanceof JobConflictError) {
+      return NextResponse.json(
+        { error: error.message, job: error.job },
+        { status: 409 },
+      );
+    }
     return NextResponse.json({ error: errorMessage(error) }, { status: 400 });
   }
 }

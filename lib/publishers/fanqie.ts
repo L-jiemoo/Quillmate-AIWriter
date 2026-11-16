@@ -58,6 +58,8 @@ export interface FanqiePublishOptions {
   chapters: { index: number; title: string; content: string }[];
   onLog: LogFn;
   onChapterPublished?: (index: number) => void | Promise<void>;
+  // 每个章节开始前调用；抛出取消错误时关闭浏览器并终止发布。
+  checkCancelled?: () => void;
 }
 
 async function launch(headless: boolean, log: LogFn): Promise<BrowserContext> {
@@ -389,7 +391,10 @@ async function openLoginEntry(page: Page, log: LogFn): Promise<void> {
   }
 }
 
-export async function loginFanqie(log: LogFn): Promise<void> {
+export async function loginFanqie(
+  log: LogFn,
+  checkCancelled?: () => void,
+): Promise<void> {
   const context = await launch(false, log);
   // 用户可能登录完成后直接关窗，也可能中途放弃；用 close 事件区分这两种情况，
   // 避免把“手动关窗”误报成登录超时。
@@ -418,6 +423,7 @@ export async function loginFanqie(log: LogFn): Promise<void> {
     const deadline = Date.now() + 10 * 60 * 1000;
     let lastNotice = Date.now();
     while (Date.now() < deadline) {
+      checkCancelled?.();
       if (userClosed) break;
 
       let loggedIn = false;
@@ -455,6 +461,7 @@ export async function loginFanqie(log: LogFn): Promise<void> {
 }
 
 export async function publishFanqie(options: FanqiePublishOptions): Promise<void> {
+  options.checkCancelled?.();
   const log = options.onLog;
   const selectors: FanqieSelectors = {
     ...DEFAULT_SELECTORS,
@@ -516,6 +523,7 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
     // 每章都重新打开新建页，避免复用上一章编辑器时标题/正文残留。
     // 编辑器加载失败时先区分“登录失效”和“页面结构变化”，给出不同提示。
     for (const chapter of options.chapters) {
+      options.checkCancelled?.();
       log(`第 ${chapter.index} 章《${chapter.title}》：打开新建章节页…`);
       await activePage.goto(createUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       try {

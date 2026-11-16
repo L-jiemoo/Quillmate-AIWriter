@@ -260,6 +260,24 @@ export type StartJobFn = (
   payload?: Record<string, unknown>,
 ) => Promise<void>;
 
+export interface JobParams {
+  count?: number;
+  indices?: number[];
+  instruction?: string;
+  useReview?: boolean;
+  // 定点修复的问题来源：总体审校报告，或章节审校里的遗留问题。
+  source?: "audit" | "review";
+}
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "done"
+  | "error"
+  | "cancelled"
+  | "interrupted";
+
 export interface Job {
   id: string;
   slug: string;
@@ -274,11 +292,16 @@ export interface Job {
     | "export"
     | "fanqie-login"
     | "fanqie-publish";
-  status: "queued" | "running" | "paused" | "done" | "error";
+  status: JobStatus;
+  params: JobParams;
   pauseRequested?: boolean;
+  cancelRequested?: boolean;
+  cancelReason?: "user" | "timeout";
   logs: JobLog[];
   result?: string;
   error?: string;
   createdAt: string;
+  startedAt?: string;
+  endedAt?: string;
   updatedAt: string;
 }

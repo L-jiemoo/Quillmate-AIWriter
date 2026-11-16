@@ -1,8 +1,12 @@
 import path from "path";
 import { readSettingsSync } from "./settings";
 
-export const DATA_DIR = path.join(process.cwd(), "data");
+// QUILLMATE_DATA_DIR 只用于测试隔离；未设置时仍使用项目下的 data/。
+export const DATA_DIR = process.env.QUILLMATE_DATA_DIR?.trim()
+  ? path.resolve(process.env.QUILLMATE_DATA_DIR.trim())
+  : path.join(process.cwd(), "data");
 export const PROJECTS_DIR = path.join(DATA_DIR, "projects");
+export const JOBS_DIR = path.join(DATA_DIR, "jobs");
 export const BROWSER_PROFILE_DIR = path.join(DATA_DIR, "browser", "fanqie");
 export const ARTIFACT_DIR = path.join(DATA_DIR, "publish-artifacts");
 

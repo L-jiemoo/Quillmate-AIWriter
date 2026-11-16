@@ -10,6 +10,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function requestTimeoutMs(): number {
+  const raw = Number(process.env.LLM_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.round(raw);
+  return 180000;
+}
+
+// 单次模型请求的上限：避免网络挂起时后台任务一直停在 running。
+// 连接类错误仍会按 complete() 的退避策略重试。
+const REQUEST_TIMEOUT_MS = requestTimeoutMs();
+
 // 连接中断、限流和服务端 5xx 都属于可重试错误；鉴权、参数错误重试没有意义。
 function isRetryableError(error: unknown): boolean {
   if (error instanceof OpenAI.APIConnectionError) return true;
@@ -79,14 +89,17 @@ export class LLMClient {
     let response: OpenAI.Chat.Completions.ChatCompletion;
     for (let attemptNo = 1; ; attemptNo += 1) {
       try {
-        response = await this.getClient().chat.completions.create({
-          model: this.config.model,
-          messages,
-          // 事实抽取/审校需要稳定复现，允许调用方覆盖默认的高温创作参数。
-          temperature: options.temperature ?? this.config.temperature,
-          max_tokens: maxTokens,
-          ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
-        });
+        response = await this.getClient().chat.completions.create(
+          {
+            model: this.config.model,
+            messages,
+            // 事实抽取/审校需要稳定复现，允许调用方覆盖默认的高温创作参数。
+            temperature: options.temperature ?? this.config.temperature,
+            max_tokens: maxTokens,
+            ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
+          },
+          { timeout: REQUEST_TIMEOUT_MS },
+        );
         break;
       } catch (error) {
         if (attemptNo >= maxAttempts || !isRetryableError(error)) {

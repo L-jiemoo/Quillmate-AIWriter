@@ -3,8 +3,19 @@ import path from "path";
 import { emptyCanon, normalizeCanon, normalizeReviewResult } from "./canon";
 import { PROJECTS_DIR } from "./config";
 import {
+  readJsonOptional,
+  readJsonStrict,
+  readTextOptional,
+  readTextStrict,
+  StorageError,
+  writeJsonSafe,
+  writeTextSafe,
+  type BackupOptions,
+} from "./storage";
+import {
   clampInt,
   countWords,
+  errorMessage,
   isSafeSlug,
   nowIso,
   slugify,
@@ -67,30 +78,40 @@ function projectFile(slug: string, ...parts: string[]): string {
   return path.join(projectDir(slug), ...parts);
 }
 
+const BACKUP_KEEP = 20;
+
+function projectBackup(slug: string, relativePath: string): BackupOptions {
+  return {
+    dir: projectFile(slug, "backups"),
+    name: relativePath,
+    keep: BACKUP_KEEP,
+  };
+}
+
+// 缺失的文件可以按调用方约定使用默认值；损坏或 IO 错误必须向上抛出，
+// 绝不能把空数据当成真实内容继续写回磁盘。
 async function readJson<T>(filePath: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await fs.readFile(filePath, "utf8")) as T;
-  } catch {
-    return fallback;
-  }
+  return readJsonOptional(filePath, fallback);
 }
 
 async function readText(filePath: string, fallback = ""): Promise<string> {
-  try {
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return fallback;
-  }
+  return readTextOptional(filePath, fallback);
 }
 
-async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+async function writeJson(
+  filePath: string,
+  value: unknown,
+  backup?: BackupOptions,
+): Promise<void> {
+  await writeJsonSafe(filePath, value, backup ? { backup } : {});
 }
 
-async function writeText(filePath: string, value: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, value, "utf8");
+async function writeText(
+  filePath: string,
+  value: string,
+  backup?: BackupOptions,
+): Promise<void> {
+  await writeTextSafe(filePath, value, backup ? { backup } : {});
 }
 
 function defaultState(): ProjectState {
@@ -106,15 +127,25 @@ function defaultState(): ProjectState {
 }
 
 async function readCanon(slug: string): Promise<CanonFacts> {
-  const raw = await readJson<unknown>(projectFile(slug, "canon.json"), null);
+  // canon.json 缺失视为旧项目（空台账）；损坏则直接抛错，避免空台账覆盖真实事实。
+  const raw = await readJsonOptional<unknown>(projectFile(slug, "canon.json"), null);
   return raw ? normalizeCanon(raw) : emptyCanon();
 }
 
 export async function saveCanon(slug: string, canon: CanonFacts): Promise<void> {
-  await writeJson(projectFile(slug, "canon.json"), canon);
+  // 先确认项目文件可读，再写台账，避免台账已落盘但项目元数据损坏的半提交状态。
   const file = await getProjectFile(slug);
+  await writeJson(
+    projectFile(slug, "canon.json"),
+    canon,
+    projectBackup(slug, "canon.json"),
+  );
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 }
 
 export async function getCanon(slug: string): Promise<CanonFacts> {
@@ -252,8 +283,27 @@ export async function deleteProject(slug: string): Promise<void> {
 }
 
 export async function getProjectFile(slug: string): Promise<ProjectFile> {
-  const data = await readJson<ProjectFile | null>(projectFile(slug, "project.json"), null);
-  if (!data || !data.meta) throw new Error(`项目 ${slug} 不存在`);
+  let data: ProjectFile;
+  try {
+    data = await readJsonStrict<ProjectFile>(projectFile(slug, "project.json"));
+  } catch (error) {
+    if (error instanceof StorageError && error.code === "not_found") {
+      throw new StorageError(
+        "not_found",
+        projectFile(slug, "project.json"),
+        `项目 ${slug} 不存在`,
+        error,
+      );
+    }
+    throw error;
+  }
+  if (!data || typeof data !== "object" || !data.meta) {
+    throw new StorageError(
+      "corrupted",
+      projectFile(slug, "project.json"),
+      `项目 ${slug} 的 project.json 结构不完整`,
+    );
+  }
   // 旧项目或手工编辑过的 project.json 可能缺少发布配置；
   // 读取时与默认值做深合并，保证调用方拿到的结构始终完整。
   const fallback = defaultProjectFile(data.meta);
@@ -299,7 +349,9 @@ export async function listProjects(): Promise<ProjectSummary[]> {
             words,
             updatedAt: file.meta.updatedAt,
           };
-        } catch {
+        } catch (error) {
+          // 单个项目损坏不应拖垮首页，但要在服务端日志里留下明确线索。
+          console.warn(`[projects] 跳过无法读取的项目 ${entry.name}：${errorMessage(error)}`);
           return null;
         }
       }),
@@ -312,7 +364,8 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
   const file = await getProjectFile(slug);
-  const plan = await readJson<ProjectPlan>(projectFile(slug, "plan.json"), DEFAULT_PLAN);
+  // plan.json 是项目目录骨架：缺失或损坏都不能用空大纲代替，否则会误导后续写入。
+  const plan = await readJsonStrict<ProjectPlan>(projectFile(slug, "plan.json"));
   const characters = await readJson<Character[]>(projectFile(slug, "characters.json"), []);
   const state = await readState(slug);
   const canon = await readCanon(slug);
@@ -355,11 +408,27 @@ export async function savePlan(
   outlineMd: string,
 ): Promise<void> {
   const file = await getProjectFile(slug);
-  await writeJson(projectFile(slug, "plan.json"), plan);
-  await writeText(projectFile(slug, "world.md"), bible.endsWith("\n") ? bible : `${bible}\n`);
-  await writeText(projectFile(slug, "outline.md"), outlineMd.endsWith("\n") ? outlineMd : `${outlineMd}\n`);
+  await writeJson(
+    projectFile(slug, "plan.json"),
+    plan,
+    projectBackup(slug, "plan.json"),
+  );
+  await writeText(
+    projectFile(slug, "world.md"),
+    bible.endsWith("\n") ? bible : `${bible}\n`,
+    projectBackup(slug, "world.md"),
+  );
+  await writeText(
+    projectFile(slug, "outline.md"),
+    outlineMd.endsWith("\n") ? outlineMd : `${outlineMd}\n`,
+    projectBackup(slug, "outline.md"),
+  );
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 }
 
 export async function appendChapters(
@@ -367,18 +436,27 @@ export async function appendChapters(
   chapters: ChapterPlan[],
 ): Promise<ProjectPlan> {
   const file = await getProjectFile(slug);
-  const plan = await readJson<ProjectPlan>(projectFile(slug, "plan.json"), DEFAULT_PLAN);
+  // 必须读到真实大纲再合并；损坏时直接抛错，避免用“仅新增章节”覆盖原有目录。
+  const plan = await readJsonStrict<ProjectPlan>(projectFile(slug, "plan.json"));
   // 以章节序号去重，防止模型重复返回已有章节；合并后重新排序，
   // 让目录始终按章节号递增，而不是按模型输出顺序排列。
   const existing = new Set(plan.chapters.map((chapter) => chapter.index));
   const additions = chapters.filter((chapter) => !existing.has(chapter.index));
 
   plan.chapters = [...plan.chapters, ...additions].sort((a, b) => a.index - b.index);
-  await writeJson(projectFile(slug, "plan.json"), plan);
+  await writeJson(
+    projectFile(slug, "plan.json"),
+    plan,
+    projectBackup(slug, "plan.json"),
+  );
 
   file.meta.targetChapters = plan.chapters.length;
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 
   return plan;
 }
@@ -404,18 +482,34 @@ export async function appendOutlineSection(
   // 这样用户在 outline.md 里的手工修订不会被补充大纲覆盖。
   const outlinePath = projectFile(slug, "outline.md");
   const current = (await readText(outlinePath)).trimEnd();
-  await writeText(outlinePath, `${current}${current ? "\n" : ""}${lines.join("\n")}`);
+  await writeText(
+    outlinePath,
+    `${current}${current ? "\n" : ""}${lines.join("\n")}`,
+    projectBackup(slug, "outline.md"),
+  );
 
   const file = await getProjectFile(slug);
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 }
 
 export async function saveCharacters(slug: string, characters: Character[]): Promise<void> {
   const file = await getProjectFile(slug);
-  await writeJson(projectFile(slug, "characters.json"), characters);
+  await writeJson(
+    projectFile(slug, "characters.json"),
+    characters,
+    projectBackup(slug, "characters.json"),
+  );
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 }
 
 export async function updateProject(slug: string, patch: UpdateProjectPatch): Promise<ProjectMeta> {
@@ -449,14 +543,20 @@ export async function updateProject(slug: string, patch: UpdateProjectPatch): Pr
   }
 
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
   return file.meta;
 }
 
 export async function writeChapterFile(slug: string, index: number, content: string): Promise<void> {
+  // 覆盖正文前保留上一版；AI 重写成功时也能从这里找回原稿。
   await writeText(
     projectFile(slug, "chapters", `${index}.md`),
     content.endsWith("\n") ? content : `${content}\n`,
+    projectBackup(slug, `chapters/${index}.md`),
   );
 }
 
@@ -488,7 +588,11 @@ export async function saveRejectedDraft(
   const state = await readState(slug);
   state.rejectedDrafts = { ...state.rejectedDrafts, [String(input.index)]: record };
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
   return record;
 }
 
@@ -511,7 +615,11 @@ export async function markChapterRepaired(slug: string, index: number): Promise<
   const state = await readState(slug);
   state.repairs[String(index)] = nowIso();
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
 }
 
 export async function markChapterWritten(
@@ -528,11 +636,19 @@ export async function markChapterWritten(
   state.reviews[String(index)] = review;
   delete state.rejectedDrafts[String(index)];
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
 
   const file = await getProjectFile(slug);
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 }
 
 export async function updateChapterSummary(
@@ -547,7 +663,11 @@ export async function updateChapterSummary(
   const review = state.reviews[String(index)];
   if (review) review.summary = trimmed;
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
 }
 
 export async function saveChapter(
@@ -558,7 +678,8 @@ export async function saveChapter(
 ): Promise<ChapterContent> {
   if (!Number.isInteger(index) || index < 1) throw new Error("章节序号不合法");
 
-  const plan = await readJson<ProjectPlan>(projectFile(slug, "plan.json"), DEFAULT_PLAN);
+  // 必须读到真实大纲再保存；损坏时抛错，避免把章节写到错误骨架下。
+  const plan = await readJsonStrict<ProjectPlan>(projectFile(slug, "plan.json"));
   const chapter = plan.chapters.find((item) => item.index === index);
   if (!chapter) throw new Error(`第 ${index} 章不在当前大纲中`);
 
@@ -566,7 +687,11 @@ export async function saveChapter(
   // 再同步 state 和项目更新时间，首页统计才不会落后于编辑器。
   if (title && title.trim()) {
     chapter.title = title.trim();
-    await writeJson(projectFile(slug, "plan.json"), plan);
+    await writeJson(
+      projectFile(slug, "plan.json"),
+      plan,
+      projectBackup(slug, "plan.json"),
+    );
   }
   await writeChapterFile(slug, index, content);
 
@@ -577,11 +702,19 @@ export async function saveChapter(
   if (content.trim()) delete state.rejectedDrafts[String(index)];
   state.summaries[String(index)] = state.summaries[String(index)] ?? chapter.summary;
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
 
   const file = await getProjectFile(slug);
   file.meta.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "project.json"), file);
+  await writeJson(
+    projectFile(slug, "project.json"),
+    file,
+    projectBackup(slug, "project.json"),
+  );
 
   return {
     index,
@@ -644,7 +777,11 @@ export async function exportBookFile(slug: string): Promise<{
 export async function writeAuditReport(slug: string, content: string): Promise<string> {
   await getProjectFile(slug);
   const target = projectFile(slug, "audit.md");
-  await writeText(target, content.endsWith("\n") ? content : `${content}\n`);
+  await writeText(
+    target,
+    content.endsWith("\n") ? content : `${content}\n`,
+    projectBackup(slug, "audit.md"),
+  );
   return path.relative(process.cwd(), target).split(path.sep).join("/");
 }
 
@@ -658,12 +795,16 @@ export async function getAuditReport(slug: string): Promise<AuditReport> {
   const target = projectFile(slug, "audit.md");
   try {
     const [content, stat] = await Promise.all([
-      fs.readFile(target, "utf8"),
+      readTextStrict(target),
       fs.stat(target),
     ]);
     return { content, updatedAt: stat.mtime.toISOString() };
-  } catch {
-    return { content: "", updatedAt: null };
+  } catch (error) {
+    // 只有“报告尚未生成”可以返回空；权限/IO 错误必须暴露，否则会被误判为没有审校记录。
+    if (error instanceof StorageError && error.code === "not_found") {
+      return { content: "", updatedAt: null };
+    }
+    throw error;
   }
 }
 
@@ -682,7 +823,11 @@ export async function appendPublishRecord(slug: string, record: PublishRecord): 
   // 注意：超过上限后最早的成功记录也会被裁掉，对应章节将重新被视为待发布。
   state.publishHistory = [...state.publishHistory, record].slice(-100);
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
 }
 
 export async function clearPublishHistory(slug: string): Promise<void> {
@@ -690,5 +835,181 @@ export async function clearPublishHistory(slug: string): Promise<void> {
   // 发布记录同时承担去重作用：清空后所有已写章节都会重新被视为待发布。
   state.publishHistory = [];
   state.updatedAt = nowIso();
-  await writeJson(projectFile(slug, "state.json"), state);
+  await writeJson(
+    projectFile(slug, "state.json"),
+    state,
+    projectBackup(slug, "state.json"),
+  );
+}
+
+export type IntegritySeverity = "critical" | "warning";
+
+export interface IntegrityIssue {
+  severity: IntegritySeverity;
+  code: string;
+  message: string;
+}
+
+export interface IntegrityReport {
+  slug: string;
+  ok: boolean;
+  issues: IntegrityIssue[];
+  chaptersOnDisk: number[];
+}
+
+export async function checkProjectIntegrity(slug: string): Promise<IntegrityReport> {
+  let file: ProjectFile;
+  let plan: ProjectPlan;
+  let state: ProjectState;
+  let canon: CanonFacts;
+  try {
+    file = await getProjectFile(slug);
+    plan = await readJsonStrict<ProjectPlan>(projectFile(slug, "plan.json"));
+    state = await readState(slug);
+    canon = await readCanon(slug);
+  } catch (error) {
+    // 核心文件无法读取时，完整性报告本身应返回 critical，而不是直接抛错。
+    if (error instanceof StorageError) {
+      return {
+        slug,
+        ok: false,
+        issues: [
+          {
+            severity: "critical",
+            code: `storage-${error.code}`,
+            message: error.message,
+          },
+        ],
+        chaptersOnDisk: [],
+      };
+    }
+    throw error;
+  }
+  const issues: IntegrityIssue[] = [];
+  const add = (severity: IntegritySeverity, code: string, message: string) => {
+    issues.push({ severity, code, message });
+  };
+
+  const indexSet = new Set<number>();
+  const chapterByIndex = new Map<number, ChapterPlan>();
+  for (const chapter of plan.chapters) {
+    if (!Number.isInteger(chapter.index) || chapter.index < 1) {
+      add("critical", "invalid-index", `章节序号不合法：${String(chapter.index)}`);
+      continue;
+    }
+    if (indexSet.has(chapter.index)) {
+      add("critical", "duplicate-index", `章节序号重复：第 ${chapter.index} 章`);
+      continue;
+    }
+    indexSet.add(chapter.index);
+    chapterByIndex.set(chapter.index, chapter);
+    if (!chapter.title?.trim()) {
+      add("critical", "empty-title", `第 ${chapter.index} 章标题为空`);
+    }
+    if (!chapter.summary?.trim()) {
+      add("warning", "empty-summary", `第 ${chapter.index} 章摘要为空`);
+    }
+    if (!Array.isArray(chapter.keyBeats)) {
+      add("warning", "invalid-key-beats", `第 ${chapter.index} 章 keyBeats 不是数组`);
+    }
+  }
+
+  const sortedIndices = [...indexSet].sort((a, b) => a - b);
+  sortedIndices.forEach((value, offset) => {
+    if (value !== offset + 1) {
+      add(
+        "warning",
+        "non-contiguous-index",
+        `章节序号不连续：期望第 ${offset + 1} 章，实际为第 ${value} 章`,
+      );
+    }
+  });
+
+  for (const index of state.written) {
+    if (!indexSet.has(index)) {
+      add("critical", "written-not-in-plan", `state 标记已写第 ${index} 章，但大纲中不存在`);
+    }
+  }
+
+  const chaptersDir = projectFile(slug, "chapters");
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(chaptersDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      add("critical", "missing-chapters-dir", "chapters 目录不存在");
+    } else {
+      throw error;
+    }
+  }
+
+  const chaptersOnDisk = entries
+    .map((entry) => /^(\d+)\.md$/.exec(entry))
+    .filter((match): match is RegExpExecArray => Boolean(match))
+    .map((match) => Number(match[1]))
+    .filter((index) => Number.isInteger(index) && index > 0)
+    .sort((a, b) => a - b);
+  const diskSet = new Set(chaptersOnDisk);
+
+  for (const index of chaptersOnDisk) {
+    if (!indexSet.has(index)) {
+      add("warning", "orphan-chapter-file", `第 ${index} 章正文存在，但大纲中没有该章节`);
+    }
+  }
+
+  for (const index of indexSet) {
+    const written = state.written.includes(index);
+    const exists = diskSet.has(index);
+    if (written && !exists) {
+      add("critical", "missing-chapter-file", `第 ${index} 章标记为已写，但正文文件缺失`);
+      continue;
+    }
+    if (!written && exists) {
+      const content = await readTextOptional(projectFile(slug, "chapters", `${index}.md`));
+      if (content.trim()) {
+        add("warning", "unmarked-chapter-file", `第 ${index} 章有正文，但未标记为已写`);
+      }
+    }
+  }
+
+  const checkStateKeys = (label: string, keys: string[]) => {
+    for (const key of keys) {
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 1 || !indexSet.has(index)) {
+        add("warning", "invalid-state-key", `${label} 中存在无效章节键：${key}`);
+      }
+    }
+  };
+  checkStateKeys("摘要", Object.keys(state.summaries));
+  checkStateKeys("审校记录", Object.keys(state.reviews));
+  checkStateKeys("修复记录", Object.keys(state.repairs));
+  checkStateKeys("未通过草稿", Object.keys(state.rejectedDrafts));
+
+  if (file.meta.slug !== slug) {
+    add("warning", "slug-mismatch", `project.json 中的 slug（${file.meta.slug}）与目录名不一致`);
+  }
+
+  const writtenIndices = state.written.filter((index) => indexSet.has(index));
+  const latestWritten = writtenIndices.length ? Math.max(...writtenIndices) : 0;
+  if (canon.lastChapter < latestWritten) {
+    add(
+      "warning",
+      "canon-lagging",
+      `事实台账只覆盖到第 ${canon.lastChapter} 章，正文已写到第 ${latestWritten} 章，需要重建台账`,
+    );
+  }
+  if (canon.lastChapter > latestWritten) {
+    add(
+      "critical",
+      "canon-ahead",
+      `事实台账覆盖到第 ${canon.lastChapter} 章，但正文只写到第 ${latestWritten} 章`,
+    );
+  }
+
+  return {
+    slug,
+    ok: !issues.some((issue) => issue.severity === "critical"),
+    issues,
+    chaptersOnDisk,
+  };
 }

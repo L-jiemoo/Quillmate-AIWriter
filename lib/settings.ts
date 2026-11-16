@@ -2,7 +2,10 @@ import { promises as fs, readFileSync, statSync } from "fs";
 import path from "path";
 import type { LLMProvider } from "./config";
 
-export const SETTINGS_FILE = path.join(process.cwd(), "data", "settings.json");
+const DATA_DIR = process.env.QUILLMATE_DATA_DIR?.trim()
+  ? path.resolve(process.env.QUILLMATE_DATA_DIR.trim())
+  : path.join(process.cwd(), "data");
+export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 export interface SavedSettings {
   provider: LLMProvider;

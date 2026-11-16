@@ -20,7 +20,20 @@ import {
   reconcileCanonWithChapters,
 } from "./canon";
 import { getRuntimeConfig } from "./config";
-import { createJob, logJob } from "./jobs";
+import {
+  acquireProjectSlot,
+  clearJobControl,
+  flushJob,
+  getJob,
+  isPauseRequested,
+  JOB_HEARTBEAT_MS,
+  JOB_TIMEOUT_MS,
+  JobCancelledError,
+  logJob,
+  releaseProjectSlot,
+  throwIfCancelled,
+  touchProjectLock,
+} from "./jobs";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
 import {
   appendChapters,
@@ -49,6 +62,7 @@ import type {
   Character,
   ExtractedFacts,
   Job,
+  JobParams,
   ProjectDetail,
   ProjectMeta,
   ReviewResult,
@@ -67,31 +81,46 @@ const JOB_LABELS: Record<Job["type"], string> = {
   "fanqie-publish": "发布到番茄",
 };
 
-interface JobParams {
-  count?: number;
-  indices?: number[];
-  instruction?: string;
-  useReview?: boolean;
-  // 定点修复的问题来源：总体审校报告，或章节审校里的遗留问题。
-  source?: "audit" | "review";
-}
-
 export async function startJob(
   slug: string,
   type: Job["type"],
   params: JobParams = {},
 ): Promise<Job> {
   await getProjectFile(slug);
-  const job = createJob(slug, type);
+  // 锁与任务创建必须同步完成；中间不能再有 await，否则两个请求都能通过检查。
+  const job = acquireProjectSlot(slug, type, params);
   // 任务在后台自行推进，HTTP 只返回 job 快照；前端靠 /api/jobs/[id] 轮询日志。
   // 这里刻意不 await，否则长任务会一直占住请求。
   void runJob(job, params);
   return job;
 }
 
+export async function retryJob(slug: string, id: string): Promise<Job> {
+  const job = getJob(id);
+  if (!job || job.slug !== slug) {
+    throw new Error("任务不存在或不属于当前项目");
+  }
+  if (
+    job.status !== "error" &&
+    job.status !== "cancelled" &&
+    job.status !== "interrupted" &&
+    job.status !== "paused"
+  ) {
+    throw new Error("只有失败、取消、中断或暂停的任务可以重试");
+  }
+  return startJob(slug, job.type, job.params);
+}
+
+function formatDuration(ms: number): string {
+  if (ms >= 60000) return `${Math.round(ms / 60000)} 分钟`;
+  return `${Math.max(1, Math.round(ms / 1000))} 秒`;
+}
+
 async function runJob(job: Job, params: JobParams): Promise<void> {
   job.status = "running";
-  job.updatedAt = nowIso();
+  job.startedAt = nowIso();
+  job.updatedAt = job.startedAt;
+  await flushJob(job);
   logJob(job, `任务开始：${JOB_LABELS[job.type]}`);
 
   const runtime = getRuntimeConfig();
@@ -99,7 +128,31 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
     logJob(job, "当前为 mock 模式，将生成示例内容；可在「模型设置」页填写 API Key 接入真实模型。");
   }
 
+  // 任务级超时：到点后设置取消标志，各章节循环在下一个检查点停止。
+  // 这样不会在模型调用进行中强行丢弃线程，避免写入半成品。
+  const timeoutTimer = setTimeout(() => {
+    if (job.status !== "running" || job.cancelRequested) return;
+    job.cancelRequested = true;
+    job.cancelReason = "timeout";
+    logJob(
+      job,
+      `任务运行超过 ${formatDuration(JOB_TIMEOUT_MS)}，准备停止；已完成章节会保留。`,
+    );
+  }, JOB_TIMEOUT_MS);
+  (timeoutTimer as unknown as { unref?: () => void }).unref?.();
+
+  // 锁文件心跳：跨进程存活证明。进程崩溃后心跳停止，其他进程可回收锁。
+  const heartbeatTimer = setInterval(() => {
+    try {
+      touchProjectLock(job.slug, job.id);
+    } catch {
+      // 心跳失败不应中断写作任务，下一次心跳会重试。
+    }
+  }, JOB_HEARTBEAT_MS);
+  (heartbeatTimer as unknown as { unref?: () => void }).unref?.();
+
   try {
+    throwIfCancelled(job);
     let paused = false;
     switch (job.type) {
       case "plan":
@@ -142,6 +195,7 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
         await runFanqiePublish(job);
         break;
     }
+    throwIfCancelled(job);
     if (paused) {
       job.status = "paused";
       logJob(job, "任务已暂停");
@@ -152,11 +206,27 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
   } catch (error) {
     // 后台任务是脱离请求执行的，异常必须先写回 job 对象；
     // 否则前端轮询只能看到任务停在 running，用户会误以为还在生成。
-    job.status = "error";
-    job.error = errorMessage(error);
-    logJob(job, `任务失败：${job.error}`);
+    if (error instanceof JobCancelledError) {
+      job.status = error.reason === "timeout" ? "error" : "cancelled";
+      job.error =
+        error.reason === "timeout"
+          ? `任务超时（超过 ${formatDuration(JOB_TIMEOUT_MS)}）`
+          : "任务已取消";
+      logJob(job, job.error);
+    } else {
+      job.status = "error";
+      job.error = errorMessage(error);
+      logJob(job, `任务失败：${job.error}`);
+    }
   } finally {
-    job.updatedAt = nowIso();
+    clearTimeout(timeoutTimer);
+    clearInterval(heartbeatTimer);
+    job.endedAt = nowIso();
+    job.updatedAt = job.endedAt;
+    // 任务进入任何终态（完成/失败/暂停/取消）都必须释放项目锁和控制文件。
+    releaseProjectSlot(job.slug, job.id);
+    clearJobControl(job.id);
+    await flushJob(job);
   }
 }
 
@@ -164,11 +234,13 @@ async function runPlan(job: Job): Promise<void> {
   const file = await getProjectFile(job.slug);
   logJob(job, "架构师正在构思世界观、主线与章节细纲…");
   const generated = await generatePlan(file.meta);
+  throwIfCancelled(job);
   await savePlan(job.slug, generated.plan, generated.bible, generated.outlineMd);
   logJob(job, `已生成 ${generated.plan.chapters.length} 章细纲`);
 
   logJob(job, "角色设计师正在创建人物档案…");
   const characters = await generateCharacters(file.meta, generated);
+  throwIfCancelled(job);
   await saveCharacters(job.slug, characters);
   logJob(job, `已生成 ${characters.length} 位角色：${characters.map((item) => item.name).join("、")}`);
 }
@@ -203,6 +275,7 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     summaries,
     count,
   );
+  throwIfCancelled(job);
   const plan = await appendChapters(job.slug, chapters);
   await appendOutlineSection(job.slug, chapters);
 
@@ -291,8 +364,9 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
   // 每一轮都基于“本章写作前的事实台账”重新检查。
   // 不能把本章自己抽取到的事实先并进去，否则“吴副官复活”会被自己的抽取结果掩盖。
   for (let attempt = 0; attempt <= maxRepairs; attempt += 1) {
+    throwIfCancelled(input.job);
     // 暂停只影响后续轮次：当前章节仍完成一次检查并写回，避免留下半成品。
-    if (input.job.pauseRequested && attempt > 0) break;
+    if (isPauseRequested(input.job) && attempt > 0) break;
 
     const mechanical = [
       ...deadNameSuspicions(auditCanon, currentText, input.chapter.index),
@@ -349,6 +423,9 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         continuityOk: false,
       };
     }
+
+    // 取消/超时发生在模型调用期间时，先停在合并与写回之前，避免留下半成品。
+    throwIfCancelled(input.job);
 
     // 冲突判定用截至本章的台账；持久化仍合并进完整台账，避免后文事实被覆盖或丢失。
     const merged = mergeCanon(
@@ -478,6 +555,7 @@ async function runWrite(job: Job, requested: number): Promise<void> {
   // 逐章串行：每章写完立即落盘并更新摘要，任务中途失败时，
   // 已完成的章节仍然保留，history 和上一章结尾也会持续传给下一章。
   for (const chapter of pending) {
+    throwIfCancelled(job);
     const chapterPlan = detail.plan.chapters.find((item) => item.index === chapter.index);
     if (!chapterPlan) continue;
 
@@ -510,6 +588,7 @@ async function runWrite(job: Job, requested: number): Promise<void> {
       rewriteInstruction: "",
       reviewFeedback: "",
     });
+    throwIfCancelled(job);
     text = result.text;
 
     if (!result.passed) {
@@ -614,6 +693,7 @@ async function runRewrite(
   let paused = false;
 
   for (const target of targets) {
+    throwIfCancelled(job);
     const chapterPlan = detail.plan.chapters.find((item) => item.index === target.index);
     if (!chapterPlan) continue;
 
@@ -698,6 +778,7 @@ async function runRewrite(
       rewriteInstruction: instruction,
       reviewFeedback,
     });
+    throwIfCancelled(job);
     text = result.text;
 
     if (!result.passed) {
@@ -815,7 +896,8 @@ async function runRepair(
   let paused = false;
 
   for (const target of targets) {
-    if (job.pauseRequested) {
+    throwIfCancelled(job);
+    if (isPauseRequested(job)) {
       paused = true;
       break;
     }
@@ -933,6 +1015,7 @@ async function runRepair(
       rewriteInstruction: `根据${sourceLabel}做定点修复。`,
       reviewFeedback: "",
     });
+    throwIfCancelled(job);
     text = result.text;
 
     // 定点修复的目标就是正文本身：先备份原稿，再把修复稿写回章节。
@@ -1029,6 +1112,7 @@ async function runRecanon(job: Job): Promise<void> {
   let failed = 0;
 
   for (const chapter of written) {
+    throwIfCancelled(job);
     const chapterPlan =
       detail.plan.chapters.find((item) => item.index === chapter.index) ?? {
         index: chapter.index,
@@ -1049,6 +1133,7 @@ async function runRecanon(job: Job): Promise<void> {
         ),
         chapter.content,
       );
+      throwIfCancelled(job);
       const merged = mergeCanon(canon, extracted, chapter.index, "write");
       canon = merged.canon;
 
@@ -1149,6 +1234,7 @@ async function runAudit(job: Job): Promise<void> {
   ];
 
   for (let i = 0; i < written.length; i += 1) {
+    throwIfCancelled(job);
     const chapter = written[i];
     const chapterPlan =
       detail.plan.chapters.find((item) => item.index === chapter.index) ?? {
@@ -1240,6 +1326,7 @@ async function runAudit(job: Job): Promise<void> {
       };
     }
 
+    throwIfCancelled(job);
     const merged = mergeCanon(canon, extracted, chapter.index, "write");
     // 机械线索只作为审校提示；模型核对后如果没有报问题，不能反过来再当成问题写回。
     const issues = mergeIssues(audit.issues, merged.conflicts);
@@ -1303,18 +1390,24 @@ async function runAudit(job: Job): Promise<void> {
 }
 
 async function runExport(job: Job): Promise<void> {
+  throwIfCancelled(job);
   const result = await exportBookFile(job.slug);
   job.result = result.relativePath;
   logJob(job, `已生成全书文件：${result.relativePath}（${result.chapters} 章，约 ${result.words} 字）`);
 }
 
 async function runFanqieLogin(job: Job): Promise<void> {
+  throwIfCancelled(job);
   logJob(job, "即将打开浏览器窗口，请在其中完成番茄作家专区的扫码或验证码登录。");
-  await loginFanqie((message) => logJob(job, message));
+  await loginFanqie(
+    (message) => logJob(job, message),
+    () => throwIfCancelled(job),
+  );
   job.result = "登录会话已保存";
 }
 
 async function runFanqiePublish(job: Job): Promise<void> {
+  throwIfCancelled(job);
   const file = await getProjectFile(job.slug);
   const config = file.publish.fanqie;
   if (!config.bookName.trim()) throw new Error("请先在「发布」页填写番茄书名");
@@ -1366,6 +1459,7 @@ async function runFanqiePublish(job: Job): Promise<void> {
         });
       },
       onLog: (message) => logJob(job, message),
+      checkCancelled: () => throwIfCancelled(job),
     });
 
     if (config.autoSubmit) {
