@@ -232,6 +232,8 @@ npm run db:rollback # 回滚到迁移前快照
 
 CI 位于 `.github/workflows/ci.yml`，在 push 到 `main` 和 Pull Request 时执行 `npm ci → lint → typecheck → test:coverage → build`，并上传 `coverage/` 报告。CI 不配置 API Key，不调用真实模型，也不执行真实番茄发布。
 
+`@emnapi/core` 和 `@emnapi/runtime` 以固定版本保留在开发依赖中：npm 在 Windows 上重新生成 lockfile 时可能丢失 Linux 可选依赖，导致 CI 的 `npm ci` 报 lockfile 不同步；不要随意移除这两项。
+
 真实模型测试默认跳过；确认要消耗 API 费用后再显式开启：
 
 ```bash
