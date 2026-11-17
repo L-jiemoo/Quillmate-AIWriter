@@ -85,6 +85,7 @@ async function readProjectFiles(slug: string): Promise<Record<string, string>> {
     "outline.md",
     "characters.json",
     "project.json",
+    "canon.json",
   ];
   const entries = await Promise.all(
     names.map(async (name) => [
@@ -124,6 +125,99 @@ describe("架构统一提交", () => {
     expect(finished.status).toBe("error");
     expect(finished.error).toContain("模拟角色生成失败");
     expect(await readProjectFiles(slug)).toEqual(before);
+    expect((await store.getCanon(slug)).characters).toEqual([]);
+  });
+
+  it("架构生成成功后建立人物基线，等待正文确认", async () => {
+    const slug = (await store.createProject({ title: "初始台账", targetChapters: 3 }))
+      .meta.slug;
+
+    const job = await pipeline.startJob(slug, "plan");
+    const finished = await waitForJob(job.id);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.canon.lastChapter).toBe(0);
+    expect(detail.canon.characters.map((item) => item.name).sort()).toEqual(
+      detail.characters.map((item) => item.name).sort(),
+    );
+    expect(
+      detail.canon.characters.every(
+        (item) =>
+          item.chapter === 0 &&
+          item.statusChapter === 0 &&
+          item.status === "unknown",
+      ),
+    ).toBe(true);
+    expect(detail.canon.items).toEqual([]);
+    expect(detail.canon.rules).toEqual([]);
+    expect(detail.canon.timeline).toEqual({ currentDay: "", deadlines: [] });
+    expect(
+      finished.logs.some((line) => line.message.includes("架构初始事实台账")),
+    ).toBe(true);
+  });
+
+  it("已有正文时不初始化台账，避免把未知状态当成事实", async () => {
+    const slug = (await store.createProject({ title: "已有正文", targetChapters: 3 }))
+      .meta.slug;
+    await store.savePlan(
+      slug,
+      {
+        logline: "",
+        tags: [],
+        chapters: [
+          { index: 1, title: "旧章", summary: "旧摘要", keyBeats: [] },
+        ],
+      },
+      "# 旧世界观",
+      "# 旧大纲",
+    );
+    await store.writeChapterFile(slug, 1, "已有正文", {
+      source: "user",
+      title: "旧章",
+      summary: "旧摘要",
+    });
+    await store.markChapterWritten(slug, 1, "旧摘要", {
+      summary: "旧摘要",
+      issues: [],
+      continuityOk: true,
+    });
+    const before = await store.getCanon(slug);
+    expect(before.characters).toEqual([]);
+
+    const job = await pipeline.startJob(slug, "plan");
+    const finished = await waitForJob(job.id);
+    expect(finished.status, finished.error).toBe("done");
+    expect(await store.getCanon(slug)).toEqual(before);
+  });
+
+  it("已有手工台账时不覆盖", async () => {
+    const slug = (await store.createProject({ title: "手工台账", targetChapters: 3 }))
+      .meta.slug;
+    const manual = {
+      characters: [
+        {
+          name: "沈烛",
+          aliases: ["提灯人"],
+          status: "alive" as const,
+          location: "长街",
+          note: "手工确认：第一章已在长街登场",
+          statusChapter: 1,
+          chapter: 1,
+        },
+      ],
+      items: [],
+      timeline: { currentDay: "第一日", deadlines: [] },
+      rules: ["手工规则：灯灭即死"],
+      lastChapter: 1,
+      updatedAt: "2026-11-17T00:00:00.000Z",
+    };
+    await store.saveCanon(slug, manual);
+
+    const job = await pipeline.startJob(slug, "plan");
+    const finished = await waitForJob(job.id);
+    expect(finished.status, finished.error).toBe("done");
+    expect(await store.getCanon(slug)).toEqual(manual);
   });
 
   it("成功后保留用户人物卡、更新 AI 人物并补齐大纲章节", async () => {

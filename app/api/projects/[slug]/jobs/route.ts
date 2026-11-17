@@ -73,6 +73,9 @@ export async function POST(request: Request, { params }: RouteContext) {
     if (body.type === "rewrite" && !indices.length) {
       return NextResponse.json({ error: "请选择要重写的章节" }, { status: 400 });
     }
+    if (body.type === "repair" && body.source === "draft" && !indices.length) {
+      return NextResponse.json({ error: "请选择要修复的草稿" }, { status: 400 });
+    }
     if (body.type === "fanqie-publish") {
       requireConfirm(body, "confirmPublish", true, "发布操作需要二次确认");
     }
@@ -94,7 +97,12 @@ export async function POST(request: Request, { params }: RouteContext) {
       indices,
       instruction,
       useReview: body.useReview === true,
-      source: body.source === "review" ? "review" : "audit",
+      source:
+        body.type === "repair" && body.source === "draft"
+          ? "draft"
+          : body.source === "review"
+            ? "review"
+            : "audit",
       ...(body.type === "fanqie-publish" ? { confirmPublish: true } : {}),
     });
     return NextResponse.json(job, { status: 202 });

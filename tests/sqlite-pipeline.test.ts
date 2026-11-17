@@ -52,6 +52,13 @@ describe("SQLite 任务与写作流程", () => {
     const withPlan = await store.getProjectDetail(slug);
     expect(withPlan.plan.chapters).toHaveLength(2);
     expect(withPlan.characters.length).toBeGreaterThan(0);
+    expect(withPlan.canon.lastChapter).toBe(0);
+    expect(withPlan.canon.characters.length).toBe(withPlan.characters.length);
+    expect(
+      withPlan.canon.characters.every(
+        (character) => character.chapter === 0 && character.status === "unknown",
+      ),
+    ).toBe(true);
 
     const writeJob = await pipeline.startJob(slug, "write", { count: 1 });
     const writeDone = await waitForJob(writeJob.id);
@@ -84,5 +91,43 @@ describe("SQLite 任务与写作流程", () => {
     jobs.__reloadJobStoreForTests();
     expect(jobs.getJob(planJob.id)?.status).toBe("done");
     expect(jobs.getJob(writeJob.id)?.status).toBe("done");
+  });
+
+  it("SQLite 后端可以修复未采用草稿并已采用", async () => {
+    const slug = (await store.createProject({ title: "SQLite 草稿修复", targetChapters: 2 }))
+      .meta.slug;
+    const planJob = await pipeline.startJob(slug, "plan");
+    expect((await waitForJob(planJob.id)).status).toBe("done");
+
+    await store.saveRejectedDraft(slug, {
+      index: 1,
+      content: "SQLite 未采用草稿正文。",
+      mode: "write",
+      reason: "连续性检查未通过",
+      review: {
+        summary: "草稿摘要",
+        issues: [
+          {
+            severity: "critical",
+            type: "人物生死状态",
+            evidence: "已死角色行动",
+            detail: "修复已死角色的行动段落。",
+          },
+        ],
+        continuityOk: false,
+      },
+    });
+
+    const repairJob = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "draft",
+    });
+    const repairDone = await waitForJob(repairJob.id);
+    expect(repairDone.status, repairDone.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+    expect(detail.chapters.find((chapter) => chapter.index === 1)?.written).toBe(true);
+    expect(detail.canon.lastChapter).toBe(1);
   });
 });

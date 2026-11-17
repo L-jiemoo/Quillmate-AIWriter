@@ -12,6 +12,7 @@ import type {
   CanonItem,
   ContinuityIssue,
   ProjectDetail,
+  RejectedDraft,
   ReviewResult,
   StartJobFn,
 } from "@/lib/types";
@@ -355,6 +356,21 @@ export function ContinuityTab({
     void onStartJob("repair", { indices: queue.map((item) => item.index) });
   }
 
+  function repairDraft(draft: RejectedDraft) {
+    if (disabled) return;
+    const critical = draft.review.issues.filter(
+      (issue) => issue.severity === "critical",
+    ).length;
+    if (
+      !window.confirm(
+        `将让修复 Agent 按当前审校问题处理第 ${draft.index} 章未采用草稿（${critical} 个严重问题）。\n\n修复会先重新抽取事实并审校，最多自动修 3 轮。通过后自动写入正文；重写稿会先备份原正文。仍未通过则更新草稿，原正文保持不变。继续？`,
+      )
+    ) {
+      return;
+    }
+    void onStartJob("repair", { indices: [draft.index], source: "draft" });
+  }
+
   function repairFromReview(index: number, review: ReviewResult) {
     if (disabled) return;
     const fixable = review.issues.filter((issue) => issue.severity !== "ignore");
@@ -555,7 +571,11 @@ export function ContinuityTab({
             <h2 className="panel-title">事实台账</h2>
             <div className="panel-head-tools">
               <span className="muted small">
-                {canon.lastChapter ? `已覆盖到第 ${canon.lastChapter} 章` : "尚未建立"}
+                {canon.lastChapter
+                  ? `已覆盖到第 ${canon.lastChapter} 章`
+                  : hasCanon
+                    ? "架构初始台账"
+                    : "尚未建立"}
               </span>
               {editing ? (
                 <>
@@ -1113,6 +1133,13 @@ export function ContinuityTab({
                             <span className="review-badge bad">
                               {extractionFailed ? "事实抽取失败" : `${critical} 个严重问题`}
                             </span>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => repairDraft(draft)}
+                              disabled={disabled}
+                            >
+                              交给修复 Agent
+                            </button>
                           </div>
                         </div>
                         <p className="muted small rejected-draft-path">草稿：{draft.path}</p>
@@ -1122,7 +1149,7 @@ export function ContinuityTab({
                   })}
                 </div>
                 <p className="hint">
-                  这些稿子没有覆盖正文。可以按问题修改后手动保存章节，或调整要求后重新生成。
+                  这些稿子没有覆盖正文。可以按问题修改后手动保存章节，或点「交给修复 Agent」自动修复并重新审校；通过后才会写入正文。
                 </p>
               </div>
             ) : null}

@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "fs";
 import path from "path";
-import { emptyCanon, normalizeCanon, normalizeReviewResult } from "./canon";
+import {
+  buildInitialCanon,
+  emptyCanon,
+  isCanonEmpty,
+  normalizeCanon,
+  normalizeReviewResult,
+} from "./canon";
 import { PROJECTS_DIR } from "./config";
 import { emptyMemory, normalizeMemory } from "./memory";
 import { emptyStory, normalizeStory } from "./story";
@@ -786,6 +792,7 @@ export interface CommitArchitectureResult {
   characters: Character[];
   preservedCharacters: number;
   updatedCharacters: number;
+  seededCanon: boolean;
 }
 
 // 大纲、世界观、主线大纲和人物卡全部生成并通过校验后，再一次性提交。
@@ -793,6 +800,7 @@ export async function commitArchitecture(
   slug: string,
   generated: { plan: ProjectPlan; bible: string; outlineMd: string },
   characters: Character[],
+  options: { seedCanon?: boolean } = {},
 ): Promise<CommitArchitectureResult> {
   const file = await getProjectFile(slug);
   const sortedPlan: ProjectPlan = {
@@ -838,8 +846,12 @@ export async function commitArchitecture(
       updatedAt: nowIso(),
     },
   };
+  const initialCanon =
+    options.seedCanon === true && isCanonEmpty(await readCanon(slug))
+      ? buildInitialCanon(merged.characters)
+      : null;
 
-  await commitProjectWrites(slug, [
+  const writes = [
     {
       filePath: projectFile(slug, "plan.json"),
       content: jsonText(sortedPlan),
@@ -865,13 +877,23 @@ export async function commitArchitecture(
       content: jsonText(nextFile),
       backupName: "project.json",
     },
-  ]);
+  ];
+  if (initialCanon) {
+    writes.push({
+      filePath: projectFile(slug, "canon.json"),
+      content: jsonText(initialCanon),
+      backupName: "canon.json",
+    });
+  }
+
+  await commitProjectWrites(slug, writes);
 
   return {
     plan: sortedPlan,
     characters: merged.characters,
     preservedCharacters: merged.preserved,
     updatedCharacters: merged.updated,
+    seededCanon: Boolean(initialCanon),
   };
 }
 
@@ -1382,6 +1404,26 @@ export async function saveRejectedDraft(
     projectBackup(slug, "state.json"),
   );
   return record;
+}
+
+export async function getRejectedDraftContent(
+  slug: string,
+  index: number,
+): Promise<{ draft: RejectedDraft; content: string } | null> {
+  if (!Number.isInteger(index) || index < 1) throw new Error("章节序号不合法");
+  const state = await readState(slug);
+  const draft = state.rejectedDrafts[String(index)];
+  if (!draft) return null;
+  const fileName = path.basename(draft.path);
+  if (!/^[^/\\]+\.md$/i.test(fileName)) throw new Error("草稿路径不合法");
+  let content: string;
+  try {
+    content = await readTextStrict(projectFile(slug, "drafts", fileName));
+  } catch {
+    throw new Error(`第 ${index} 章草稿文件缺失或无法读取`);
+  }
+  if (!content.trim()) throw new Error(`第 ${index} 章草稿内容为空`);
+  return { draft, content };
 }
 
 // 定点修复直接改写正文，动手前先把原稿留一份，方便人工回退。

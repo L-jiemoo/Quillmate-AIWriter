@@ -12,7 +12,9 @@ import {
   canonForChapter,
   countCritical,
   emptyCanon,
+  formatIssuesForPrompt,
   groundExtractedFacts,
+  isCanonEmpty,
   mergeCanon,
   mergeIssues,
   reconcileCanonWithChapters,
@@ -62,6 +64,7 @@ import {
   getProjectDetail,
   getProjectFile,
   getPublishLedger,
+  getRejectedDraftContent,
   getStory,
   getWrittenChapters,
   markChapterRepaired,
@@ -238,11 +241,14 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
         );
         break;
       case "repair":
-        paused = await runRepair(
-          job,
-          params.indices ?? [],
-          params.source === "review" ? "review" : "audit",
-        );
+        paused =
+          params.source === "draft"
+            ? await runDraftRepair(job, params.indices ?? [])
+            : await runRepair(
+                job,
+                params.indices ?? [],
+                params.source === "review" ? "review" : "audit",
+              );
         break;
       case "recanon":
         await runRecanon(job);
@@ -299,28 +305,38 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
 }
 
 async function runPlan(job: Job): Promise<void> {
-  const file = await getProjectFile(job.slug);
+  const detail = await getProjectDetail(job.slug);
+  // 只有完全没有正文、且台账仍是空壳时才建立初始基线，绝不覆盖已有事实。
+  const seedCanon =
+    detail.state.written.length === 0 && isCanonEmpty(detail.canon);
   logJob(job, "架构师正在构思世界观、主线与章节细纲…");
-  const generated = await generatePlan(file.meta);
+  const generated = await generatePlan(detail.meta);
   throwIfCancelled(job);
   logJob(
     job,
     `细纲已生成（${generated.plan.chapters.length} 章），正在创建人物档案；全部完成前不会写入任何文件…`,
   );
 
-  const characters = await generateCharacters(file.meta, generated);
+  const characters = await generateCharacters(detail.meta, generated);
   throwIfCancelled(job);
 
   const committed = await commitArchitecture(
     job.slug,
     generated,
     characters,
+    { seedCanon },
   );
   job.result = `已生成 ${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色`;
   logJob(
     job,
     `架构已统一提交：${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色（更新 ${committed.updatedCharacters} 位，保留 ${committed.preservedCharacters} 位已有/手动人物卡）。`,
   );
+  if (committed.seededCanon) {
+    logJob(
+      job,
+      `已建立架构初始事实台账：${committed.characters.length} 位人物（状态未知，待正文确认）；物品、期限和规则将在正文抽取后补充。`,
+    );
+  }
   logJob(
     job,
     `角色：${committed.characters.map((item) => item.name).join("、")}；主线大纲已同步章节细纲。`,
@@ -716,8 +732,11 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       "ai",
     );
 
-    // 修复失败时保留“严重问题最少”的一版，避免越修越乱。
-    if (!best || critical < countCritical(best.review.issues)) {
+    // 修复失败时保留“严重问题最少”的一版，避免越修越乱；
+    // 严重问题数打平时保留更晚的修复版本，否则后续修复会被全部丢弃。
+    const bestCritical = best ? countCritical(best.review.issues) : Number.POSITIVE_INFINITY;
+    const preferLater = best ? attempt > (best.review.repairAttempts ?? 0) : false;
+    if (!best || critical < bestCritical || (critical === bestCritical && preferLater)) {
       best = {
         text: currentText,
         review,
@@ -1417,6 +1436,232 @@ async function runRepair(
         ? "总体审校报告是修复前的快照，如需最新全书结论请重新运行总体审校。"
         : "遗留问题已更新到章节审校。"
     }`,
+  );
+  return false;
+}
+
+async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
+  const detail = await getProjectDetail(job.slug);
+  const requestedSet = new Set(requested);
+  const drafts = Object.values(detail.state.rejectedDrafts ?? {})
+    .filter((draft) => requestedSet.has(draft.index))
+    .sort((a, b) => a.index - b.index);
+
+  if (!drafts.length) throw new Error("没有找到可修复的未采用草稿");
+
+  assertCanonReady(detail);
+  logPromptProfile(job);
+
+  const takeEnding = (text: string): string => {
+    const trimmed = text.trim();
+    return trimmed.length > 1500 ? `……${trimmed.slice(-1500)}` : trimmed;
+  };
+  const takeOpening = (text: string): string => {
+    const trimmed = text.trim();
+    return trimmed.length > 800 ? `${trimmed.slice(0, 800)}……` : trimmed;
+  };
+
+  let canon = detail.canon;
+  let memory = await getMemory(job.slug);
+  let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
+  let adopted = 0;
+  let failed = 0;
+  let paused = false;
+
+  logJob(
+    job,
+    `准备让修复 Agent 处理第 ${drafts.map((draft) => draft.index).join("、")} 章未采用草稿…`,
+  );
+
+  for (const requestedDraft of drafts) {
+    throwIfCancelled(job);
+    if (isPauseRequested(job)) {
+      paused = true;
+      break;
+    }
+
+    const chapterPlan = detail.plan.chapters.find(
+      (chapter) => chapter.index === requestedDraft.index,
+    );
+    if (!chapterPlan) {
+      failed += 1;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章不在当前大纲中，草稿无法采用，请先恢复对应章节细纲。`,
+      );
+      continue;
+    }
+
+    const retrieved = await getRejectedDraftContent(job.slug, requestedDraft.index);
+    if (!retrieved) {
+      failed += 1;
+      logJob(job, `第 ${requestedDraft.index} 章未采用草稿已不存在，跳过。`);
+      continue;
+    }
+    const draft = retrieved.draft;
+    const existing = detail.chapters.find(
+      (chapter) => chapter.index === requestedDraft.index,
+    );
+    const previous = detail.chapters
+      .filter(
+        (chapter) =>
+          chapter.index < requestedDraft.index &&
+          chapter.written &&
+          chapter.content.trim(),
+      )
+      .sort((a, b) => b.index - a.index)[0];
+    const next = detail.chapters
+      .filter(
+        (chapter) =>
+          chapter.index > requestedDraft.index &&
+          chapter.written &&
+          chapter.content.trim(),
+      )
+      .sort((a, b) => a.index - b.index)[0];
+    const previousEnding = previous ? takeEnding(previous.content) : "";
+    const nextOpening = next ? takeOpening(next.content) : "";
+    const nextSummary = next
+      ? detail.state.summaries[String(next.index)] ??
+        detail.plan.chapters.find((chapter) => chapter.index === next.index)?.summary ??
+        ""
+      : "";
+    const priorSummaries = Object.keys(detail.state.summaries)
+      .map(Number)
+      .filter((index) => index < requestedDraft.index)
+      .sort((a, b) => a - b)
+      .map((index) => detail.state.summaries[String(index)])
+      .filter((item): item is string => Boolean(item));
+    const issues = draft.review.issues.filter((issue) => issue.severity !== "ignore");
+    const reviewFeedback = issues.length
+      ? formatIssuesForPrompt(issues)
+      : `原草稿未通过原因：${draft.reason}`;
+
+    logJob(
+      job,
+      `开始修复第 ${requestedDraft.index} 章《${chapterPlan.title}》未采用草稿…`,
+    );
+    const result = await verifyChapter({
+      job,
+      project: detail,
+      meta: detail.meta,
+      bible: detail.bible,
+      characters: detail.characters,
+      chapter: chapterPlan,
+      text: retrieved.content,
+      canon,
+      memory,
+      story,
+      previousEnding,
+      previousSummaries: priorSummaries.slice(-2),
+      nextOpening,
+      nextSummary,
+      mode: draft.mode,
+      rewriteInstruction: "这是未采用草稿，只修复审校指出的问题，不要重写无关段落。",
+      reviewFeedback,
+    });
+    throwIfCancelled(job);
+    if (!result.text.trim()) {
+      throw new Error(`第 ${requestedDraft.index} 章草稿修复返回空正文`);
+    }
+
+    if (!result.passed) {
+      const critical = countCritical(result.review.issues);
+      const extractionFailed = result.review.extractionOk === false;
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: extractionFailed
+          ? "草稿修复后事实抽取仍失败"
+          : `草稿修复后仍未通过：${critical} 个严重问题`,
+        review: result.review,
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      failed += 1;
+      logJob(
+        job,
+        extractionFailed
+          ? `第 ${requestedDraft.index} 章草稿修复后事实抽取仍失败，未写入正文；新草稿保存在 ${updated.path}，原正文未改动。`
+          : `第 ${requestedDraft.index} 章草稿修复后仍有 ${critical} 个严重问题，未写入正文；新草稿保存在 ${updated.path}，原正文未改动。`,
+      );
+      continue;
+    }
+
+    const wasWritten = Boolean(existing?.written && existing.content.trim());
+    const backupPath = wasWritten
+      ? await saveRepairBackup(job.slug, requestedDraft.index, existing!.content)
+      : "";
+    await writeChapterFile(job.slug, requestedDraft.index, result.text, {
+      source: "ai-repair",
+      title: chapterPlan.title,
+      summary: result.review.summary,
+      note: "从未采用草稿修复",
+    });
+    await markChapterWritten(
+      job.slug,
+      requestedDraft.index,
+      result.review.summary,
+      result.review,
+    );
+    markDetailChapterWritten(
+      detail,
+      requestedDraft.index,
+      result.text,
+      result.review.summary,
+    );
+    delete detail.state.rejectedDrafts[String(requestedDraft.index)];
+
+    if (wasWritten) {
+      const reconciled = reconcileCanonWithChapters(result.canon, [
+        { index: requestedDraft.index, content: result.text },
+      ]);
+      canon = reconciled.canon;
+      if (reconciled.changes.length) {
+        logJob(
+          job,
+          `第 ${requestedDraft.index} 章草稿采用后对账：${reconciled.changes.join("；")}`,
+        );
+      }
+    } else {
+      canon = result.canon;
+    }
+    await saveCanon(job.slug, canon);
+    memory = await persistChapterMemory(job, detail, memory, result.memory);
+    story = await persistChapterStory(
+      job,
+      detail,
+      memory,
+      story,
+      result.memory,
+      result.story,
+    );
+
+    adopted += 1;
+    const repairedNote = result.review.repaired
+      ? `，自动修复 ${result.review.repairAttempts ?? 0} 轮`
+      : "";
+    logJob(
+      job,
+      `第 ${requestedDraft.index} 章草稿修复通过并已采用${repairedNote}${
+        backupPath ? `；原正文备份在 ${backupPath}` : ""
+      }。`,
+    );
+  }
+
+  if (paused) {
+    job.result = `已暂停：采用 ${adopted} 份草稿`;
+    logJob(job, `已暂停草稿修复：本次采用 ${adopted} 份草稿，剩余草稿未处理。`);
+    return true;
+  }
+
+  job.result = failed
+    ? `已采用 ${adopted} 份草稿，${failed} 份仍需处理`
+    : `已采用 ${adopted} 份草稿`;
+  logJob(
+    job,
+    failed
+      ? `草稿修复完成：采用 ${adopted} 份，${failed} 份仍有问题，已更新草稿，原正文未改动。`
+      : `草稿修复完成：采用 ${adopted} 份，台账与记忆已同步。`,
   );
   return false;
 }

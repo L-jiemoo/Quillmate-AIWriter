@@ -281,7 +281,11 @@ export function OverviewTab({
           <div className="panel-head">
             <h2 className="panel-title">事实台账摘要</h2>
             <span className="muted small">
-              {canon.lastChapter ? `截至第 ${canon.lastChapter} 章` : "尚未建立"}
+              {canon.lastChapter
+                ? `截至第 ${canon.lastChapter} 章`
+                : hasCanon
+                  ? "架构初始台账"
+                  : "尚未建立"}
             </span>
           </div>
           <div className="panel-body">

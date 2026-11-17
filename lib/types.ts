@@ -591,8 +591,8 @@ export interface JobParams {
   indices?: number[];
   instruction?: string;
   useReview?: boolean;
-  // 定点修复的问题来源：总体审校报告，或章节审校里的遗留问题。
-  source?: "audit" | "review";
+  // 定点修复的问题来源：总体审校报告、章节审校遗留问题，或未采用草稿。
+  source?: "audit" | "review" | "draft";
   // 番茄发布是有外部副作用的操作，必须由发起端显式确认。
   confirmPublish?: boolean;
 }

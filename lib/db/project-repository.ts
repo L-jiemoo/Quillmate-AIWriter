@@ -427,10 +427,12 @@ export function commitArchitecture(
   plan: ProjectPlan,
   characters: Character[],
   file: ProjectFile,
+  canon?: CanonFacts,
 ): void {
   withTransaction((db) => {
     replacePlanInTransaction(db, slug, plan, file);
     replaceCharactersInTransaction(db, slug, characters);
+    if (canon) replaceCanonInTransaction(db, slug, canon);
     updateProjectFile(file);
   });
 }

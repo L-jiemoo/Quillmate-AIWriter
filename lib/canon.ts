@@ -6,6 +6,7 @@ import type {
   CanonFacts,
   CanonItem,
   CanonTimeline,
+  Character,
   ContinuityIssue,
   ExtractedFacts,
   FactCharacter,
@@ -93,7 +94,7 @@ function clip(text: string, max: number): string {
 }
 
 function chapterLabel(chapter: number): string {
-  return chapter > 0 ? `第 ${chapter} 章` : "更早章节";
+  return chapter > 0 ? `第 ${chapter} 章` : "架构设定";
 }
 
 export function emptyCanon(): CanonFacts {
@@ -104,6 +105,53 @@ export function emptyCanon(): CanonFacts {
     rules: [],
     lastChapter: 0,
     updatedAt: nowIso(),
+  };
+}
+
+export function isCanonEmpty(canon: CanonFacts): boolean {
+  return (
+    canon.characters.length === 0 &&
+    canon.items.length === 0 &&
+    !canon.timeline.currentDay.trim() &&
+    canon.timeline.deadlines.length === 0 &&
+    canon.rules.length === 0 &&
+    canon.lastChapter === 0
+  );
+}
+
+// 架构阶段还没有正文可抽取，只能把人物卡转成“待正文确认”的初始基线。
+// 统一用 chapter 0 标记，后续第 1 章事实抽取会覆盖为真实状态。
+export function buildInitialCanon(
+  characters: Character[],
+  updatedAt = nowIso(),
+): CanonFacts {
+  return {
+    characters: characters
+      .map((character): CanonCharacter | null => {
+        const name = character.name.trim();
+        if (!name) return null;
+        const role = character.role.trim();
+        const goals = character.goals.trim();
+        const note = clip(
+          [role, goals ? `目标：${goals}` : ""].filter(Boolean).join("；"),
+          120,
+        );
+        return {
+          name,
+          aliases: [],
+          status: "unknown" as const,
+          location: "",
+          note,
+          statusChapter: 0,
+          chapter: 0,
+        };
+      })
+      .filter((item): item is CanonCharacter => Boolean(item)),
+    items: [],
+    timeline: { currentDay: "", deadlines: [] },
+    rules: [],
+    lastChapter: 0,
+    updatedAt,
   };
 }
 
@@ -798,13 +846,20 @@ export function formatCanonForPrompt(
   const includeChapters = options.includeChapters ?? false;
 
   // 先按最近发生排序截断，再按章节正序展示：长篇里最新的死亡事实不能被上限裁掉。
+  const baseline = canon.characters.filter(
+    (item) => item.chapter === 0 && item.status !== "dead",
+  );
   const dead = canon.characters
     .filter((item) => item.status === "dead")
     .sort((a, b) => b.statusChapter - a.statusChapter)
     .slice(0, includeChapters ? 200 : 40)
     .sort((a, b) => a.statusChapter - b.statusChapter);
   const alive = canon.characters
-    .filter((item) => (includeChapters ? item.status !== "dead" : item.status === "alive"))
+    .filter(
+      (item) =>
+        item.chapter !== 0 &&
+        (includeChapters ? item.status !== "dead" : item.status === "alive"),
+    )
     .sort((a, b) => b.chapter - a.chapter)
     .slice(0, options.aliveLimit ?? (includeChapters ? 60 : 40));
   const items = [...canon.items]
@@ -819,6 +874,13 @@ export function formatCanonForPrompt(
     for (const item of dead) {
       const note = item.note ? `：${clip(item.note, 80)}` : "";
       lines.push(`- ${item.name}（${chapterLabel(item.statusChapter)}死亡）${note}`);
+    }
+  }
+  if (baseline.length) {
+    lines.push("架构初始人物（来自人物卡，正文尚未确认生死/位置）：");
+    for (const item of baseline) {
+      const note = item.note ? `；${clip(item.note, 80)}` : "";
+      lines.push(`- ${item.name}${note}`);
     }
   }
   if (alive.length) {

@@ -145,6 +145,36 @@ describe("项目与发布路由确认", () => {
     );
   });
 
+  it("草稿修复任务必须指定草稿并保留 draft 来源", async () => {
+    const slug = (await store.createProject({ title: "草稿修复" })).meta.slug;
+    const route = await import("@/app/api/projects/[slug]/jobs/route");
+
+    const without = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/jobs`, "POST", {
+        type: "repair",
+        source: "draft",
+      }),
+      { params: { slug } },
+    );
+    expect(without.status).toBe(400);
+    expect(startJobMock).not.toHaveBeenCalled();
+
+    const withDraft = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/jobs`, "POST", {
+        type: "repair",
+        source: "draft",
+        indices: [2],
+      }),
+      { params: { slug } },
+    );
+    expect(withDraft.status).toBe(202);
+    expect(startJobMock).toHaveBeenCalledWith(
+      slug,
+      "repair",
+      expect.objectContaining({ indices: [2], source: "draft" }),
+    );
+  });
+
   it("人工修改发布状态必须二次确认", async () => {
     const slug = (await store.createProject({ title: "发布状态确认" })).meta.slug;
     const route = await import("@/app/api/projects/[slug]/publish/records/route");

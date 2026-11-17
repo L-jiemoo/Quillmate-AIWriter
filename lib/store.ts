@@ -165,6 +165,12 @@ export async function saveRejectedDraft(
   return (await backend()).saveRejectedDraft(...args);
 }
 
+export async function getRejectedDraftContent(
+  ...args: Parameters<StoreModule["getRejectedDraftContent"]>
+): ReturnType<StoreModule["getRejectedDraftContent"]> {
+  return (await backend()).getRejectedDraftContent(...args);
+}
+
 export async function saveRepairBackup(
   ...args: Parameters<StoreModule["saveRepairBackup"]>
 ): ReturnType<StoreModule["saveRepairBackup"]> {

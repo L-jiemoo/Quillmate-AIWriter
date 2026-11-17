@@ -100,7 +100,11 @@ function normalizeParams(input: unknown): JobParams {
     params.instruction = record.instruction.slice(0, 500);
   }
   if (typeof record.useReview === "boolean") params.useReview = record.useReview;
-  if (record.source === "review" || record.source === "audit") {
+  if (
+    record.source === "review" ||
+    record.source === "audit" ||
+    record.source === "draft"
+  ) {
     params.source = record.source;
   }
   if (record.confirmPublish === true) params.confirmPublish = true;

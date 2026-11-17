@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { buildInitialCanon, isCanonEmpty } from "./canon";
 import { normalizeMemory } from "./memory";
 import { normalizeStory } from "./story";
 import { derivePublishLedger, removePublishEntry, upsertPublishEntry } from "./publish-ledger";
@@ -395,6 +396,7 @@ export async function commitArchitecture(
   slug: string,
   generated: { plan: ProjectPlan; bible: string; outlineMd: string },
   characters: Character[],
+  options: { seedCanon?: boolean } = {},
 ): Promise<CommitArchitectureResult> {
   const file = repo.getProjectFile(slug);
   const sortedPlan: ProjectPlan = {
@@ -434,8 +436,19 @@ export async function commitArchitecture(
   };
   const previous = previousPlanForRollback(slug);
   const previousCharacters = repo.getCharacters(slug);
+  const previousCanon = repo.getCanon(slug);
+  const initialCanon =
+    options.seedCanon === true && isCanonEmpty(previousCanon)
+      ? buildInitialCanon(merged.characters)
+      : undefined;
 
-  repo.commitArchitecture(slug, sortedPlan, merged.characters, nextFile);
+  repo.commitArchitecture(
+    slug,
+    sortedPlan,
+    merged.characters,
+    nextFile,
+    initialCanon,
+  );
   try {
     await commitProjectWrites(slug, [
       {
@@ -450,7 +463,13 @@ export async function commitArchitecture(
       },
     ]);
   } catch (error) {
-    repo.commitArchitecture(slug, previous.plan, previousCharacters, previous.file);
+    repo.commitArchitecture(
+      slug,
+      previous.plan,
+      previousCharacters,
+      previous.file,
+      previousCanon,
+    );
     throw error;
   }
 
@@ -459,6 +478,7 @@ export async function commitArchitecture(
     characters: merged.characters,
     preservedCharacters: merged.preserved,
     updatedCharacters: merged.updated,
+    seededCanon: Boolean(initialCanon),
   };
 }
 
@@ -879,6 +899,25 @@ export async function saveRejectedDraft(
   };
   repo.saveRejectedDraft(slug, record, record.at);
   return record;
+}
+
+export async function getRejectedDraftContent(
+  slug: string,
+  index: number,
+): Promise<{ draft: RejectedDraft; content: string } | null> {
+  if (!Number.isInteger(index) || index < 1) throw new Error("章节序号不合法");
+  const draft = repo.getState(slug).rejectedDrafts[String(index)];
+  if (!draft) return null;
+  const fileName = path.basename(draft.path);
+  if (!/^[^/\\]+\.md$/i.test(fileName)) throw new Error("草稿路径不合法");
+  let content: string;
+  try {
+    content = await readTextStrict(projectFile(slug, "drafts", fileName));
+  } catch {
+    throw new Error(`第 ${index} 章草稿文件缺失或无法读取`);
+  }
+  if (!content.trim()) throw new Error(`第 ${index} 章草稿内容为空`);
+  return { draft, content };
 }
 
 export async function saveRepairBackup(
