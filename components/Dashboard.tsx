@@ -40,7 +40,11 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
     setDeleting(project.slug);
     setDeleteError("");
     try {
-      const response = await fetch(`/api/projects/${project.slug}`, { method: "DELETE" });
+      const response = await fetch(`/api/projects/${project.slug}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmSlug: project.slug }),
+      });
       const data = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(data.error ?? "删除失败");
       setProjects((previous) => previous.filter((item) => item.slug !== project.slug));

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError, assertSafeSlugParam, assertSameOrigin } from "@/lib/api";
 import { requestPause } from "@/lib/jobs";
 
 export const runtime = "nodejs";
@@ -8,10 +9,16 @@ interface RouteContext {
   params: { slug: string; id: string };
 }
 
-export async function POST(_request: Request, { params }: RouteContext) {
-  const job = requestPause(params.id, params.slug);
-  if (!job) {
-    return NextResponse.json({ error: "任务不存在" }, { status: 404 });
+export async function POST(request: Request, { params }: RouteContext) {
+  try {
+    assertSameOrigin(request);
+    const slug = assertSafeSlugParam(params.slug);
+    const job = requestPause(params.id, slug);
+    if (!job) {
+      return NextResponse.json({ error: "任务不存在" }, { status: 404 });
+    }
+    return NextResponse.json(job);
+  } catch (error) {
+    return apiError(error);
   }
-  return NextResponse.json(job);
 }

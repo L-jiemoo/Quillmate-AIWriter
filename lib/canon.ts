@@ -222,6 +222,90 @@ export function normalizeCanon(input: unknown): CanonFacts {
   };
 }
 
+export interface CanonValidationIssue {
+  code:
+    | "canon-lagging"
+    | "canon-ahead"
+    | "duplicate-character"
+    | "duplicate-item"
+    | "duplicate-deadline"
+    | "chapter-out-of-range";
+  severity: "critical" | "warning";
+  message: string;
+}
+
+// 整体重建后的最终校验：台账必须覆盖全部已写章节，且没有重复/越界条目。
+export function validateCanon(
+  canon: CanonFacts,
+  chapters: { index: number }[],
+): CanonValidationIssue[] {
+  const issues: CanonValidationIssue[] = [];
+  const maxChapter = chapters.reduce(
+    (max, chapter) => Math.max(max, chapter.index),
+    0,
+  );
+
+  if (maxChapter > 0 && canon.lastChapter < maxChapter) {
+    issues.push({
+      code: "canon-lagging",
+      severity: "critical",
+      message: `台账只覆盖到第 ${canon.lastChapter} 章，已写章节到第 ${maxChapter} 章`,
+    });
+  }
+  if (canon.lastChapter > maxChapter) {
+    issues.push({
+      code: "canon-ahead",
+      severity: "critical",
+      message: `台账覆盖到第 ${canon.lastChapter} 章，超出已写章节第 ${maxChapter} 章`,
+    });
+  }
+
+  const checkDuplicates = (
+    items: { name: string }[],
+    code: CanonValidationIssue["code"],
+    label: string,
+  ): void => {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const item of items) {
+      const key = normalizeName(item.name);
+      if (!key) {
+        issues.push({
+          code,
+          severity: "warning",
+          message: `${label}存在空名称条目`,
+        });
+        continue;
+      }
+      if (seen.has(key)) duplicates.add(item.name);
+      seen.add(key);
+    }
+    for (const name of duplicates) {
+      issues.push({
+        code,
+        severity: "warning",
+        message: `${label}「${name}」重复出现`,
+      });
+    }
+  };
+
+  checkDuplicates(canon.characters, "duplicate-character", "人物");
+  checkDuplicates(canon.items, "duplicate-item", "物品");
+  checkDuplicates(canon.timeline.deadlines, "duplicate-deadline", "期限");
+
+  for (const character of canon.characters) {
+    if (character.chapter > canon.lastChapter || character.statusChapter > canon.lastChapter) {
+      issues.push({
+        code: "chapter-out-of-range",
+        severity: "warning",
+        message: `${character.name} 引用了超出台账范围的章节`,
+      });
+    }
+  }
+
+  return issues;
+}
+
 function normalizeFactCharacter(input: unknown): FactCharacter | null {
   const record = (input ?? {}) as Record<string, unknown>;
   const name = str(record.name).trim();
@@ -425,6 +509,24 @@ export function normalizeReviewResult(input: unknown, fallbackSummary = ""): Rev
       : typeof record.repair_attempts === "number"
         ? record.repair_attempts
         : undefined;
+  const extractionOk =
+    typeof record.extractionOk === "boolean"
+      ? record.extractionOk
+      : typeof record.extraction_ok === "boolean"
+        ? record.extraction_ok
+        : undefined;
+  const extractionError =
+    typeof record.extractionError === "string"
+      ? record.extractionError.trim()
+      : typeof record.extraction_error === "string"
+        ? record.extraction_error.trim()
+        : "";
+  const extractionAttempts =
+    typeof record.extractionAttempts === "number"
+      ? record.extractionAttempts
+      : typeof record.extraction_attempts === "number"
+        ? record.extraction_attempts
+        : undefined;
 
   return {
     summary: str(record.summary, fallbackSummary).trim() || fallbackSummary,
@@ -432,6 +534,9 @@ export function normalizeReviewResult(input: unknown, fallbackSummary = ""): Rev
     continuityOk,
     ...(repaired !== undefined ? { repaired } : {}),
     ...(repairAttempts !== undefined ? { repairAttempts } : {}),
+    ...(extractionOk !== undefined ? { extractionOk } : {}),
+    ...(extractionError ? { extractionError } : {}),
+    ...(extractionAttempts !== undefined ? { extractionAttempts } : {}),
   };
 }
 

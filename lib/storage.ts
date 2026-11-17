@@ -79,7 +79,11 @@ export async function readJsonOptional<T>(filePath: string, fallback: T): Promis
 }
 
 // 先写同目录临时文件并 fsync，再 rename 覆盖目标，避免进程中断留下半截 JSON/正文。
-export async function writeFileAtomic(filePath: string, data: string): Promise<void> {
+export async function writeFileAtomic(
+  filePath: string,
+  data: string,
+  options: { mode?: number } = {},
+): Promise<void> {
   const dir = path.dirname(filePath);
   await fs.mkdir(dir, { recursive: true });
   const tmp = path.join(
@@ -89,7 +93,7 @@ export async function writeFileAtomic(filePath: string, data: string): Promise<v
 
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
-    handle = await fs.open(tmp, "w");
+    handle = await fs.open(tmp, "w", options.mode ?? 0o666);
     await handle.writeFile(data, "utf8");
     await handle.sync();
   } catch (error) {

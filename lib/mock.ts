@@ -7,7 +7,8 @@ export interface GeneratedPlan {
 }
 
 export function mockPlan(meta: ProjectMeta): GeneratedPlan {
-  const count = Math.min(Math.max(meta.targetChapters || 12, 1), 30);
+  // mock 也遵守项目目标章节数，保证架构校验与真实模型行为一致。
+  const count = Math.min(Math.max(meta.targetChapters || 12, 1), 200);
   const chapters: ChapterPlan[] = Array.from({ length: count }, (_, i) => ({
     index: i + 1,
     title: `示例章节 ${i + 1}`,

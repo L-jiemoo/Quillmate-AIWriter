@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
+import { apiError, assertSameOrigin, readJsonBody } from "@/lib/api";
 import { createProject, listProjects } from "@/lib/store";
-import { errorMessage } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +15,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as Record<string, unknown>;
+    assertSameOrigin(request);
+    const body = await readJsonBody(request);
     const title = text(body.title)?.trim();
     if (!title) {
       return NextResponse.json({ error: "请填写书名" }, { status: 400 });
@@ -35,6 +36,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ slug: detail.meta.slug }, { status: 201 });
   } catch (error) {
-    return NextResponse.json({ error: errorMessage(error) }, { status: 400 });
+    return apiError(error);
   }
 }

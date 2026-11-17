@@ -1,5 +1,5 @@
+import { apiError, assertSafeSlugParam } from "@/lib/api";
 import { buildBookText } from "@/lib/store";
-import { errorMessage } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +10,8 @@ interface RouteContext {
 
 export async function GET(_request: Request, { params }: RouteContext) {
   try {
-    const book = await buildBookText(params.slug);
+    const slug = assertSafeSlugParam(params.slug);
+    const book = await buildBookText(slug);
     const filename = `${book.title}-全书.md`;
     return new Response(book.text, {
       headers: {
@@ -20,6 +21,6 @@ export async function GET(_request: Request, { params }: RouteContext) {
       },
     });
   } catch (error) {
-    return Response.json({ error: errorMessage(error) }, { status: 404 });
+    return apiError(error, 404);
   }
 }

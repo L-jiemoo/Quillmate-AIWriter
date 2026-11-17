@@ -1,9 +1,22 @@
 import OpenAI from "openai";
 import { getRuntimeConfig } from "./config";
+import {
+  applyPromptOverrides,
+  hashPromptMessages,
+  recordPromptUsage,
+} from "./prompt-store";
+import type { PromptAgent } from "./prompt-registry";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+}
+
+export interface LLMCallOptions {
+  json?: boolean;
+  temperature?: number;
+  agent?: PromptAgent;
+  chapter?: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -71,19 +84,47 @@ export class LLMClient {
     return this.client;
   }
 
+  private prepare(messages: ChatMessage[], agent?: PromptAgent): ChatMessage[] {
+    return agent ? applyPromptOverrides(agent, messages) : messages;
+  }
+
+  private async recordUsage(
+    messages: ChatMessage[],
+    options: LLMCallOptions,
+  ): Promise<void> {
+    if (!options.agent) return;
+    await recordPromptUsage({
+      agent: options.agent,
+      promptHash: hashPromptMessages(messages),
+      model: this.config.model,
+      provider: this.config.provider,
+      temperature: options.temperature ?? this.config.temperature,
+      maxTokens: this.config.maxTokens,
+      ...(options.chapter ? { chapter: options.chapter } : {}),
+      messageChars: messages.reduce((sum, message) => sum + message.content.length, 0),
+    });
+  }
+
   async chat(
     messages: ChatMessage[],
-    options: { json?: boolean; temperature?: number } = {},
+    options: LLMCallOptions = {},
   ): Promise<string> {
-    return this.complete(messages, options, this.config.maxTokens, 0);
+    return this.complete(
+      this.prepare(messages, options.agent),
+      options,
+      this.config.maxTokens,
+      0,
+    );
   }
 
   private async complete(
     messages: ChatMessage[],
-    options: { json?: boolean; temperature?: number },
+    options: LLMCallOptions,
     maxTokens: number,
     attempt: number,
   ): Promise<string> {
+    // 附加规则已经在 prepare 中合并；这里只记录本次实际发送的提示词指纹。
+    await this.recordUsage(messages, options);
     // 长任务里一次瞬时断连就会毁掉整章；这里对连接错误做带退避的重试。
     const maxAttempts = 4;
     let response: OpenAI.Chat.Completions.ChatCompletion;
@@ -149,23 +190,32 @@ export class LLMClient {
     );
   }
 
-  async json<T>(messages: ChatMessage[], options: { temperature?: number } = {}): Promise<T> {
-    const raw = await this.chat(messages, { json: true, ...options });
+  async json<T>(messages: ChatMessage[], options: LLMCallOptions = {}): Promise<T> {
+    // 附加规则只合并一次，JSON 修正请求沿用同一份已合并提示词。
+    const prepared = this.prepare(messages, options.agent);
+    const raw = await this.complete(
+      prepared,
+      { ...options, json: true },
+      this.config.maxTokens,
+      0,
+    );
     try {
       return extractJson<T>(raw);
     } catch {
       // 部分模型即使开启 json 模式也会夹带解释文字；追加一轮“只返回修正后的 JSON”
       // 再解析一次，比直接让整个写作任务失败更稳。
-      const repaired = await this.chat(
+      const repaired = await this.complete(
         [
-          ...messages,
+          ...prepared,
           { role: "assistant", content: raw },
           {
             role: "user",
             content: "上面的输出不是合法 JSON。请只输出修正后的合法 JSON，不要附加任何解释。",
           },
         ],
-        { json: true, ...options },
+        { ...options, json: true },
+        this.config.maxTokens,
+        0,
       );
       return extractJson<T>(repaired);
     }

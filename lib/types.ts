@@ -25,6 +25,8 @@ export interface ProjectPlan {
   chapters: ChapterPlan[];
 }
 
+export type CharacterSource = "ai" | "user" | "system";
+
 export interface Character {
   name: string;
   role: string;
@@ -37,6 +39,9 @@ export interface Character {
   arc: string;
   relationships: string;
   speechStyle: string;
+  // 旧版角色卡没有来源标记；重新生成架构时按“可能被用户编辑过”保守保留。
+  source?: CharacterSource;
+  updatedAt?: string;
 }
 
 export type CanonCharacterStatus = "alive" | "dead" | "unknown";
@@ -113,12 +118,274 @@ export interface FactTimeline {
   deadlines: FactDeadline[];
 }
 
+// 章节记忆与事实台账一起抽取，但不参与台账合并；它记录的是“这一章发生了什么”，
+// 供长篇写作时按相关度检索，而不是把所有正文塞回上下文。
+export interface ExtractedMemory {
+  events: string[];
+  characters: string[];
+  actions: string[];
+  time: string;
+  location: string;
+  endingState: string;
+  newSettings: string[];
+  foreshadowsPlanted: string[];
+  foreshadowsResolved: string[];
+}
+
+export type StorySource = "ai" | "summary" | "manual";
+
+// 人物状态是“章节快照”，不是静态角色卡。查询某一章时取该人物最近的快照。
+export interface CharacterState {
+  id: string;
+  name: string;
+  chapter: number;
+  identity: string;
+  age: string;
+  location: string;
+  bodyState: string;
+  lifeStatus: CanonCharacterStatus;
+  abilities: string[];
+  goals: string[];
+  knowledge: string[];
+  faction: string;
+  experience: string;
+  eventIds: string[];
+  source: StorySource;
+  updatedAt: string;
+}
+
+export interface CharacterRelation {
+  id: string;
+  from: string;
+  to: string;
+  type: string;
+  status: string;
+  chapter: number;
+  eventIds: string[];
+  source: StorySource;
+  updatedAt: string;
+}
+
+export interface PlotEvent {
+  id: string;
+  name: string;
+  chapter: number;
+  time: string;
+  location: string;
+  participants: string[];
+  cause: string;
+  process: string;
+  result: string;
+  impact: string;
+  relatedEventIds: string[];
+  foreshadowIds: string[];
+  source: StorySource;
+  updatedAt: string;
+}
+
+export type ForeshadowStatus =
+  | "planted"
+  | "developing"
+  | "pending"
+  | "resolved"
+  | "abandoned";
+
+export interface ForeshadowRecord {
+  id: string;
+  text: string;
+  plantedChapter: number;
+  relatedCharacters: string[];
+  expectedStartChapter: number;
+  expectedEndChapter: number;
+  status: ForeshadowStatus;
+  eventIds: string[];
+  resolution: string;
+  resolvedChapter: number;
+  // AI 只能在正文明确回收时给出候选，最终确认必须由作者完成。
+  resolutionCandidate: string;
+  source: StorySource;
+  updatedAt: string;
+}
+
+export interface StoryLedger {
+  version: number;
+  states: CharacterState[];
+  relations: CharacterRelation[];
+  events: PlotEvent[];
+  foreshadows: ForeshadowRecord[];
+  // 作者删除的基础/自动记录 ID，防止下次 seed 时又被补回来。
+  suppressedIds: string[];
+  updatedAt: string;
+}
+
+export interface StoryRetrievalResult {
+  chapter: number;
+  text: string;
+  tokenEstimate: number;
+  truncated: boolean;
+  chapterIndices: number[];
+  sources: string[];
+}
+
+export interface StoryStatsView {
+  states: number;
+  relations: number;
+  events: number;
+  foreshadows: number;
+  openForeshadows: number;
+  overdueForeshadows: number;
+  resolvedForeshadows: number;
+  chaptersCovered: number;
+  updatedAt: string;
+}
+
+export interface StoryCheckIssue {
+  severity: "critical" | "warning";
+  code:
+    | "same-time-different-locations"
+    | "dead-character-in-later-event"
+    | "foreshadow-resolved-before-planted"
+    | "broken-event-link"
+    | "invalid-event-chapter"
+    | "self-relation"
+    | "revival-without-event";
+  message: string;
+  chapter: number;
+  evidence: string;
+}
+
+export interface ExtractedCharacterState {
+  name: string;
+  identity: string;
+  age: string;
+  location: string;
+  bodyState: string;
+  lifeStatus: CanonCharacterStatus;
+  abilities: string[];
+  goals: string[];
+  knowledge: string[];
+  faction: string;
+  experience: string;
+  evidence: string;
+}
+
+export interface ExtractedRelation {
+  from: string;
+  to: string;
+  type: string;
+  status: string;
+  evidence: string;
+}
+
+export interface ExtractedEvent {
+  name: string;
+  time: string;
+  location: string;
+  participants: string[];
+  cause: string;
+  process: string;
+  result: string;
+  impact: string;
+  relatedEvents: string[];
+  foreshadows: string[];
+}
+
+export interface ExtractedStory {
+  states: ExtractedCharacterState[];
+  relations: ExtractedRelation[];
+  events: ExtractedEvent[];
+}
+
 export interface ExtractedFacts {
   summary: string;
   characters: FactCharacter[];
   items: FactItem[];
   timeline: FactTimeline | null;
   rules: string[];
+  memory?: ExtractedMemory;
+  story?: ExtractedStory;
+}
+
+export type MemorySource = "ai" | "summary" | "manual";
+
+export interface ChapterMemory {
+  index: number;
+  summary: string;
+  events: string[];
+  characters: string[];
+  actions: string[];
+  time: string;
+  location: string;
+  endingState: string;
+  newSettings: string[];
+  foreshadowsPlanted: string[];
+  foreshadowsResolved: string[];
+  source: MemorySource;
+  updatedAt: string;
+}
+
+export interface VolumeMemory {
+  id: string;
+  title: string;
+  startChapter: number;
+  endChapter: number;
+  goal: string;
+  events: string[];
+  characterChanges: string[];
+  conflicts: string[];
+  foreshadows: string[];
+  links: string;
+  summary: string;
+  source: "auto" | "manual";
+  updatedAt: string;
+}
+
+export interface BookMemory {
+  logline: string;
+  tags: string[];
+  worldview: string;
+  mainline: string;
+  coreCharacters: string[];
+  coreRules: string[];
+  finalGoal: string;
+  keyConflicts: string[];
+  summary: string;
+  source: "auto" | "manual";
+  updatedAt: string;
+}
+
+export interface ProjectMemory {
+  version: number;
+  book: BookMemory;
+  volumes: VolumeMemory[];
+  chapters: Record<string, ChapterMemory>;
+  updatedAt: string;
+}
+
+export interface OpenForeshadow {
+  text: string;
+  plantedChapter: number;
+}
+
+export interface MemoryRetrievalResult {
+  chapter: number;
+  text: string;
+  tokenEstimate: number;
+  truncated: boolean;
+  chapterIndices: number[];
+  sources: string[];
+  openForeshadows: OpenForeshadow[];
+}
+
+export interface MemoryStatsView {
+  storedChapters: number;
+  effectiveChapters: number;
+  aiChapters: number;
+  seedChapters: number;
+  manualChapters: number;
+  volumes: number;
+  openForeshadows: number;
+  updatedAt: string;
 }
 
 export type IssueSeverity = "critical" | "warning" | "ignore";
@@ -136,6 +403,10 @@ export interface ReviewResult {
   continuityOk: boolean;
   repaired?: boolean;
   repairAttempts?: number;
+  // 事实抽取是否成功；旧版审校记录没有该字段，视为正常。
+  extractionOk?: boolean;
+  extractionError?: string;
+  extractionAttempts?: number;
 }
 
 // 总体审校的结构化结果：按章节保存，供连续性页按“章节审校”的样式展示。
@@ -162,6 +433,38 @@ export interface RejectedDraft {
   review: ReviewResult;
 }
 
+export type ChapterVersionSource =
+  | "ai-write"
+  | "ai-rewrite"
+  | "ai-repair"
+  | "user"
+  | "restore"
+  | "system";
+
+// 章节正文的不可变版本记录：每次正式覆盖前先写入，保证旧稿可追溯、可恢复。
+export interface ChapterVersion {
+  index: number;
+  version: number;
+  createdAt: string;
+  source: ChapterVersionSource;
+  title: string;
+  summary: string;
+  content: string;
+  previousContent: string;
+  note?: string;
+}
+
+export interface ChapterVersionMeta {
+  index: number;
+  version: number;
+  createdAt: string;
+  source: ChapterVersionSource;
+  title: string;
+  summary: string;
+  words: number;
+  note?: string;
+}
+
 export interface PublishRecord {
   platform: "export" | "fanqie";
   at: string;
@@ -169,6 +472,26 @@ export interface PublishRecord {
   status: "success" | "failed";
   mode?: "publish" | "draft";
   message: string;
+}
+
+export type PublishLedgerStatus = "published" | "uncertain";
+
+// 永久发布台账：只记录“确定发布成功”或“结果待人工确认”的章节，用于幂等去重。
+export interface PublishLedgerEntry {
+  platform: "fanqie";
+  bookId: string;
+  bookName: string;
+  chapter: number;
+  status: PublishLedgerStatus;
+  at: string;
+  jobId?: string;
+  message?: string;
+}
+
+export interface PublishLedger {
+  version: number;
+  records: Record<string, PublishLedgerEntry>;
+  updatedAt: string;
 }
 
 export interface ProjectState {
@@ -224,6 +547,8 @@ export interface ChapterWriteOptions {
   reviewFeedback?: string;
   nextOpening?: string;
   canon?: CanonFacts;
+  memoryContext?: string;
+  storyContext?: string;
 }
 
 export interface ProjectDetail {
@@ -236,6 +561,7 @@ export interface ProjectDetail {
   chapters: ChapterContent[];
   canon: CanonFacts;
   publish: ProjectPublish;
+  publishLedger: PublishLedger;
   pendingChapters: number;
 }
 
@@ -267,6 +593,8 @@ export interface JobParams {
   useReview?: boolean;
   // 定点修复的问题来源：总体审校报告，或章节审校里的遗留问题。
   source?: "audit" | "review";
+  // 番茄发布是有外部副作用的操作，必须由发起端显式确认。
+  confirmPublish?: boolean;
 }
 
 export type JobStatus =
@@ -288,6 +616,7 @@ export interface Job {
     | "rewrite"
     | "repair"
     | "recanon"
+    | "memory"
     | "audit"
     | "export"
     | "fanqie-login"

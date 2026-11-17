@@ -1,5 +1,6 @@
 import { promises as fs, readFileSync, statSync } from "fs";
 import path from "path";
+import { writeFileAtomic } from "./storage";
 import type { LLMProvider } from "./config";
 
 const DATA_DIR = process.env.QUILLMATE_DATA_DIR?.trim()
@@ -82,11 +83,10 @@ export async function readSettings(): Promise<SavedSettings | null> {
 }
 
 export async function writeSettings(settings: SavedSettings): Promise<void> {
-  await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
   // 文件里有明文 API Key，尽量收紧为仅当前用户可读写；
   // Windows 对 mode 的支持有限，所以同时依赖 .gitignore 防止误提交。
-  await fs.writeFile(SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`, {
-    encoding: "utf8",
+  // 原子写入避免进程中断留下半截配置，导致下次启动读不到 Key。
+  await writeFileAtomic(SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`, {
     mode: 0o600,
   });
   cache = null;

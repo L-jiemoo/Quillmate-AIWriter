@@ -8,16 +8,27 @@ import { ChaptersTab } from "./ChaptersTab";
 import { CharactersTab } from "./CharactersTab";
 import { ContinuityTab } from "./ContinuityTab";
 import { JobPanel } from "./JobPanel";
+import { MemoryTab } from "./MemoryTab";
 import { OverviewTab } from "./OverviewTab";
 import { PublishTab } from "./PublishTab";
+import { StoryTab } from "./StoryTab";
 
-type TabKey = "overview" | "characters" | "chapters" | "continuity" | "publish";
+type TabKey =
+  | "overview"
+  | "characters"
+  | "chapters"
+  | "continuity"
+  | "memory"
+  | "story"
+  | "publish";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "总览" },
   { key: "characters", label: "角色设定" },
   { key: "chapters", label: "章节" },
   { key: "continuity", label: "连续性" },
+  { key: "memory", label: "记忆" },
+  { key: "story", label: "剧情台账" },
   { key: "publish", label: "发布" },
 ];
 
@@ -226,7 +237,9 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
         </nav>
 
         <section className="main-column">
-          {tab === "overview" ? <OverviewTab detail={detail} /> : null}
+          {tab === "overview" ? (
+            <OverviewTab detail={detail} onRefresh={refresh} />
+          ) : null}
           {tab === "characters" ? <CharactersTab detail={detail} onRefresh={refresh} /> : null}
           {tab === "chapters" ? (
             <ChaptersTab
@@ -241,6 +254,22 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
           ) : null}
           {tab === "continuity" ? (
             <ContinuityTab
+              detail={detail}
+              onStartJob={startJob}
+              onRefresh={refresh}
+              disabled={running}
+            />
+          ) : null}
+          {tab === "memory" ? (
+            <MemoryTab
+              detail={detail}
+              onStartJob={startJob}
+              onRefresh={refresh}
+              disabled={running}
+            />
+          ) : null}
+          {tab === "story" ? (
+            <StoryTab
               detail={detail}
               onStartJob={startJob}
               onRefresh={refresh}

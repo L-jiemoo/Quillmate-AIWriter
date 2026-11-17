@@ -1,8 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ProjectDetail } from "@/lib/types";
+import { diffLines } from "@/lib/text-diff";
+import type {
+  ChapterVersion,
+  ChapterVersionMeta,
+  ProjectDetail,
+} from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
+
+const VERSION_SOURCE_LABEL: Record<ChapterVersionMeta["source"], string> = {
+  "ai-write": "AI 写作",
+  "ai-rewrite": "AI 重写",
+  "ai-repair": "AI 修复",
+  user: "手动保存",
+  restore: "版本恢复",
+  system: "系统/导入",
+};
 
 // textarea 没有“滚动到第 N 个字符”的能力，用同样样式的隐藏镜像算出匹配所在行高。
 function scrollTextareaTo(textarea: HTMLTextAreaElement, position: number) {
@@ -64,6 +78,16 @@ export function ChaptersTab({
   const [findOpen, setFindOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [matchIndex, setMatchIndex] = useState(0);
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [versions, setVersions] = useState<ChapterVersionMeta[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsError, setVersionsError] = useState("");
+  const [versionDetail, setVersionDetail] = useState<ChapterVersion | null>(null);
+  const [versionDiffBase, setVersionDiffBase] = useState<"previous" | "current">(
+    "previous",
+  );
+  const [versionDetailError, setVersionDetailError] = useState("");
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -83,6 +107,14 @@ export function ChaptersTab({
     return positions;
   }, [content, needle]);
   const activeMatch = matches.length ? Math.min(matchIndex, matches.length - 1) : -1;
+
+  const versionDiff = useMemo(() => {
+    if (!versionDetail) return [];
+    if (versionDiffBase === "current") {
+      return diffLines(versionDetail.content, content);
+    }
+    return diffLines(versionDetail.previousContent, versionDetail.content);
+  }, [versionDetail, versionDiffBase, content]);
 
   useEffect(() => {
     if (!findOpen || !needle) return;
@@ -184,6 +216,7 @@ export function ChaptersTab({
       if (!response.ok) throw new Error(data.error ?? "保存失败");
       setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
       await onRefresh();
+      if (versionsOpen) await loadVersions();
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -191,9 +224,92 @@ export function ChaptersTab({
     }
   }
 
+  async function loadVersions() {
+    setVersionsLoading(true);
+    setVersionsError("");
+    try {
+      const response = await fetch(
+        `/api/projects/${detail.meta.slug}/chapters/${selected}/versions`,
+        { cache: "no-store" },
+      );
+      const data = (await response.json()) as {
+        versions?: ChapterVersionMeta[];
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error ?? "加载历史版本失败");
+      setVersions(data.versions ?? []);
+    } catch (err) {
+      setVersionsError(errorMessage(err));
+    } finally {
+      setVersionsLoading(false);
+    }
+  }
+
+  async function openVersions() {
+    setVersionsOpen(true);
+    setVersionDetail(null);
+    setVersionDetailError("");
+    await loadVersions();
+  }
+
+  async function viewVersion(version: number, base: "previous" | "current") {
+    setVersionDetailError("");
+    try {
+      const response = await fetch(
+        `/api/projects/${detail.meta.slug}/chapters/${selected}/versions/${version}`,
+        { cache: "no-store" },
+      );
+      const data = (await response.json()) as {
+        version?: ChapterVersion;
+        error?: string;
+      };
+      if (!response.ok || !data.version) {
+        throw new Error(data.error ?? "加载版本失败");
+      }
+      setVersionDetail(data.version);
+      setVersionDiffBase(base);
+    } catch (err) {
+      setVersionDetailError(errorMessage(err));
+    }
+  }
+
+  async function restoreVersion(version: number) {
+    if (disabled || restoringVersion !== null) return;
+    if (
+      !window.confirm(
+        `确定将第 ${selected} 章恢复到第 ${version} 版？\n\n当前正文会先保存为一个新的恢复前版本；事实台账和审校记录不会自动回滚，恢复后建议重新审校或重建台账。`,
+      )
+    ) {
+      return;
+    }
+
+    setRestoringVersion(version);
+    setVersionsError("");
+    try {
+      const response = await fetch(
+        `/api/projects/${detail.meta.slug}/chapters/${selected}/versions/${version}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "restore", confirm: true }),
+        },
+      );
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "恢复版本失败");
+      setVersionDetail(null);
+      await onRefresh();
+      await loadVersions();
+    } catch (err) {
+      setVersionsError(errorMessage(err));
+    } finally {
+      setRestoringVersion(null);
+    }
+  }
+
   return (
-    <div className="chapter-layout">
-      <aside className="panel chapter-list-panel">
+    <div className="chapters-wrap">
+      <div className="chapter-layout">
+        <aside className="panel chapter-list-panel">
         <div className="panel-head">
           <h2 className="panel-title">章节</h2>
           <button
@@ -222,6 +338,11 @@ export function ChaptersTab({
                   setSavedAt("");
                   setFindOpen(false);
                   setMatchIndex(0);
+                  setVersionsOpen(false);
+                  setVersions([]);
+                  setVersionDetail(null);
+                  setVersionsError("");
+                  setVersionDetailError("");
                 }}
               >
                 <span className="chapter-index">
@@ -247,6 +368,14 @@ export function ChaptersTab({
             <span className="muted small">
               {content.replace(/\s+/g, "").length.toLocaleString("zh-CN")} 字
             </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={openVersions}
+              title="查看、对比或恢复历史版本"
+            >
+              历史版本
+            </button>
             <button
               type="button"
               className="btn btn-ghost btn-sm"
@@ -390,6 +519,121 @@ export function ChaptersTab({
           </div>
         </div>
       </section>
+      </div>
+      {versionsOpen ? (
+        <section className="panel version-panel">
+          <div className="panel-head">
+            <h2 className="panel-title">第 {selected} 章 · 历史版本</h2>
+            <div className="panel-head-tools">
+              <span className="muted small">{versions.length} 个版本</span>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={loadVersions}
+                disabled={versionsLoading}
+              >
+                {versionsLoading ? "加载中…" : "刷新"}
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  setVersionsOpen(false);
+                  setVersionDetail(null);
+                }}
+              >
+                收起
+              </button>
+            </div>
+          </div>
+          <div className="panel-body">
+            <p className="hint">
+              每次保存、AI 重写或定点修复都会记录版本。恢复旧版本会新建一条版本，不会删除历史；事实台账与审校记录不会自动回滚。
+            </p>
+            {versionsError ? <p className="form-error">{versionsError}</p> : null}
+            {versions.length ? (
+              <ul className="version-list">
+                {[...versions].reverse().map((item) => (
+                  <li key={`${item.version}-${item.createdAt}`} className="version-item">
+                    <div className="version-main">
+                      <div className="version-line">
+                        <span className="version-badge">v{item.version}</span>
+                        <span className="version-source">
+                          {VERSION_SOURCE_LABEL[item.source] ?? item.source}
+                        </span>
+                        <span className="muted small">
+                          {new Date(item.createdAt).toLocaleString("zh-CN", {
+                            hour12: false,
+                          })}
+                        </span>
+                        <span className="muted small">{item.words} 字</span>
+                      </div>
+                      {item.note ? <p className="muted small">{item.note}</p> : null}
+                    </div>
+                    <div className="version-actions">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => viewVersion(item.version, "previous")}
+                      >
+                        对比上一版
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => viewVersion(item.version, "current")}
+                      >
+                        与当前稿对比
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm danger-text"
+                        onClick={() => restoreVersion(item.version)}
+                        disabled={disabled || restoringVersion !== null}
+                      >
+                        {restoringVersion === item.version ? "恢复中…" : "恢复此版本"}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : versionsLoading ? (
+              <p className="muted">正在读取版本…</p>
+            ) : (
+              <p className="muted">还没有历史版本。之后的保存、重写或修复会自动记录。</p>
+            )}
+            {versionDetailError ? <p className="form-error">{versionDetailError}</p> : null}
+            {versionDetail ? (
+              <div className="version-diff">
+                <div className="version-diff-head">
+                  <div>
+                    <span className="version-badge">v{versionDetail.version}</span>
+                    <span className="muted small">
+                      {versionDiffBase === "current"
+                        ? "此版本 → 当前编辑器内容"
+                        : "上一版 → 此版本"}
+                    </span>
+                  </div>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setVersionDetail(null)}
+                  >
+                    关闭对比
+                  </button>
+                </div>
+                <div className="version-diff-body">
+                  {versionDiff.map((line, index) => (
+                    <div
+                      key={`${index}-${line.type}`}
+                      className={`diff-line ${line.type}`}
+                    >
+                      <span className="diff-mark">
+                        {line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}
+                      </span>
+                      <span>{line.text || " "}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -1,4 +1,10 @@
 import { NextResponse } from "next/server";
+import {
+  apiError,
+  assertSameOrigin,
+  noStoreJson,
+  readJsonBody,
+} from "@/lib/api";
 import { getConfigSource, getRuntimeConfig } from "@/lib/config";
 import type { LLMProvider } from "@/lib/config";
 import {
@@ -65,12 +71,13 @@ async function snapshot() {
 }
 
 export async function GET() {
-  return NextResponse.json(await snapshot());
+  return noStoreJson(await snapshot());
 }
 
 export async function PUT(request: Request) {
   try {
-    const body = (await request.json()) as {
+    assertSameOrigin(request);
+    const body = await readJsonBody<{
       provider?: string;
       baseUrl?: string;
       model?: string;
@@ -78,7 +85,7 @@ export async function PUT(request: Request) {
       temperature?: number;
       maxTokens?: number;
       clearApiKey?: boolean;
-    };
+    }>(request);
 
     const current = (await readSettings()) ?? envDefaults();
     const provider: LLMProvider =
@@ -117,9 +124,8 @@ export async function PUT(request: Request) {
       maxTokens: Math.round(clamp(body.maxTokens, current.maxTokens, 1, 32768)),
     });
 
-    return NextResponse.json(await snapshot());
+    return noStoreJson(await snapshot());
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message }, { status: 400 });
+    return apiError(error);
   }
 }

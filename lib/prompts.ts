@@ -238,7 +238,7 @@ ${clip(characterJson, 6000)}
 
 【不可违背的事实台账（来自已写章节）】
 ${formatCanonForPrompt(options.canon)}
-${options.reviewFeedback?.trim() ? `\n【上一版审校发现的严重问题（新稿中仍存在则必须解决，已不存在的不要强行改剧情）】\n${clip(options.reviewFeedback.trim(), 2400)}\n` : ""}
+${options.memoryContext?.trim() ? `\n【长期记忆（来自已写章节，按当前章节相关度检索）】\n${options.memoryContext.trim()}\n` : ""}${options.storyContext?.trim() ? `\n【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】\n${options.storyContext.trim()}\n` : ""}${options.reviewFeedback?.trim() ? `\n【上一版审校发现的严重问题（新稿中仍存在则必须解决，已不存在的不要强行改剧情）】\n${clip(options.reviewFeedback.trim(), 2400)}\n` : ""}
 【上一章结尾（原文）】
 ${ending}
 ${nextOpening ? `\n【下一章开头（供收束参考）】\n${clip(nextOpening, 800)}\n` : ""}
@@ -254,6 +254,10 @@ ${previous}
 ${options.mode === "rewrite" ? "- 这是在重写已有章节：不要照抄旧稿，按细纲和重写要求重新组织场景与叙述。\n" : ""}${rewriteNote ? `- 本次重写要求：${rewriteNote}\n` : ""}- 本章开头必须直接承接【上一章结尾（原文）】中的人物动作、场景和情绪，不要复述上一章，也不要无交代地另起一场戏。
 - 如果本章细纲要求换场或时间跳跃，必须在前 200 字内用动作、对话或叙述交代过渡。
 ${nextOpening ? "- 本章结尾必须能自然过渡到【下一章开头（供收束参考）】，不要与其矛盾。\n" : ""}- 严格遵守【不可违背的事实台账】：已死亡角色不得以活人身份行动；关键物品的持有人、形态与状态不得随意改写；日期、天数和死线必须前后一致。
+- 【长期记忆】只来自已写章节的摘要/事件/人物/规则检索结果；记忆中没有记录的人物、物品、关系和事件，不得补写成既定事实。检索不到时按本章细纲自然推进，不要虚构“前文已经发生”的内容。
+- 如果【长期记忆】与事实台账冲突，以事实台账为准；如果与本章细纲冲突，以已写事实为准并自然处理。
+- 【剧情台账】中的人物状态、关系、事件和伏笔也只来自已写章节；未记录的状态变化、关系和因果不得凭空补写。人物行为必须符合其当前生死、位置、身体、能力和掌握的信息。
+- 伏笔只按台账中“未回收/待回收/发展中”的状态推进；不得在没有正文依据时宣布回收。若本章按细纲需要回收，必须写出明确回收情节。
 - 已死角色只能以回忆、尸体、幻象、遗物或他人转述出现；不得说话、行走、战斗、持有物品或推动现场剧情。若细纲要求其行动，改用其他在世角色承担该行动，或明确处理为上述非活人形式。
 - 如果本章细纲与事实台账冲突，以事实台账为准，并在正文中自然处理；不得为了迎合细纲而复活死者或改写既定事实。
 - 字数约 ${meta.wordsPerChapter} 字（上下浮动 20% 以内）。
@@ -324,7 +328,59 @@ ${clip(chapterText, 16000)}
       {"name": "期限名", "due": "到期时间", "note": "剩余时间或后果"}
     ]
   },
-  "rules": ["本章确立的、后续不能违背的硬性规则"]
+  "rules": ["本章确立的、后续不能违背的硬性规则"],
+  "memory": {
+    "events": ["本章实际发生的关键事件"],
+    "characters": ["本章实际出场或行动的人物"],
+    "actions": ["人物名：本章完成的关键行动"],
+    "time": "本章结束时的故事内时间；未知则留空",
+    "location": "本章结束时主要人物所在地点；未知则留空",
+    "endingState": "章末人物处境、局势或悬念",
+    "newSettings": ["本章新增且后续需要记住的设定"],
+    "foreshadowsPlanted": ["本章新埋下的伏笔"],
+    "foreshadowsResolved": ["本章明确回收的旧伏笔"]
+  },
+  "story": {
+    "states": [
+      {
+        "name": "正文中的正式姓名",
+        "identity": "当前身份/职业/伪装身份；未知则留空",
+        "age": "故事时间对应的年龄；未知则留空",
+        "location": "本章结束时所在地点；未知则留空",
+        "bodyState": "伤势、疾病、中毒、虚弱等身体状态；未知则留空",
+        "lifeStatus": "alive | dead | unknown",
+        "abilities": ["本章确认或变化的能力"],
+        "goals": ["人物当前目标"],
+        "knowledge": ["人物当前明确掌握的信息/秘密"],
+        "faction": "所属阵营；未知则留空",
+        "experience": "本章发生的重要经历",
+        "evidence": "正文中的短句依据"
+      }
+    ],
+    "relations": [
+      {
+        "from": "人物名",
+        "to": "人物名",
+        "type": "师徒/父子/敌对/盟友等",
+        "status": "当前关系状态或本章变化",
+        "evidence": "正文中的短句依据"
+      }
+    ],
+    "events": [
+      {
+        "name": "事件名称",
+        "time": "事件发生的故事内时间；未知则留空",
+        "location": "事件发生地点；未知则留空",
+        "participants": ["实际参与者"],
+        "cause": "事件起因",
+        "process": "事件过程",
+        "result": "事件结果",
+        "impact": "对后续剧情的影响",
+        "relatedEvents": ["本章内因果相关的事件名称"],
+        "foreshadows": ["本事件关联的伏笔原文或摘要"]
+      }
+    ]
+  }
 }
 
 要求：
@@ -335,31 +391,59 @@ ${clip(chapterText, 16000)}
 - 只出现在坟地、遗物、笔记、名单、回忆里的已死人物，status 填 dead 或 unknown，不要因为名字出现就标 alive。
 - 只抽取有名字、会行动或状态发生变化的人物，以及推动剧情的关键物品。
 - 不要臆造正文没有的姓名、物品、日期；summary 里不得出现正文没有的人名或事件。
+- memory.events 只写本章正文实际推进的事件，不写细纲里计划但正文没发生的内容；memory.characters 中的名字必须在正文出现。
+- memory.foreshadowsPlanted 只记录正文中明确留下、后续可能需要回收的线索；普通悬念不要全部算作伏笔。memory.foreshadowsResolved 只记录本章明确回收的旧伏笔。
+- story.states 只写本章结束时的状态快照，不写计划、猜测或未来变化；lifeStatus 只能填 alive、dead、unknown，本章死亡才填 dead。
+- story.relations 只写正文明确体现的关系或本章发生的关系变化；不要补写未出现的关系。
+- story.events 只写正文实际发生的事件；participants 必须是正文出现的参与者。relatedEvents 只能引用本章事件名称；foreshadows 只关联正文明确涉及的伏笔。
 - evidence 必须摘自本章正文。`,
     },
   ];
 }
 
+function formatCharacterProfiles(characters: Character[]): string {
+  if (!characters.length) return "（暂无人物卡）";
+  return characters
+    .slice(0, 12)
+    .map((character) => {
+      const parts = [`${character.name}（${character.role || "角色"}）`];
+      if (character.personality) parts.push(`性格：${clip(character.personality, 120)}`);
+      if (character.goals) parts.push(`目标：${clip(character.goals, 100)}`);
+      if (character.speechStyle) parts.push(`说话：${clip(character.speechStyle, 80)}`);
+      if (character.relationships) parts.push(`关系：${clip(character.relationships, 120)}`);
+      return `- ${parts.join("；")}`;
+    })
+    .join("\n");
+}
+
 export function auditMessages(
   meta: ProjectMeta,
   canon: CanonFacts,
+  characters: Character[],
   chapter: ChapterPlan,
   chapterText: string,
   previousContext: string,
   suspicions: ContinuityIssue[],
   nextContext: string,
+  storyContext: string,
 ): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你是极其严格的中文小说责编，只负责找前后矛盾。你必须引用本章原文作为证据，不确定或只是文风偏好的问题标为 ignore。${JSON_ONLY}`,
+      content: `你是极其严格的中文小说责编，负责连续性与创作质量审校。你必须引用本章原文作为证据，不确定、证据不足或只是文风偏好的问题标为 ignore。${JSON_ONLY}`,
     },
     {
       role: "user",
-      content: `请审校《${meta.title}》第 ${chapter.index} 章《${chapter.title}》与已写内容的连续性。
+      content: `请审校《${meta.title}》第 ${chapter.index} 章《${chapter.title}》。
 
 【事实台账（含每条事实确立的章节号）】
 ${formatCanonForPrompt(canon, { includeChapters: true })}
+
+【核心人物档案（用于人物性格与行为一致性）】
+${formatCharacterProfiles(characters)}
+
+【剧情台账（人物状态/关系/事件/伏笔，来自已写章节）】
+${clip(storyContext || "（未检索到剧情台账）", 4000)}
 
 【前文衔接（上一章结尾与最近摘要）】
 ${clip(previousContext || "（无）", 4000)}
@@ -367,7 +451,7 @@ ${clip(previousContext || "（无）", 4000)}
 【后文参考（重写时用于衔接下一章）】
 ${clip(nextContext || "（无）", 2500)}
 
-【机械检查线索（可能误报，需结合正文判断）】
+【本章自动检查线索（可能误报，需结合正文判断）】
 ${formatIssuesForPrompt(suspicions)}
 
 【本章细纲】
@@ -383,22 +467,38 @@ ${clip(chapterText, 16000)}
   "issues": [
     {
       "severity": "critical | warning | ignore",
-      "type": "死亡状态 | 物品 | 时间线 | 位置 | 称谓 | 人物关系 | 能力规则 | 其他",
-      "evidence": "本章正文中的原文短句",
-      "detail": "与台账或第几章的什么事实冲突，为什么读者会觉得前后不一致"
+      "type": "人物行为 | 人物性格 | 时间线 | 地点 | 死亡状态 | 物品归属 | 世界观规则 | 剧情因果 | 伏笔连续性 | 章节重复 | 大纲偏离 | 称谓 | 人物关系 | 其他",
+      "evidence": "本章正文中的原文短句；不得只写摘要",
+      "detail": "与第几章的哪条台账/规则/细纲冲突，为什么读者会觉得不合理"
     }
   ],
   "continuityOk": true
 }
 
+审校维度（逐项检查）：
+1. 人物行为合理性：行动是否符合处境、能力、目标和已知信息。
+2. 人物性格一致性：言行是否与人物卡和既有塑造一致。
+3. 时间线连续性：日期、天数、期限、事件先后。
+4. 地点连续性：同一时间的位置关系、移动是否可能。
+5. 人物生死状态：已死人物是否被错误地写成活人行动。
+6. 物品归属：关键物品的持有人、形态、来历是否被改写。
+7. 世界观规则冲突：是否违反已确立的硬性规则。
+8. 剧情因果关系：事件是否有足够起因，结果是否承接过程。
+9. 伏笔连续性：回收是否有埋设依据，是否提前宣布回收。
+10. 章节内容重复：是否大段复述前文或与旧章重复。
+11. 章节与大纲偏离：本章是否明显缺少细纲要求的关键事件。
+
 判定规则：
-- critical：与台账或前文直接矛盾，且不修会让读者认为前文写错。例如：已死人物以活人身份行动；关键物品的持有人、形态或来历被改写；日期、天数、期限算错；同一时间人物出现在两个相隔很远的地方；人物关系称谓突变。
-- warning：表达含糊、缺少过渡、需要读者脑补，但不构成硬矛盾；值得顺手修改。
+- critical：与事实台账、前文或硬性规则直接矛盾，且不修会让读者认为前文写错。例如：已死人物以活人身份行动；关键物品的持有人、形态或来历被改写；日期、天数、期限算错；同一时间人物出现在两个相隔很远的地方；人物关系称谓突变。
+- warning：表达含糊、缺少过渡、需要读者脑补，或明显偏离细纲/人物性格，但不构成硬数据矛盾；值得顺手修改。
 - ignore：只是措辞、文风、细节偏好，或证据不足、可改可不改，不影响连续性和读者理解；定点修复不会处理这类问题。
+- 每条问题必须有本章原文证据；detail 要写清与第几章、哪条台账、哪条规则或哪条细纲冲突。能定位时写“章内位置/人物动作/场景”，但不要编造不存在的原文。
 - 回忆、尸体、幻象、转述中的死者不算复活；引用旧事不等于事实改变。
 - 已死人物在本章说话、行走、战斗、持有物品或推动现场剧情，且上下文没有明确写成回忆、尸体、幻象、遗物或他人转述时，必须标为 critical。
 - 重写章节时：台账里 statusChapter 等于本章序号的条目属于旧稿事实，可以在本章被改写，不要因此报 critical；statusChapter 小于本章序号的是硬约束；大于本章序号的是后文事实，只用于检查衔接，不要用它否定本章。
-- 机械检查线索只是待核实提示：核对后确认是回忆、尸体、幻象、遗物或他人转述的，不要输出这一条，也不要在 issues 里写“机械检查误报 / 不构成复活 / 不属问题 / 应标为 ignore”这类说明。
+- 剧情台账和长期记忆是辅助线索，不是绝对真理：与事实台账冲突时以事实台账为准，与正文明确写出的事实冲突时以正文为准；不能因为台账没有记录就判定正文错误。
+- 不允许为了通过审校而建议修改既定事实、台账或后文设定；如果正文与既定事实冲突，应指出正文需要修改，而不是让台账迁就正文。
+- 自动检查线索只是待核实提示：核对后确认是回忆、尸体、幻象、遗物或他人转述的，不要输出这一条，也不要在 issues 里写“机械检查误报 / 不构成复活 / 不属问题 / 应标为 ignore”这类说明。
 - issues 只保留确实需要作者修改的问题；确认不是问题就直接不输出，不要为了解释误报而保留一条空问题。
 - 拿不准是否构成矛盾、或只是润色建议时标 ignore；不要为了凑问题把可忽略项标成 warning。
 - continuityOk 只有在没有任何 critical 时才为 true。`,
@@ -439,8 +539,10 @@ ${nextOpening ? `【下一章开头（用于保持结尾衔接）】\n${clip(nex
 ${clip(chapterText, 16000)}
 
 修订要求：
+- 逐项核对问题涉及的人物行为合理性、人物性格一致性、时间线、地点、生死状态、物品归属、世界观规则、剧情因果、伏笔连续性和大纲偏离；只修与这些问题直接相关的段落。
 - 只修改与上述问题直接相关的段落；其余段落尽量保持原样，不要重写整章。
 - 不得复活已死亡人物，不得改动物品的持有人、形态和来历，不得改变已经确立的时间线和期限。
+- 不得为了让本章通过而修改事实台账、删除既定剧情、改写其他章节或把矛盾解释成“回忆/幻觉”来蒙混；如果问题实际不成立，可以保留原段落。
 - 涉及“已死人物仍以活人身份行动”的问题：必须删除或改写所有相关动作、对话和在场描写，只能保留回忆、尸体、幻象、遗物或他人转述；必要时让其他在世角色承担剧情功能。
 - 修正后本章开头仍要承接上一章结尾，结尾仍要能过渡到下一章开头（如果有）。
 - 如果某条问题实际不成立，可以保留原段落，但不得引入新的矛盾。

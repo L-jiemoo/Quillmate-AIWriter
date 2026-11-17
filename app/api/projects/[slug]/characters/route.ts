@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
+import {
+  apiError,
+  assertSafeSlugParam,
+  assertSameOrigin,
+  readJsonBody,
+} from "@/lib/api";
 import { normalizeCharacter, saveCharacters } from "@/lib/store";
-import { errorMessage } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +16,9 @@ interface RouteContext {
 
 export async function PUT(request: Request, { params }: RouteContext) {
   try {
-    const body = (await request.json()) as { characters?: unknown };
+    assertSameOrigin(request);
+    const slug = assertSafeSlugParam(params.slug);
+    const body = await readJsonBody<{ characters?: unknown }>(request);
     if (!Array.isArray(body.characters)) {
       return NextResponse.json({ error: "characters 必须是数组" }, { status: 400 });
     }
@@ -20,9 +27,11 @@ export async function PUT(request: Request, { params }: RouteContext) {
       .map(normalizeCharacter)
       .filter((character) => character.name.trim().length > 0);
 
-    await saveCharacters(params.slug, characters);
-    return NextResponse.json({ count: characters.length });
+    const saved = await saveCharacters(slug, characters, {
+      markChangedAsUser: true,
+    });
+    return NextResponse.json({ count: saved.length });
   } catch (error) {
-    return NextResponse.json({ error: errorMessage(error) }, { status: 400 });
+    return apiError(error);
   }
 }

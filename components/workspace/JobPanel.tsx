@@ -22,6 +22,7 @@ const TYPE_LABEL: Record<Job["type"], string> = {
   rewrite: "重写章节",
   repair: "定点修复",
   recanon: "重建事实台账",
+  memory: "重建长期记忆与剧情台账",
   audit: "总体审校",
   export: "导出全书",
   "fanqie-login": "登录番茄",
@@ -88,7 +89,7 @@ export function JobPanel({
     if (
       detail.plan.chapters.length &&
       !window.confirm(
-        "重新生成架构会覆盖现有大纲；已写章节文件仍会保留，但可能与新大纲不一致。继续？",
+        "重新生成架构会覆盖现有大纲、世界观和 AI 角色卡；已写章节文件仍会保留，但可能与新大纲不一致。全部生成成功并通过校验后才会写入；手动编辑或旧版人物卡会保留。继续？",
       )
     ) {
       return;
@@ -118,14 +119,9 @@ export function JobPanel({
     }
 
     const published = new Set(
-      (detail.state.publishHistory ?? [])
-        .filter(
-          (record) =>
-            record.platform === "fanqie" &&
-            record.status === "success" &&
-            record.mode === "publish",
-        )
-        .flatMap((record) => record.chapters),
+      Object.values(detail.publishLedger.records)
+        .filter((entry) => entry.status === "published")
+        .map((entry) => entry.chapter),
     );
     const publishedTargets = indices.filter((index) => published.has(index));
     const warning = publishedTargets.length

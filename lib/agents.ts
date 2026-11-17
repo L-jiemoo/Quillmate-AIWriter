@@ -1,7 +1,16 @@
 import { normalizeExtractedFacts, normalizeReviewResult } from "./canon";
 import { getRuntimeConfig } from "./config";
 import { LLMClient } from "./llm";
+import {
+  groundExtractedMemory,
+  normalizeExtractedMemory,
+} from "./memory";
+import {
+  groundExtractedStory,
+  normalizeExtractedStory,
+} from "./story";
 import { mockChapter, mockCharacters, mockExtendedChapters, mockPlan, mockReview } from "./mock";
+import { assertValidChapterPlans, parseChapterIndex } from "./plan-validation";
 import {
   architectMessages,
   auditMessages,
@@ -42,23 +51,47 @@ export async function generatePlan(meta: ProjectMeta): Promise<GeneratedPlan> {
   if (isMock()) return mockPlan(meta);
 
   const llm = new LLMClient();
-  const data = await llm.json<Record<string, unknown>>(architectMessages(meta));
+  const data = await llm.json<Record<string, unknown>>(architectMessages(meta), {
+    agent: "architect",
+  });
   const rawChapters = Array.isArray(data.chapters) ? data.chapters : [];
-  // 模型输出不可全信：缺 index 的章节按数组顺序补号，
-  // 缺标题的给默认名，最后按 index 排序，保证细纲可以直接落盘。
+  if (!rawChapters.length) {
+    throw new Error("架构师没有返回章节细纲，请重试或更换模型");
+  }
+
+  const hasAnyIndex = rawChapters.some((item) => {
+    const record = (item ?? {}) as Record<string, unknown>;
+    return (
+      record.index !== undefined &&
+      record.index !== null &&
+      !(typeof record.index === "string" && !record.index.trim())
+    );
+  });
+
   const chapters: ChapterPlan[] = rawChapters
-    .map((item, i) => {
+    .map((item, position) => {
       const record = (item ?? {}) as Record<string, unknown>;
+      const parsed = parseChapterIndex(record.index);
+      if (hasAnyIndex && parsed === null) {
+        throw new Error(
+          `架构师返回的章节序号不合法：第 ${position + 1} 项为 ${String(record.index)}，必须是大于 0 的整数`,
+        );
+      }
       return {
-        index: typeof record.index === "number" ? record.index : i + 1,
-        title: str(record.title, `第 ${i + 1} 章`),
-        summary: str(record.summary),
+        // 全部章节都没给序号时按数组顺序补号；混用有效/无效序号则直接报错。
+        index: parsed ?? position + 1,
+        title: str(record.title).trim(),
+        summary: str(record.summary).trim(),
         keyBeats: arr(record.keyBeats ?? record.key_beats),
       };
     })
     .sort((a, b) => a.index - b.index);
 
-  if (!chapters.length) throw new Error("架构师没有返回章节细纲，请重试或更换模型");
+  assertValidChapterPlans(chapters, {
+    expectedCount: meta.targetChapters,
+    startIndex: 1,
+    requireContiguous: true,
+  });
 
   return {
     plan: {
@@ -77,9 +110,16 @@ export async function generateCharacters(meta: ProjectMeta, generated: Generated
   const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
     characterMessages(meta, generated.bible, generated.outlineMd),
+    { agent: "character-designer" },
   );
   const items = Array.isArray(data.characters) ? data.characters : [];
-  return items.map(normalizeCharacter).filter((character) => character.name.trim().length > 0);
+  const characters = items
+    .map(normalizeCharacter)
+    .filter((character) => character.name.trim().length > 0);
+  if (!characters.length) {
+    throw new Error("角色设计师没有返回可用角色，请重试或更换模型");
+  }
+  return characters;
 }
 
 function normalizeTitle(value: string): string {
@@ -133,6 +173,7 @@ async function repairDuplicateTitles(
     try {
       const data = await llm.json<Record<string, unknown>>(
         titleRepairMessages(duplicates, forbidden),
+        { agent: "title-repair" },
       );
       const items = Array.isArray(data.titles) ? data.titles : [];
       const accepted = new Set<string>();
@@ -185,27 +226,40 @@ export async function extendPlan(
   const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
     extendMessages(meta, plan, bible, outlineMd, recentSummaries, count, startIndex),
+    { agent: "extend-plan" },
   );
   const raw = Array.isArray(data.chapters) ? data.chapters : [];
-  // 模型可能多返回几章、或夹带空标题的行；先丢掉空项并截断到请求数量，
-  // 再按 startIndex 重新编号，保证章节号连续且不受模型自报序号影响。
-  const chapters = raw
+  // 模型可能多返回几章或夹带空标题的行：丢掉无效项后必须凑够请求数量，
+  // 再按 startIndex 重新编号，避免章节号断档或重复。
+  const candidates = raw
     .map((item) => {
       const record = (item ?? {}) as Record<string, unknown>;
       return {
-        index: startIndex,
-        title: str(record.title),
-        summary: str(record.summary),
+        title: str(record.title).trim(),
+        summary: str(record.summary).trim(),
         keyBeats: arr(record.keyBeats ?? record.key_beats),
       };
     })
-    .filter((chapter) => chapter.title.trim() && chapter.summary.trim())
-    .slice(0, count)
-    .map((chapter, i) => ({ ...chapter, index: startIndex + i }));
+    .filter((chapter) => chapter.title && chapter.summary);
 
-  if (!chapters.length) {
-    throw new Error("架构师没有返回新的章节细纲，请重试或更换模型");
+  if (candidates.length < count) {
+    throw new Error(
+      `架构师返回的有效章节不足：需要 ${count} 章，实际只有 ${candidates.length} 章`,
+    );
   }
+
+  const chapters: ChapterPlan[] = candidates.slice(0, count).map((chapter, i) => ({
+    index: startIndex + i,
+    title: chapter.title,
+    summary: chapter.summary,
+    keyBeats: chapter.keyBeats,
+  }));
+
+  assertValidChapterPlans(chapters, {
+    expectedCount: count,
+    startIndex,
+    requireContiguous: true,
+  });
 
   await repairDuplicateTitles(
     llm,
@@ -237,6 +291,7 @@ export async function writeChapter(
   const llm = new LLMClient();
   const raw = await llm.chat(
     writerMessages(meta, bible, characters, chapter, previousEnding, history, options),
+    { agent: "writer", chapter: chapter.index },
   );
   return stripFences(raw);
 }
@@ -255,6 +310,33 @@ export async function extractChapterFacts(
       items: [],
       timeline: null,
       rules: [],
+      memory: {
+        events: chapter.keyBeats.slice(0, 20),
+        characters: [],
+        actions: [],
+        time: "",
+        location: "",
+        endingState: "",
+        newSettings: [],
+        foreshadowsPlanted: [],
+        foreshadowsResolved: [],
+      },
+      story: {
+        states: [],
+        relations: [],
+        events: chapter.keyBeats.slice(0, 20).map((name) => ({
+          name,
+          time: "",
+          location: "",
+          participants: [],
+          cause: "",
+          process: "",
+          result: "",
+          impact: "",
+          relatedEvents: [],
+          foreshadows: [],
+        })),
+      },
     };
   }
 
@@ -262,19 +344,28 @@ export async function extractChapterFacts(
   const data = await llm.json<Record<string, unknown>>(
     factExtractorMessages(meta, bible, chapter, chapterText, canon),
     // 事实抽取要稳定复现，不用创作时的高温参数。
-    { temperature: 0.1 },
+    { temperature: 0.1, agent: "fact-extractor", chapter: chapter.index },
   );
-  return normalizeExtractedFacts(data, chapter.summary);
+  const facts = normalizeExtractedFacts(data, chapter.summary);
+  const memory = normalizeExtractedMemory(data.memory);
+  const story = normalizeExtractedStory(data.story);
+  return {
+    ...facts,
+    ...(memory ? { memory: groundExtractedMemory(memory, chapterText) } : {}),
+    story: groundExtractedStory(story, chapterText),
+  };
 }
 
 export async function auditChapter(
   meta: ProjectMeta,
   canon: CanonFacts,
+  characters: Character[],
   chapter: ChapterPlan,
   chapterText: string,
   previousContext: string,
   suspicions: ContinuityIssue[],
   nextContext: string,
+  storyContext: string,
 ): Promise<ReviewResult> {
   if (isMock()) return mockReview(chapter);
 
@@ -283,13 +374,15 @@ export async function auditChapter(
     auditMessages(
       meta,
       canon,
+      characters,
       chapter,
       chapterText,
       previousContext,
       suspicions,
       nextContext,
+      storyContext,
     ),
-    { temperature: 0.1 },
+    { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
   return normalizeReviewResult(data, chapter.summary);
 }
@@ -320,7 +413,7 @@ export async function repairChapter(
       rewriteInstruction,
       reviewFeedback,
     ),
-    { temperature: 0.2 },
+    { temperature: 0.2, agent: "repair-editor", chapter: chapter.index },
   );
   return stripFences(raw);
 }

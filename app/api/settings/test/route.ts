@@ -1,20 +1,35 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import {
+  ApiError,
+  apiError,
+  assertSameOrigin,
+  readJsonBody,
+} from "@/lib/api";
 import { getRuntimeConfig } from "@/lib/config";
 import { readSettings } from "@/lib/settings";
-import { errorMessage } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function validBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as {
+    assertSameOrigin(request);
+    const body = await readJsonBody<{
       provider?: string;
       baseUrl?: string;
       model?: string;
       apiKey?: string;
-    };
+    }>(request);
 
     const base = getRuntimeConfig();
 
@@ -40,17 +55,11 @@ export async function POST(request: Request) {
       process.env.LLM_API_KEY?.trim() ||
       base.apiKey;
 
-    if (!apiKey) {
-      return NextResponse.json(
-        { ok: false, error: "没有可用的 API Key，请先填写后再测试。" },
-        { status: 400 },
-      );
+    if (!validBaseUrl(baseUrl)) {
+      throw new ApiError(400, "接口地址必须以 http:// 或 https:// 开头");
     }
-
-    try {
-      new URL(baseUrl);
-    } catch {
-      return NextResponse.json({ ok: false, error: "接口地址格式不正确。" }, { status: 400 });
+    if (!apiKey) {
+      throw new ApiError(400, "没有可用的 API Key，请先填写后再测试。");
     }
 
     const client = new OpenAI({ apiKey, baseURL: baseUrl, timeout: 20000, maxRetries: 0 });
@@ -69,6 +78,6 @@ export async function POST(request: Request) {
       reply: response.choices[0]?.message?.content?.trim() ?? "",
     });
   } catch (error) {
-    return NextResponse.json({ ok: false, error: errorMessage(error) }, { status: 502 });
+    return apiError(error, 502);
   }
 }

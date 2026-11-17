@@ -57,6 +57,21 @@ describe("mock 全流程冒烟", () => {
     expect(written).toHaveLength(1);
     expect(afterWrite.canon.lastChapter).toBe(written[0].index);
 
+    const memory = await store.getMemory(slug);
+    expect(memory.chapters[String(written[0].index)]).toBeTruthy();
+    expect(memory.chapters[String(written[0].index)].source).toBe("ai");
+    expect(memory.chapters[String(written[0].index)].events.length).toBeGreaterThan(0);
+    expect(memory.volumes.length).toBeGreaterThan(0);
+    expect(
+      writeDone.logs.some((line) => line.message.includes("长期记忆")),
+    ).toBe(true);
+
+    const story = await store.getStory(slug);
+    expect(story.events.some((event) => event.chapter === written[0].index)).toBe(true);
+    expect(
+      writeDone.logs.some((line) => line.message.includes("剧情台账")),
+    ).toBe(true);
+
     const exported = await store.exportBookFile(slug);
     expect(exported.chapters).toBe(1);
     expect(exported.words).toBeGreaterThan(0);

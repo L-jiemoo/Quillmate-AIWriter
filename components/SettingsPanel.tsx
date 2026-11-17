@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { PromptVersionsPanel } from "@/components/PromptVersionsPanel";
 import type { LLMProvider } from "@/lib/config";
 import { errorMessage } from "@/lib/utils";
 
@@ -419,6 +420,8 @@ export function SettingsPanel() {
           </form>
         </section>
       </div>
+
+      <PromptVersionsPanel />
     </main>
   );
 }

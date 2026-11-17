@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
+import { apiError, assertSafeSlugParam, assertSameOrigin } from "@/lib/api";
 import { JobConflictError } from "@/lib/jobs";
 import { retryJob } from "@/lib/pipeline";
-import { errorMessage } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,9 +10,11 @@ interface RouteContext {
   params: { slug: string; id: string };
 }
 
-export async function POST(_request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params }: RouteContext) {
   try {
-    const job = await retryJob(params.slug, params.id);
+    assertSameOrigin(request);
+    const slug = assertSafeSlugParam(params.slug);
+    const job = await retryJob(slug, params.id);
     return NextResponse.json(job, { status: 202 });
   } catch (error) {
     if (error instanceof JobConflictError) {
@@ -21,8 +23,6 @@ export async function POST(_request: Request, { params }: RouteContext) {
         { status: 409 },
       );
     }
-    const message = errorMessage(error);
-    const status = message.includes("不存在") ? 404 : 400;
-    return NextResponse.json({ error: message }, { status });
+    return apiError(error);
   }
 }

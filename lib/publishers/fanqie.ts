@@ -4,49 +4,24 @@ import type { BrowserContext, Page } from "playwright";
 import { ARTIFACT_DIR, BROWSER_PROFILE_DIR, getBrowserChannel } from "../config";
 import { nowIso } from "../utils";
 import type { FanqieSelectors } from "../types";
+import {
+  classifyFanqieFailure,
+  DEFAULT_SELECTORS,
+  hasFanqieAuthCookie,
+  mergeFanqieSelectors,
+  PublishUncertainError,
+  validateFanqiePublishRequest,
+} from "./fanqie-core";
+
+export { PublishUncertainError } from "./fanqie-core";
 
 type LogFn = (message: string) => void;
 
 const WRITER_HOME = "https://fanqienovel.com/writer/zone/";
 const WORKBENCH_URL = "https://fanqienovel.com/main/writer/";
 const LOGIN_URL = "https://fanqienovel.com/main/writer/login?enter_from=author_zone";
-// 只认登录态 cookie 名称，不依赖页面上是否出现“退出登录”等文案；
-// 平台改版时文案常变，但这些会话 cookie 相对稳定。
-const AUTH_COOKIE_NAMES = ["sessionid", "sessionid_ss", "sid_guard", "sid_tt"];
 
 const CHAPTER_NUMBER_INPUTS = [".serial-editor-title-left input", "input.serial-input"];
-
-const DEFAULT_SELECTORS: FanqieSelectors = {
-  bookEntry: [".completion-book-item"],
-  createChapter: ['a:has-text("创建章节")', 'a:has-text("新建章节")'],
-  titleInput: [
-    'input[placeholder="请输入标题"]',
-    'input[placeholder*="章节名"]',
-    'input[placeholder*="章节标题"]',
-    'input[placeholder*="标题"]',
-  ],
-  contentEditor: [
-    ".serial-editor-container .ProseMirror",
-    ".syl-editor-container .ProseMirror",
-    '[contenteditable="true"]',
-    "textarea",
-  ],
-  saveButton: [
-    'button:has-text("存草稿")',
-    "text=存草稿",
-    "text=保存草稿",
-    'button:has-text("保存")',
-  ],
-  publishButton: ["button.publish-button", 'button:has-text("下一步")'],
-  confirmButton: [
-    'button:has-text("确认提交")',
-    'button:has-text("确认发布")',
-    'button:has-text("确定")',
-    'button:has-text("确认")',
-    "text=确认提交",
-    "text=确认发布",
-  ],
-};
 
 export interface FanqiePublishOptions {
   bookName: string;
@@ -58,6 +33,8 @@ export interface FanqiePublishOptions {
   chapters: { index: number; title: string; content: string }[];
   onLog: LogFn;
   onChapterPublished?: (index: number) => void | Promise<void>;
+  // 点击确认后无法确认是否成功：登记为待人工确认，并且本次任务停止。
+  onChapterUncertain?: (index: number, message: string) => void | Promise<void>;
   // 每个章节开始前调用；抛出取消错误时关闭浏览器并终止发布。
   checkCancelled?: () => void;
 }
@@ -346,8 +323,9 @@ async function submitForReview(
   }
   if (!submitted) {
     const shot = await snapshot(page, "fanqie-submit-blocked");
-    throw new Error(
-      `第 ${chapterIndex} 章提交后仍停留在发布设置，可能被平台拦截${
+    // 确认按钮已经点过，可能已提交成功也可能被拦截；交给人工核对，不能自动重发。
+    throw new PublishUncertainError(
+      `第 ${chapterIndex} 章点击确认后无法确认提交结果，可能已被平台拦截或仍在处理${
         shot ? `（截图：${shot}）` : ""
       }`,
     );
@@ -358,10 +336,7 @@ async function submitForReview(
 // 登录态判断只检查 cookie 是否非空，不校验有效期；
 // 真正过期时后续编辑页加载会失败，届时会提示重新登录。
 async function hasAuthCookie(context: BrowserContext): Promise<boolean> {
-  const cookies = await context.cookies();
-  return cookies.some(
-    (cookie) => AUTH_COOKIE_NAMES.includes(cookie.name) && Boolean(cookie.value),
-  );
+  return hasFanqieAuthCookie(await context.cookies());
 }
 
 async function openLoginEntry(page: Page, log: LogFn): Promise<void> {
@@ -463,28 +438,12 @@ export async function loginFanqie(
 export async function publishFanqie(options: FanqiePublishOptions): Promise<void> {
   options.checkCancelled?.();
   const log = options.onLog;
-  const selectors: FanqieSelectors = {
-    ...DEFAULT_SELECTORS,
-    ...options.selectors,
-  };
+  const selectors = mergeFanqieSelectors(options.selectors);
 
-  // 正式提交前先做字数预检：番茄要求每章正文不少于 1000 字，
-  // 与其等浏览器自动化跑到一半才失败，不如在启动时就指出具体章节。
-  // 草稿模式不做此限制，允许先用短稿占位。
-  if (options.autoSubmit) {
-    const tooShort = options.chapters
-      .map((chapter) => ({
-        index: chapter.index,
-        words: chapter.content.replace(/\s+/g, "").length,
-      }))
-      .filter((chapter) => chapter.words < 1000);
-    if (tooShort.length) {
-      throw new Error(
-        `以下章节不足 1000 字，番茄会拒绝提交：${tooShort
-          .map((chapter) => `第 ${chapter.index} 章（约 ${chapter.words} 字）`)
-          .join("、")}`,
-      );
-    }
+  // 启动浏览器前完成选品、选章、正文和字数预检；草稿模式允许短稿。
+  const validation = validateFanqiePublishRequest(options);
+  if (validation.errors.length) {
+    throw new Error(validation.errors.map((item) => item.message).join("；"));
   }
 
   const context = await launch(options.headless, log);
@@ -553,8 +512,15 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
       if (options.autoSubmit) {
         // 只有走完提交校验才回调记账；若中途抛错，调用方会把该章记为失败，
         // 下次发布会自动重试，不会误跳过。
-        await submitForReview(activePage, selectors, chapter.index, log);
-        await options.onChapterPublished?.(chapter.index);
+        try {
+          await submitForReview(activePage, selectors, chapter.index, log);
+          await options.onChapterPublished?.(chapter.index);
+        } catch (error) {
+          if (error instanceof PublishUncertainError) {
+            await options.onChapterUncertain?.(chapter.index, error.message);
+          }
+          throw error;
+        }
       } else {
         await clickFirst(activePage, selectors.saveButton, "存草稿", log);
         await activePage.waitForTimeout(1500);
@@ -567,6 +533,8 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
   } catch (error) {
     const shot = page ? await snapshot(page, "fanqie-error") : null;
     if (shot) log(`出错截图：${shot}`);
+    const failure = classifyFanqieFailure(error);
+    log(`发布失败类型：${failure.label}；${failure.advice}`);
     throw error;
   } finally {
     await context.close().catch(() => undefined);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { matchesPublishWork } from "@/lib/publish-ledger";
 import type { ProjectDetail, StartJobFn } from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
 
@@ -30,25 +31,30 @@ export function PublishTab({
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [resolving, setResolving] = useState<number | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [historyNotice, setHistoryNotice] = useState("");
 
   const history = [...(detail.state.publishHistory ?? [])].reverse();
-  // “已发布”只认成功且 mode=publish 的记录；草稿记录仍算待发布，
-  // 这样用户把草稿改成正式提交后，按钮不会错误地显示 0 章。
-  const published = new Set(
-    (detail.state.publishHistory ?? [])
-      .filter(
-        (record) =>
-          record.platform === "fanqie" &&
-          record.status === "success" &&
-          record.mode === "publish",
-      )
-      .flatMap((record) => record.chapters),
+  // 去重只看永久发布台账；日志被裁剪或清空都不影响这里。
+  const ledgerEntries = Object.values(detail.publishLedger.records).filter((entry) =>
+    matchesPublishWork(entry, bookId, bookName),
   );
+  const published = new Set(
+    ledgerEntries
+      .filter((entry) => entry.status === "published")
+      .map((entry) => entry.chapter),
+  );
+  const uncertain = ledgerEntries
+    .filter((entry) => entry.status === "uncertain")
+    .sort((a, b) => b.at.localeCompare(a.at));
+  const uncertainChapters = new Set(uncertain.map((entry) => entry.chapter));
   const publishable = detail.chapters.filter(
     (chapter) =>
-      chapter.written && chapter.content.trim().length > 0 && !published.has(chapter.index),
+      chapter.written &&
+      chapter.content.trim().length > 0 &&
+      !published.has(chapter.index) &&
+      !uncertainChapters.has(chapter.index),
   ).length;
 
   async function persist(showNotice: boolean): Promise<boolean> {
@@ -106,7 +112,7 @@ export function PublishTab({
     if (!history.length || clearing || disabled) return;
     if (
       !window.confirm(
-        `将清空全部 ${history.length} 条发布记录。\n\n发布记录同时用于去重：清空后系统会忘记哪些章节已成功发布，下次发布可能把已发布章节再次提交到番茄。\n\n仅建议在记录错误或确实需要重新发布时使用。继续？`,
+        `将清空全部 ${history.length} 条发布操作日志。\n\n永久发布台账不受影响，已成功发布的章节仍会被自动跳过。继续？`,
       )
     ) {
       return;
@@ -115,15 +121,47 @@ export function PublishTab({
     setHistoryError("");
     setHistoryNotice("");
     try {
-      const response = await fetch(`/api/projects/${slug}/publish`, { method: "DELETE" });
+      const response = await fetch(`/api/projects/${slug}/publish`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "clear-publish-history" }),
+      });
       const data = (await response.json()) as { error?: string };
-      if (!response.ok) throw new Error(data.error ?? "清空发布记录失败");
+      if (!response.ok) throw new Error(data.error ?? "清空发布日志失败");
       await onRefresh();
-      setHistoryNotice("发布记录已清空");
+      setHistoryNotice("发布日志已清空，永久去重台账保留");
     } catch (err) {
       setHistoryError(errorMessage(err));
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handleResolve(chapter: number, publishedNow: boolean) {
+    if (resolving !== null || disabled) return;
+    const action = publishedNow ? "标记为已发布" : "标记为未发布";
+    const effect = publishedNow
+      ? "标记后不会再自动发布该章。"
+      : "标记后下次发布会重新尝试提交该章。";
+    if (!window.confirm(`确定将第 ${chapter} 章${action}？\n\n${effect}`)) return;
+
+    setResolving(chapter);
+    setHistoryError("");
+    setHistoryNotice("");
+    try {
+      const response = await fetch(`/api/projects/${slug}/publish/records`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chapter, published: publishedNow, confirm: true }),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "更新发布状态失败");
+      await onRefresh();
+      setHistoryNotice(`第 ${chapter} 章已${action}`);
+    } catch (err) {
+      setHistoryError(errorMessage(err));
+    } finally {
+      setResolving(null);
     }
   }
 
@@ -142,7 +180,7 @@ export function PublishTab({
       return;
     }
     if (!(await persist(false))) return;
-    await onStartJob("fanqie-publish");
+    await onStartJob("fanqie-publish", { confirmPublish: true });
   }
 
   return (
@@ -268,9 +306,9 @@ export function PublishTab({
 
       <section className="panel">
         <div className="panel-head">
-          <h2 className="panel-title">发布记录</h2>
+          <h2 className="panel-title">发布日志</h2>
           <div className="panel-head-tools">
-            <span className="muted small">{history.length} 条记录</span>
+            <span className="muted small">{history.length} 条日志 · {published.size} 章已发布</span>
             {/* 发布记录可能由后台任务写入，刷新会重新拉取项目详情。 */}
             <button
               className="btn btn-ghost btn-sm"
@@ -284,13 +322,55 @@ export function PublishTab({
               onClick={handleClearHistory}
               disabled={clearing || disabled || !history.length}
             >
-              {clearing ? "清空中…" : "清空记录"}
+              {clearing ? "清空中…" : "清空日志"}
             </button>
           </div>
         </div>
         <div className="panel-body">
           {historyError ? <p className="form-error">{historyError}</p> : null}
           {historyNotice ? <p className="form-note">{historyNotice}</p> : null}
+          {uncertain.length ? (
+            <div className="rejected-drafts">
+              <p className="canon-label">待人工确认（提交结果不明，已暂停自动重发）</p>
+              <div className="continuity-list">
+                {uncertain.map((entry) => (
+                  <article
+                    key={`${entry.bookId || entry.bookName}-${entry.chapter}`}
+                    className="continuity-chapter bad"
+                  >
+                    <div className="continuity-chapter-head">
+                      <div>
+                        <span className="plan-index">
+                          {String(entry.chapter).padStart(2, "0")}
+                        </span>{" "}
+                        <span className="canon-name">第 {entry.chapter} 章</span>
+                      </div>
+                      <div className="panel-head-tools">
+                        <span className="muted small">
+                          {new Date(entry.at).toLocaleString("zh-CN", { hour12: false })}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleResolve(entry.chapter, true)}
+                          disabled={resolving !== null || disabled}
+                        >
+                          {resolving === entry.chapter ? "处理中…" : "标记已发布"}
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm danger-text"
+                          onClick={() => handleResolve(entry.chapter, false)}
+                          disabled={resolving !== null || disabled}
+                        >
+                          标记未发布
+                        </button>
+                      </div>
+                    </div>
+                    <p className="muted small">{entry.message ?? "提交结果无法确认"}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {history.length ? (
             <div className="table-scroll">
               <table className="data-table">
@@ -321,7 +401,7 @@ export function PublishTab({
               </table>
             </div>
           ) : (
-            <p className="muted">暂无发布记录。</p>
+            <p className="muted">暂无发布日志。</p>
           )}
         </div>
       </section>

@@ -11,13 +11,12 @@ import { parseAuditReport } from "./audit";
 import {
   canonForChapter,
   countCritical,
-  deadNameSuspicions,
   emptyCanon,
   groundExtractedFacts,
   mergeCanon,
   mergeIssues,
-  openingRepeatSuspicion,
   reconcileCanonWithChapters,
+  validateCanon,
 } from "./canon";
 import { getRuntimeConfig } from "./config";
 import {
@@ -34,38 +33,64 @@ import {
   throwIfCancelled,
   touchProjectLock,
 } from "./jobs";
+import {
+  aggregateBook,
+  aggregateVolumes,
+  applyChapterMemory,
+  buildChapterMemory,
+  buildEffectiveMemory,
+  buildMemoryContext,
+} from "./memory";
+import { promptVersionInfo } from "./prompt-store";
+import { findPublishEntry } from "./publish-ledger";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
+import { reviewSuspicions } from "./review";
+import {
+  applyChapterStory,
+  buildEffectiveStory,
+  buildStoryContext,
+  storyChecks,
+} from "./story";
 import {
   appendChapters,
-  appendOutlineSection,
   appendPublishRecord,
+  commitArchitecture,
+  commitCanonRebuild,
   exportBookFile,
   getAuditReport,
+  getMemory,
   getProjectDetail,
   getProjectFile,
+  getPublishLedger,
+  getStory,
   getWrittenChapters,
   markChapterRepaired,
   markChapterWritten,
+  recordPublishOutcome,
   saveCanon,
-  saveCharacters,
-  savePlan,
+  saveMemory,
+  saveStory,
   saveRejectedDraft,
   saveRepairBackup,
-  updateChapterSummary,
   writeAuditReport,
   writeChapterFile,
 } from "./store";
-import { errorMessage, nowIso } from "./utils";
+import { countWords, errorMessage, nowIso } from "./utils";
 import type {
   CanonFacts,
+  ChapterMemory,
   ChapterPlan,
   Character,
+  ContinuityIssue,
   ExtractedFacts,
+  ExtractedStory,
   Job,
   JobParams,
   ProjectDetail,
+  ProjectMemory,
   ProjectMeta,
   ReviewResult,
+  StoryLedger,
 } from "./types";
 
 const JOB_LABELS: Record<Job["type"], string> = {
@@ -75,6 +100,7 @@ const JOB_LABELS: Record<Job["type"], string> = {
   rewrite: "重写章节",
   repair: "定点修复",
   recanon: "重建事实台账",
+  memory: "重建长期记忆与剧情台账",
   audit: "总体审校",
   export: "导出全书",
   "fanqie-login": "登录番茄",
@@ -114,6 +140,45 @@ export async function retryJob(slug: string, id: string): Promise<Job> {
 function formatDuration(ms: number): string {
   if (ms >= 60000) return `${Math.round(ms / 60000)} 分钟`;
   return `${Math.max(1, Math.round(ms / 1000))} 秒`;
+}
+
+const EXTRACTION_MAX_ATTEMPTS = 3;
+const EXTRACTION_RETRY_DELAY_MS = 400;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 事实抽取是审校的前置条件：模型偶发返回非法 JSON 时重试，
+// 连续失败必须让本章失败，不能用空台账继续审校。
+async function extractFactsWithRetry(
+  job: Job,
+  meta: ProjectMeta,
+  bible: string,
+  chapter: ChapterPlan,
+  text: string,
+  canon: CanonFacts,
+): Promise<{ facts: ExtractedFacts; attempts: number }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= EXTRACTION_MAX_ATTEMPTS; attempt += 1) {
+    throwIfCancelled(job);
+    try {
+      const raw = await extractChapterFacts(meta, bible, chapter, text, canon);
+      return { facts: groundExtractedFacts(raw, text), attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      logJob(
+        job,
+        `第 ${chapter.index} 章事实抽取失败（第 ${attempt}/${EXTRACTION_MAX_ATTEMPTS} 次）：${errorMessage(error)}`,
+      );
+      if (attempt < EXTRACTION_MAX_ATTEMPTS) {
+        await delay(EXTRACTION_RETRY_DELAY_MS * attempt);
+      }
+    }
+  }
+  throw new Error(
+    `事实抽取连续 ${EXTRACTION_MAX_ATTEMPTS} 次失败：${errorMessage(lastError)}`,
+  );
 }
 
 async function runJob(job: Job, params: JobParams): Promise<void> {
@@ -162,10 +227,10 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
         await runExtend(job, params.count ?? 10);
         break;
       case "write":
-        await runWrite(job, params.count ?? 1);
+        paused = await runWrite(job, params.count ?? 1);
         break;
       case "rewrite":
-        await runRewrite(
+        paused = await runRewrite(
           job,
           params.indices ?? [],
           params.instruction ?? "",
@@ -181,6 +246,9 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
         break;
       case "recanon":
         await runRecanon(job);
+        break;
+      case "memory":
+        await runMemoryRebuild(job);
         break;
       case "audit":
         await runAudit(job);
@@ -235,14 +303,28 @@ async function runPlan(job: Job): Promise<void> {
   logJob(job, "架构师正在构思世界观、主线与章节细纲…");
   const generated = await generatePlan(file.meta);
   throwIfCancelled(job);
-  await savePlan(job.slug, generated.plan, generated.bible, generated.outlineMd);
-  logJob(job, `已生成 ${generated.plan.chapters.length} 章细纲`);
+  logJob(
+    job,
+    `细纲已生成（${generated.plan.chapters.length} 章），正在创建人物档案；全部完成前不会写入任何文件…`,
+  );
 
-  logJob(job, "角色设计师正在创建人物档案…");
   const characters = await generateCharacters(file.meta, generated);
   throwIfCancelled(job);
-  await saveCharacters(job.slug, characters);
-  logJob(job, `已生成 ${characters.length} 位角色：${characters.map((item) => item.name).join("、")}`);
+
+  const committed = await commitArchitecture(
+    job.slug,
+    generated,
+    characters,
+  );
+  job.result = `已生成 ${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色`;
+  logJob(
+    job,
+    `架构已统一提交：${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色（更新 ${committed.updatedCharacters} 位，保留 ${committed.preservedCharacters} 位已有/手动人物卡）。`,
+  );
+  logJob(
+    job,
+    `角色：${committed.characters.map((item) => item.name).join("、")}；主线大纲已同步章节细纲。`,
+  );
 }
 
 async function runExtend(job: Job, requested: number): Promise<void> {
@@ -276,8 +358,8 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     count,
   );
   throwIfCancelled(job);
+  // appendChapters 现在会在一次提交里同步 plan.json、outline.md 和项目元数据。
   const plan = await appendChapters(job.slug, chapters);
-  await appendOutlineSection(job.slug, chapters);
 
   job.result = `新增 ${chapters.length} 章大纲`;
   logJob(
@@ -302,6 +384,125 @@ function assertCanonReady(detail: ProjectDetail): void {
   }
 }
 
+function markDetailChapterWritten(
+  detail: ProjectDetail,
+  index: number,
+  content: string,
+  summary: string,
+): void {
+  const chapter = detail.chapters.find((item) => item.index === index);
+  if (chapter) {
+    chapter.content = content;
+    chapter.written = true;
+    chapter.words = countWords(content);
+  }
+  if (!detail.state.written.includes(index)) {
+    detail.state.written = [...detail.state.written, index].sort((a, b) => a - b);
+  }
+  detail.state.summaries[String(index)] = summary;
+}
+
+async function persistChapterMemory(
+  job: Job,
+  detail: ProjectDetail,
+  stored: ProjectMemory,
+  chapterMemory: ChapterMemory | undefined,
+): Promise<ProjectMemory> {
+  if (!chapterMemory) return stored;
+  try {
+    const next = applyChapterMemory(detail, stored, chapterMemory);
+    await saveMemory(job.slug, next);
+    logJob(
+      job,
+      `第 ${chapterMemory.index} 章长期记忆已更新：${chapterMemory.events.length} 个事件、${chapterMemory.characters.length} 位人物。`,
+    );
+    return next;
+  } catch (error) {
+    // 记忆是增强能力，失败不能回滚已经通过检查的正文和台账；旧记忆保持原样。
+    logJob(
+      job,
+      `第 ${chapterMemory.index} 章长期记忆更新失败，已有记忆保持不变：${errorMessage(error)}`,
+    );
+    return stored;
+  }
+}
+
+async function persistChapterStory(
+  job: Job,
+  detail: ProjectDetail,
+  memory: ProjectMemory,
+  stored: StoryLedger,
+  chapterMemory: ChapterMemory | undefined,
+  extracted: ExtractedStory | undefined,
+): Promise<StoryLedger> {
+  if (!chapterMemory) return stored;
+  try {
+    const next = applyChapterStory(
+      detail,
+      memory,
+      stored,
+      chapterMemory.index,
+      extracted,
+      chapterMemory,
+    );
+    await saveStory(job.slug, next);
+    logJob(
+      job,
+      `第 ${chapterMemory.index} 章剧情台账已更新：${next.states.length} 条人物状态、${next.relations.length} 条关系、${next.events.length} 个事件、${next.foreshadows.length} 条伏笔。`,
+    );
+    const checks = storyChecks(detail, next);
+    for (const issue of checks.slice(0, 3)) {
+      logJob(job, `剧情台账${issue.severity === "critical" ? "严重提示" : "提示"}：${issue.message}`);
+    }
+    return next;
+  } catch (error) {
+    // 与长期记忆一致：增强数据保存失败不能回滚已通过检查的正文和事实台账。
+    logJob(
+      job,
+      `第 ${chapterMemory.index} 章剧情台账更新失败，已有台账保持不变：${errorMessage(error)}`,
+    );
+    return stored;
+  }
+}
+
+function logMemoryRetrieval(
+  job: Job,
+  chapterIndex: number,
+  retrieval: ReturnType<typeof buildMemoryContext>,
+): void {
+  logJob(
+    job,
+    `第 ${chapterIndex} 章长期记忆检索：命中 ${retrieval.chapterIndices.length} 个历史章节、${
+      retrieval.openForeshadows.length
+    } 个未回收伏笔，约 ${retrieval.tokenEstimate} tokens${
+      retrieval.truncated ? "（已按预算截断）" : ""
+    }。`,
+  );
+}
+
+function logStoryRetrieval(
+  job: Job,
+  chapterIndex: number,
+  retrieval: ReturnType<typeof buildStoryContext>,
+): void {
+  logJob(
+    job,
+    `第 ${chapterIndex} 章剧情台账检索：命中 ${retrieval.chapterIndices.length} 个历史章节，约 ${retrieval.tokenEstimate} tokens${
+      retrieval.truncated ? "（已按预算截断）" : ""
+    }。`,
+  );
+}
+
+function logPromptProfile(job: Job): void {
+  const runtime = getRuntimeConfig();
+  const writer = promptVersionInfo("writer");
+  const auditor = promptVersionInfo("auditor");
+  logJob(
+    job,
+    `提示词与模型：写作 ${writer.promptVersion}，审校 ${auditor.promptVersion}；模型 ${runtime.model}，温度 ${runtime.temperature}，单次最多 ${runtime.maxTokens} tokens。`,
+  );
+}
+
 function formatReviewFeedback(review: ReviewResult | undefined): string {
   const critical = (review?.issues ?? []).filter(
     (issue) => issue.severity === "critical",
@@ -318,12 +519,15 @@ function formatReviewFeedback(review: ReviewResult | undefined): string {
 
 interface VerifyChapterInput {
   job: Job;
+  project: ProjectDetail;
   meta: ProjectMeta;
   bible: string;
   characters: Character[];
   chapter: ChapterPlan;
   text: string;
   canon: CanonFacts;
+  memory: ProjectMemory;
+  story: StoryLedger;
   previousEnding: string;
   previousSummaries: string[];
   nextOpening: string;
@@ -338,6 +542,8 @@ interface VerifyChapterResult {
   review: ReviewResult;
   canon: CanonFacts;
   passed: boolean;
+  memory?: ChapterMemory;
+  story?: ExtractedStory;
 }
 
 async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterResult> {
@@ -355,6 +561,21 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
     .join("\n\n");
   // 重写/修复旧章时，审校和修复只看截至本章的台账；后文事实只用于前后衔接。
   const auditCanon = canonForChapter(input.canon, input.chapter.index);
+  const storyContext = buildStoryContext(
+    input.project,
+    input.chapter,
+    input.memory,
+    input.story,
+  ).text;
+  const previousChapters = input.project.chapters
+    .filter(
+      (chapter) =>
+        chapter.index < input.chapter.index &&
+        chapter.written &&
+        chapter.content.trim(),
+    )
+    .sort((a, b) => b.index - a.index)
+    .slice(0, 3);
 
   let currentText = input.text;
   let best: VerifyChapterResult | null = null;
@@ -368,44 +589,82 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
     // 暂停只影响后续轮次：当前章节仍完成一次检查并写回，避免留下半成品。
     if (isPauseRequested(input.job) && attempt > 0) break;
 
-    const mechanical = [
-      ...deadNameSuspicions(auditCanon, currentText, input.chapter.index),
-      ...openingRepeatSuspicion(input.previousEnding, currentText),
-    ];
-
-    let extracted;
+    let extracted: ExtractedFacts;
+    let extractionAttempts = 0;
     try {
-      extracted = groundExtractedFacts(
-        await extractChapterFacts(
-          input.meta,
-          input.bible,
-          input.chapter,
-          currentText,
-          auditCanon,
-        ),
+      const extraction = await extractFactsWithRetry(
+        input.job,
+        input.meta,
+        input.bible,
+        input.chapter,
         currentText,
+        auditCanon,
       );
+      extracted = extraction.facts;
+      extractionAttempts = extraction.attempts;
     } catch (error) {
-      logJob(input.job, `第 ${input.chapter.index} 章事实抽取失败：${errorMessage(error)}`);
-      extracted = {
-        summary: "",
-        characters: [],
-        items: [],
-        timeline: null,
-        rules: [],
+      // 取消/超时由任务层处理，不能被误判成抽取失败。
+      if (error instanceof JobCancelledError) throw error;
+      const message = errorMessage(error);
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章事实抽取失败，本章不进入审校；草稿将保留，台账不更新。`,
+      );
+      return {
+        text: currentText,
+        review: {
+          summary: input.chapter.summary,
+          issues: [
+            {
+              severity: "critical",
+              type: "事实抽取失败",
+              evidence: "",
+              detail: `事实抽取连续 ${EXTRACTION_MAX_ATTEMPTS} 次失败，本章未经完整事实检查，不能通过：${message}`,
+            },
+          ],
+          continuityOk: false,
+          repaired: attempt > 0,
+          repairAttempts: attempt,
+          extractionOk: false,
+          extractionError: message,
+          extractionAttempts: EXTRACTION_MAX_ATTEMPTS,
+        },
+        canon: input.canon,
+        passed: false,
       };
     }
+
+    const chapterMemory = buildChapterMemory(
+      input.chapter.index,
+      extracted.summary || input.chapter.summary,
+      extracted,
+      "ai",
+    );
+    const checks = reviewSuspicions({
+      project: input.project,
+      chapter: input.chapter,
+      text: currentText,
+      canon: auditCanon,
+      memory: input.memory,
+      story: input.story,
+      previousEnding: input.previousEnding,
+      previousChapters,
+      extracted: extracted.story,
+      chapterMemory,
+    });
 
     let audit: ReviewResult;
     try {
       audit = await auditChapter(
         input.meta,
         auditCanon,
+        input.project.characters,
         input.chapter,
         currentText,
         previousContext,
-        mechanical,
+        checks.suspicions,
         nextContext,
+        storyContext,
       );
     } catch (error) {
       // 审校不可用时不能假装通过：标记为需要复查，并暂停后续自动写作。
@@ -438,8 +697,8 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       auditCanon === input.canon
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
-    // 机械线索只作为审校提示；模型核对后如果没有报问题，不能反过来再当成问题写回。
-    const issues = mergeIssues(audit.issues, merged.conflicts);
+    // 普通自动线索只作为审校提示；数据级严重矛盾（如伏笔先回收后埋设）强制保留。
+    const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
     const critical = countCritical(issues);
     const review: ReviewResult = {
       summary: extracted.summary || audit.summary || input.chapter.summary,
@@ -447,7 +706,15 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       continuityOk: critical === 0,
       repaired: attempt > 0,
       repairAttempts: attempt,
+      extractionOk: true,
+      extractionAttempts,
     };
+    const memory = buildChapterMemory(
+      input.chapter.index,
+      review.summary,
+      extracted,
+      "ai",
+    );
 
     // 修复失败时保留“严重问题最少”的一版，避免越修越乱。
     if (!best || critical < countCritical(best.review.issues)) {
@@ -456,6 +723,8 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         review,
         canon: review.continuityOk ? mergedFull.canon : input.canon,
         passed: review.continuityOk,
+        memory,
+        story: extracted.story,
       };
     }
 
@@ -512,21 +781,23 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       },
       canon: input.canon,
       passed: false,
+      story: undefined,
     }
   );
 }
 
-async function runWrite(job: Job, requested: number): Promise<void> {
+async function runWrite(job: Job, requested: number): Promise<boolean> {
   const count = Math.max(1, Math.min(50, Math.round(Number(requested) || 1)));
   const detail = await getProjectDetail(job.slug);
   const pending = detail.chapters.filter((chapter) => !chapter.written).slice(0, count);
 
   if (!pending.length) {
     logJob(job, "没有待写章节：请先生成架构，或调整目标章节数。");
-    return;
+    return false;
   }
 
   assertCanonReady(detail);
+  logPromptProfile(job);
 
   const history = Object.keys(detail.state.summaries)
     .map(Number)
@@ -550,6 +821,8 @@ async function runWrite(job: Job, requested: number): Promise<void> {
     .sort((a, b) => b.index - a.index)[0];
   let previousEnding = previousWritten ? takeEnding(previousWritten.content) : "";
   let canon = detail.canon;
+  let memory = await getMemory(job.slug);
+  let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let paused = false;
 
   // 逐章串行：每章写完立即落盘并更新摘要，任务中途失败时，
@@ -560,6 +833,10 @@ async function runWrite(job: Job, requested: number): Promise<void> {
     if (!chapterPlan) continue;
 
     logJob(job, `开始写第 ${chapter.index} 章《${chapter.title}》…`);
+    const retrieval = buildMemoryContext(detail, chapterPlan, memory);
+    logMemoryRetrieval(job, chapter.index, retrieval);
+    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
+    logStoryRetrieval(job, chapter.index, storyRetrieval);
     let text = await writeChapter(
       detail.meta,
       detail.bible,
@@ -567,19 +844,26 @@ async function runWrite(job: Job, requested: number): Promise<void> {
       chapterPlan,
       previousEnding,
       history.slice(-6),
-      { canon: canonForChapter(canon, chapter.index) },
+      {
+        canon: canonForChapter(canon, chapter.index),
+        memoryContext: retrieval.text,
+        storyContext: storyRetrieval.text,
+      },
     );
     if (!text.trim()) throw new Error(`第 ${chapter.index} 章正文为空，请重试`);
 
     logJob(job, `初稿完成，约 ${text.replace(/\s+/g, "").length} 字，开始抽取事实并审校…`);
     const result = await verifyChapter({
       job,
+      project: detail,
       meta: detail.meta,
       bible: detail.bible,
       characters: detail.characters,
       chapter: chapterPlan,
       text,
       canon,
+      memory,
+      story,
       previousEnding,
       previousSummaries: history.slice(-2),
       nextOpening: "",
@@ -595,27 +879,40 @@ async function runWrite(job: Job, requested: number): Promise<void> {
       const critical = result.review.issues.filter(
         (issue) => issue.severity === "critical",
       ).length;
+      const extractionFailed = result.review.extractionOk === false;
       const draft = await saveRejectedDraft(job.slug, {
         index: chapter.index,
         content: text,
         mode: "write",
-        reason: `连续性检查未通过：${critical} 个严重问题`,
+        reason: extractionFailed
+          ? "事实抽取失败，未进入审校"
+          : `连续性检查未通过：${critical} 个严重问题`,
         review: result.review,
       });
       paused = true;
       job.result = `第 ${chapter.index} 章未写入正文，草稿已保存`;
       logJob(
         job,
-        `第 ${chapter.index} 章仍有 ${critical} 个严重连续性问题，未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请人工处理后再继续。`,
+        extractionFailed
+          ? `第 ${chapter.index} 章事实抽取失败，未写入正文；草稿保存在 ${draft.path}，原有台账未改动。后续自动写作已暂停，请检查模型配置后重试。`
+          : `第 ${chapter.index} 章仍有 ${critical} 个严重连续性问题，未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请人工处理后再继续。`,
       );
       break;
     }
 
-    await writeChapterFile(job.slug, chapter.index, text);
+    await writeChapterFile(job.slug, chapter.index, text, {
+      source: "ai-write",
+      title: chapterPlan.title,
+      summary: result.review.summary,
+      note: "AI 自动写作",
+    });
     previousEnding = takeEnding(text);
     await markChapterWritten(job.slug, chapter.index, result.review.summary, result.review);
+    markDetailChapterWritten(detail, chapter.index, text, result.review.summary);
     canon = result.canon;
     await saveCanon(job.slug, canon);
+    memory = await persistChapterMemory(job, detail, memory, result.memory);
+    story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
     history.push(result.review.summary);
 
     const issueCount = result.review.issues.length;
@@ -631,6 +928,7 @@ async function runWrite(job: Job, requested: number): Promise<void> {
   }
 
   if (!paused) logJob(job, "本轮自动写作完成，事实台账已同步");
+  return paused;
 }
 
 async function runRewrite(
@@ -638,7 +936,7 @@ async function runRewrite(
   requested: number[],
   instruction: string,
   useReview: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const detail = await getProjectDetail(job.slug);
   const requestedSet = new Set(requested);
   const targets = detail.chapters
@@ -667,6 +965,7 @@ async function runRewrite(
   }
 
   assertCanonReady(detail);
+  logPromptProfile(job);
 
   const takeEnding = (text: string): string => {
     const trimmed = text.trim();
@@ -690,6 +989,8 @@ async function runRewrite(
   );
 
   let canon = detail.canon;
+  let memory = await getMemory(job.slug);
+  let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let paused = false;
 
   for (const target of targets) {
@@ -741,6 +1042,10 @@ async function runRewrite(
           : `第 ${target.index} 章没有严重审校记录，本次按普通重写进行`,
       );
     }
+    const retrieval = buildMemoryContext(detail, chapterPlan, memory);
+    logMemoryRetrieval(job, target.index, retrieval);
+    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
+    logStoryRetrieval(job, target.index, storyRetrieval);
     let text = await writeChapter(
       detail.meta,
       detail.bible,
@@ -754,6 +1059,8 @@ async function runRewrite(
         reviewFeedback,
         nextOpening,
         canon: canonForChapter(canon, target.index),
+        memoryContext: retrieval.text,
+        storyContext: storyRetrieval.text,
       },
     );
     if (!text.trim()) throw new Error(`第 ${target.index} 章正文为空，请重试`);
@@ -764,12 +1071,15 @@ async function runRewrite(
     );
     const result = await verifyChapter({
       job,
+      project: detail,
       meta: detail.meta,
       bible: detail.bible,
       characters: detail.characters,
       chapter: chapterPlan,
       text,
       canon,
+      memory,
+      story,
       previousEnding,
       previousSummaries: priorSummaries.slice(-2),
       nextOpening,
@@ -785,26 +1095,36 @@ async function runRewrite(
       const critical = result.review.issues.filter(
         (issue) => issue.severity === "critical",
       ).length;
+      const extractionFailed = result.review.extractionOk === false;
       const draft = await saveRejectedDraft(job.slug, {
         index: target.index,
         content: text,
         mode: "rewrite",
-        reason: `重写未通过连续性检查：${critical} 个严重问题`,
+        reason: extractionFailed
+          ? "事实抽取失败，未进入审校"
+          : `重写未通过连续性检查：${critical} 个严重问题`,
         review: result.review,
       });
       paused = true;
       job.result = `第 ${target.index} 章重写未通过，原稿保留`;
       logJob(
         job,
-        `第 ${target.index} 章重写仍有 ${critical} 个严重连续性问题，未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请人工处理后再继续。`,
+        extractionFailed
+          ? `第 ${target.index} 章事实抽取失败，未覆盖原稿；草稿保存在 ${draft.path}，原有台账未改动。重写已暂停，请检查模型配置后重试。`
+          : `第 ${target.index} 章重写仍有 ${critical} 个严重连续性问题，未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请人工处理后再继续。`,
       );
       break;
     }
 
-    await writeChapterFile(job.slug, target.index, text);
+    await writeChapterFile(job.slug, target.index, text, {
+      source: "ai-rewrite",
+      title: chapterPlan.title,
+      summary: result.review.summary,
+      note: instruction.trim() ? `AI 重写：${instruction.trim()}` : "AI 重写",
+    });
     rewritten.set(target.index, text);
     await markChapterWritten(job.slug, target.index, result.review.summary, result.review);
-    detail.state.summaries[String(target.index)] = result.review.summary;
+    markDetailChapterWritten(detail, target.index, text, result.review.summary);
 
     // 重写会覆盖旧稿；只由旧稿确立、且新正文里不再出现的人物状态需要降级，
     // 否则“幽灵死亡”会继续约束后续章节。
@@ -819,6 +1139,8 @@ async function runRewrite(
       );
     }
     await saveCanon(job.slug, canon);
+    memory = await persistChapterMemory(job, detail, memory, result.memory);
+    story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
 
     const issueCount = result.review.issues.length;
     const repairedNote = result.review.repaired
@@ -839,6 +1161,7 @@ async function runRewrite(
       `重写完成，共 ${targets.length} 章；事实台账已更新。章节细纲与主线大纲不会自动重写，后续写作会以事实台账为准。`,
     );
   }
+  return paused;
 }
 
 async function runRepair(
@@ -860,6 +1183,7 @@ async function runRepair(
   }
 
   assertCanonReady(detail);
+  logPromptProfile(job);
 
   const audit =
     source === "audit"
@@ -891,6 +1215,8 @@ async function runRepair(
   );
 
   let canon = detail.canon;
+  let memory = await getMemory(job.slug);
+  let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let remainingCritical = 0;
   let repairedCount = 0;
   let paused = false;
@@ -1001,12 +1327,15 @@ async function runRepair(
     logJob(job, `第 ${target.index} 章修复稿完成，开始重新抽取事实并审校…`);
     const result = await verifyChapter({
       job,
+      project: detail,
       meta: detail.meta,
       bible: detail.bible,
       characters: detail.characters,
       chapter: chapterPlan,
       text,
       canon,
+      memory,
+      story,
       previousEnding,
       previousSummaries: priorSummaries.slice(-2),
       nextOpening,
@@ -1022,11 +1351,16 @@ async function runRepair(
     // 检查仍有遗留问题时也写回，问题会进入章节审校记录，供继续处理。
     const backupPath = await saveRepairBackup(job.slug, target.index, target.content);
 
-    await writeChapterFile(job.slug, target.index, text);
+    await writeChapterFile(job.slug, target.index, text, {
+      source: "ai-repair",
+      title: chapterPlan.title,
+      summary: result.review.summary,
+      note: `定点修复（${sourceLabel}）`,
+    });
     repaired.set(target.index, text);
     await markChapterWritten(job.slug, target.index, result.review.summary, result.review);
     await markChapterRepaired(job.slug, target.index);
-    detail.state.summaries[String(target.index)] = result.review.summary;
+    markDetailChapterWritten(detail, target.index, text, result.review.summary);
 
     const reconciled = reconcileCanonWithChapters(result.canon, [
       { index: target.index, content: text },
@@ -1039,6 +1373,8 @@ async function runRepair(
       );
     }
     await saveCanon(job.slug, canon);
+    memory = await persistChapterMemory(job, detail, memory, result.memory);
+    story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
     repairedCount += 1;
 
     if (result.passed) {
@@ -1107,9 +1443,10 @@ async function runRecanon(job: Job): Promise<void> {
   );
 
   let canon = emptyCanon();
+  const summaries: Record<string, string> = {};
+  const failures: { index: number; title: string; error: string }[] = [];
   let conflicts = 0;
   let warnings = 0;
-  let failed = 0;
 
   for (const chapter of written) {
     throwIfCancelled(job);
@@ -1123,18 +1460,16 @@ async function runRecanon(job: Job): Promise<void> {
 
     logJob(job, `正在抽取第 ${chapter.index} 章《${chapter.title}》的事实…`);
     try {
-      const extracted = groundExtractedFacts(
-        await extractChapterFacts(
-          detail.meta,
-          detail.bible,
-          chapterPlan,
-          chapter.content,
-          canon,
-        ),
+      const extraction = await extractFactsWithRetry(
+        job,
+        detail.meta,
+        detail.bible,
+        chapterPlan,
         chapter.content,
+        canon,
       );
       throwIfCancelled(job);
-      const merged = mergeCanon(canon, extracted, chapter.index, "write");
+      const merged = mergeCanon(canon, extraction.facts, chapter.index, "write");
       canon = merged.canon;
 
       const criticalConflicts = merged.conflicts.filter(
@@ -1156,21 +1491,56 @@ async function runRecanon(job: Job): Promise<void> {
         }
       }
 
-      if (extracted.summary.trim()) {
-        // 重建台账时顺便把摘要换成“只依据正文抽取”的版本，修掉摘要里凭空出现的人名。
-        await updateChapterSummary(job.slug, chapter.index, extracted.summary);
+      if (extraction.facts.summary.trim()) {
+        // 只暂存摘要，等全部章节成功后再和台账一起提交。
+        summaries[String(chapter.index)] = extraction.facts.summary;
       }
-      await saveCanon(job.slug, canon);
+      logJob(job, `第 ${chapter.index} 章处理完成（暂存在内存，未写入正式台账）`);
     } catch (error) {
-      failed += 1;
-      logJob(job, `第 ${chapter.index} 章事实抽取失败：${errorMessage(error)}`);
+      if (error instanceof JobCancelledError) throw error;
+      const message = errorMessage(error);
+      failures.push({ index: chapter.index, title: chapter.title, error: message });
+      logJob(
+        job,
+        `第 ${chapter.index} 章事实抽取失败：${message}；正式台账保持不变。`,
+      );
     }
   }
 
-  job.result = `已从 ${written.length - failed} 章重建事实台账`;
+  if (failures.length) {
+    const detailText = failures
+      .slice(0, 5)
+      .map((item) => `第 ${item.index} 章《${item.title}》：${item.error}`)
+      .join("；");
+    job.result = `事实台账重建未完成：${failures.length} 章失败`;
+    throw new Error(
+      `事实台账重建失败，共 ${failures.length} 章抽取失败，原台账未改动：${detailText}${
+        failures.length > 5 ? "…" : ""
+      }`,
+    );
+  }
+
+  const validation = validateCanon(canon, written);
+  for (const issue of validation.slice(0, 10)) {
+    logJob(job, `台账校验${issue.severity === "critical" ? "失败" : "提示"}：${issue.message}`);
+  }
+  const criticalIssues = validation.filter((issue) => issue.severity === "critical");
+  if (criticalIssues.length) {
+    job.result = "事实台账重建校验未通过";
+    throw new Error(
+      `事实台账重建校验未通过，原台账未改动：${criticalIssues
+        .slice(0, 5)
+        .map((issue) => issue.message)
+        .join("；")}`,
+    );
+  }
+
+  // 所有章节成功并通过校验后才统一提交，正式台账在此之前保持原样。
+  await commitCanonRebuild(job.slug, canon, summaries);
+  job.result = `已从 ${written.length} 章重建事实台账`;
   logJob(
     job,
-    `事实台账重建完成：${canon.characters.length} 个人物、${canon.items.length} 件物品、${canon.timeline.deadlines.length} 条期限。`,
+    `事实台账重建完成并已提交：${canon.characters.length} 个人物、${canon.items.length} 件物品、${canon.timeline.deadlines.length} 条期限。`,
   );
   if (conflicts) {
     logJob(
@@ -1184,9 +1554,126 @@ async function runRecanon(job: Job): Promise<void> {
       `另有 ${warnings} 条台账提示（证据不足或仅提及名字），已忽略相关可疑状态更新。`,
     );
   }
-  if (failed) {
-    logJob(job, `有 ${failed} 章抽取失败，台账可能不完整，可稍后重试。`);
+}
+
+async function runMemoryRebuild(job: Job): Promise<void> {
+  const detail = await getProjectDetail(job.slug);
+  const written = detail.chapters
+    .filter((chapter) => chapter.written && chapter.content.trim())
+    .sort((a, b) => a.index - b.index);
+  if (!written.length) {
+    logJob(job, "没有已写章节，无法重建长期记忆。");
+    return;
   }
+
+  const stored = await getMemory(job.slug);
+  const storedStory = await getStory(job.slug);
+  logJob(
+    job,
+    `将逐章抽取章节记忆与剧情台账，共 ${written.length} 章；全部成功后才提交，失败时已有记忆和台账保持不变。`,
+  );
+
+  let canon = emptyCanon();
+  const generated: ChapterMemory[] = [];
+  const generatedStories = new Map<number, ExtractedStory | undefined>();
+  const storyMemories = new Map<number, ChapterMemory | undefined>();
+  let preserved = 0;
+
+  for (const chapter of written) {
+    throwIfCancelled(job);
+    const chapterPlan =
+      detail.plan.chapters.find((item) => item.index === chapter.index) ?? {
+        index: chapter.index,
+        title: chapter.title,
+        summary: "",
+        keyBeats: [],
+      };
+    logJob(job, `正在生成第 ${chapter.index} 章《${chapter.title}》的长期记忆…`);
+    const extraction = await extractFactsWithRetry(
+      job,
+      detail.meta,
+      detail.bible,
+      chapterPlan,
+      chapter.content,
+      canon,
+    );
+    throwIfCancelled(job);
+    const merged = mergeCanon(canon, extraction.facts, chapter.index, "write");
+    canon = merged.canon;
+
+    const manual = stored.chapters[String(chapter.index)];
+    if (manual?.source === "manual") {
+      preserved += 1;
+      generatedStories.set(chapter.index, undefined);
+      storyMemories.set(chapter.index, manual);
+      logJob(job, `第 ${chapter.index} 章是手工记忆，保留原文，不覆盖。`);
+      continue;
+    }
+    const chapterMemory = buildChapterMemory(
+      chapter.index,
+      extraction.facts.summary || chapterPlan.summary,
+      extraction.facts,
+      "ai",
+    );
+    generated.push(chapterMemory);
+    generatedStories.set(chapter.index, extraction.facts.story);
+    storyMemories.set(chapter.index, chapterMemory);
+  }
+
+  // 先基于现有记忆补齐基础条目，再用本次 AI 结果覆盖非手工章节，最后重算分卷/全书。
+  const next = buildEffectiveMemory(detail, stored);
+  for (const memory of generated) {
+    next.chapters[String(memory.index)] = memory;
+  }
+  const updatedAt = nowIso();
+  next.volumes = aggregateVolumes(detail, next.chapters, stored.volumes, updatedAt);
+  next.book = aggregateBook(detail, next.volumes, stored.book, updatedAt);
+  next.updatedAt = updatedAt;
+  await saveMemory(job.slug, next);
+
+  let story = buildEffectiveStory(detail, next, storedStory);
+  for (const chapter of written) {
+    story = applyChapterStory(
+      detail,
+      next,
+      story,
+      chapter.index,
+      generatedStories.get(chapter.index),
+      storyMemories.get(chapter.index),
+    );
+  }
+
+  let storySaved = true;
+  try {
+    await saveStory(job.slug, story);
+    logJob(
+      job,
+      `剧情台账重建完成并已提交：${story.states.length} 条人物状态、${story.relations.length} 条关系、${story.events.length} 个事件、${story.foreshadows.length} 条伏笔。`,
+    );
+    const checks = storyChecks(detail, story);
+    if (checks.length) {
+      logJob(
+        job,
+        `剧情台账检查发现 ${checks.length} 条待核对提示，请到「剧情台账」页查看。`,
+      );
+    }
+  } catch (error) {
+    storySaved = false;
+    logJob(
+      job,
+      `剧情台账保存失败，长期记忆已更新，旧剧情台账保持不变：${errorMessage(error)}`,
+    );
+  }
+
+  job.result = storySaved
+    ? `已重建 ${generated.length} 章长期记忆与剧情台账`
+    : `已重建 ${generated.length} 章长期记忆；剧情台账保存失败`;
+  logJob(
+    job,
+    `长期记忆重建完成并已提交：${generated.length} 章 AI 记忆${
+      preserved ? `，保留 ${preserved} 章手工记忆` : ""
+    }；分卷与全书摘要已重新聚合。`,
+  );
 }
 
 async function runAudit(job: Job): Promise<void> {
@@ -1200,6 +1687,8 @@ async function runAudit(job: Job): Promise<void> {
     return;
   }
 
+  logPromptProfile(job);
+
   if (getRuntimeConfig().provider === "mock") {
     logJob(job, "当前为 mock 模式，跳过总体审校；配置真实模型后再试。");
     return;
@@ -1207,7 +1696,7 @@ async function runAudit(job: Job): Promise<void> {
 
   logJob(
     job,
-    `将逐章抽取事实并审校全书 ${written.length} 章；使用“截至上一章”的临时台账，只读，不修改正文和正式台账。`,
+    `将逐章抽取事实并审校全书 ${written.length} 章；使用“截至上一章”的临时台账和剧情台账，只读，不修改正文和正式台账。`,
   );
 
   const takeEnding = (text: string): string => {
@@ -1220,6 +1709,12 @@ async function runAudit(job: Job): Promise<void> {
   };
 
   let canon = emptyCanon();
+  const storedMemory = await getMemory(job.slug);
+  const storedStory = await getStory(job.slug);
+  let auditMemory = buildEffectiveMemory(detail, storedMemory);
+  let auditStory = buildEffectiveStory(detail, auditMemory, storedStory);
+  const runtime = getRuntimeConfig();
+  const auditor = promptVersionInfo("auditor");
   const summaries: { index: number; summary: string }[] = [];
   let critical = 0;
   let warnings = 0;
@@ -1230,6 +1725,11 @@ async function runAudit(job: Job): Promise<void> {
     "",
     `- 审校时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
     `- 审校章节：${written.length} 章`,
+    `- 模型：${runtime.model}`,
+    `- 温度：${runtime.temperature}`,
+    `- 最大 tokens：${runtime.maxTokens}`,
+    `- 审校提示词版本：${auditor.promptVersion}`,
+    `- 内置提示词版本：${auditor.baseVersion}`,
     "",
   ];
 
@@ -1266,29 +1766,37 @@ async function runAudit(job: Job): Promise<void> {
     ]
       .filter(Boolean)
       .join("\n\n");
+    const storyContext = buildStoryContext(
+      detail,
+      chapterPlan,
+      auditMemory,
+      auditStory,
+    ).text;
+    const previousChapters = written
+      .slice(Math.max(0, i - 3), i)
+      .map((item) => ({ index: item.index, content: item.content }));
 
     logJob(job, `审校第 ${chapter.index} 章《${chapter.title}》…`);
 
-    const mechanical = [
-      ...deadNameSuspicions(canon, chapter.content, chapter.index),
-      ...openingRepeatSuspicion(previousEnding, chapter.content),
-    ];
-
     let extracted: ExtractedFacts;
+    const extractionIssues: ContinuityIssue[] = [];
+    let extractedOk = true;
     try {
-      extracted = groundExtractedFacts(
-        await extractChapterFacts(
-          detail.meta,
-          detail.bible,
-          chapterPlan,
-          chapter.content,
-          canon,
-        ),
+      const extraction = await extractFactsWithRetry(
+        job,
+        detail.meta,
+        detail.bible,
+        chapterPlan,
         chapter.content,
+        canon,
       );
+      extracted = extraction.facts;
     } catch (error) {
+      if (error instanceof JobCancelledError) throw error;
       failed += 1;
-      logJob(job, `第 ${chapter.index} 章事实抽取失败：${errorMessage(error)}`);
+      extractedOk = false;
+      const message = errorMessage(error);
+      logJob(job, `第 ${chapter.index} 章事实抽取失败，本章审校结果不可靠：${message}`);
       extracted = {
         summary: "",
         characters: [],
@@ -1296,18 +1804,46 @@ async function runAudit(job: Job): Promise<void> {
         timeline: null,
         rules: [],
       };
+      // 总体审校是只读报告，但也不能在抽取失败时输出“未发现问题”。
+      extractionIssues.push({
+        severity: "critical",
+        type: "事实抽取失败",
+        evidence: "",
+        detail: `事实抽取连续 ${EXTRACTION_MAX_ATTEMPTS} 次失败，本章未经完整事实检查：${message}`,
+      });
     }
+
+    const chapterMemory = buildChapterMemory(
+      chapter.index,
+      extracted.summary || chapterPlan.summary,
+      extracted,
+      "ai",
+    );
+    const checks = reviewSuspicions({
+      project: detail,
+      chapter: chapterPlan,
+      text: chapter.content,
+      canon,
+      memory: auditMemory,
+      story: auditStory,
+      previousEnding,
+      previousChapters,
+      extracted: extracted.story,
+      chapterMemory,
+    });
 
     let audit: ReviewResult;
     try {
       audit = await auditChapter(
         detail.meta,
         canon,
+        detail.characters,
         chapterPlan,
         chapter.content,
         previousContext,
-        mechanical,
+        checks.suspicions,
         nextContext,
+        storyContext,
       );
     } catch (error) {
       failed += 1;
@@ -1328,8 +1864,13 @@ async function runAudit(job: Job): Promise<void> {
 
     throwIfCancelled(job);
     const merged = mergeCanon(canon, extracted, chapter.index, "write");
-    // 机械线索只作为审校提示；模型核对后如果没有报问题，不能反过来再当成问题写回。
-    const issues = mergeIssues(audit.issues, merged.conflicts);
+    // 普通自动线索只作为审校提示；数据级严重矛盾强制保留。
+    const issues = mergeIssues(
+      audit.issues,
+      merged.conflicts,
+      extractionIssues,
+      checks.hardIssues,
+    );
     const criticalIssues = issues.filter((issue) => issue.severity === "critical");
     const warningIssues = issues.filter((issue) => issue.severity === "warning");
     const ignoredIssues = issues.filter((issue) => issue.severity === "ignore");
@@ -1337,8 +1878,19 @@ async function runAudit(job: Job): Promise<void> {
     warnings += warningIssues.length;
     ignored += ignoredIssues.length;
 
-    // 临时台账继续向后推进，下一章才能拿到“截至本章”的事实。
+    // 临时台账继续向后推进，下一章才能拿到“截至本章”的事实；抽取失败时不推进。
     canon = merged.canon;
+    if (extractedOk) {
+      auditMemory = applyChapterMemory(detail, auditMemory, chapterMemory);
+      auditStory = applyChapterStory(
+        detail,
+        auditMemory,
+        auditStory,
+        chapter.index,
+        extracted.story,
+        chapterMemory,
+      );
+    }
     const summary = extracted.summary || chapterPlan.summary || "";
     if (summary) summaries.push({ index: chapter.index, summary });
 
@@ -1411,22 +1963,33 @@ async function runFanqiePublish(job: Job): Promise<void> {
   const file = await getProjectFile(job.slug);
   const config = file.publish.fanqie;
   if (!config.bookName.trim()) throw new Error("请先在「发布」页填写番茄书名");
-
-  const detail = await getProjectDetail(job.slug);
-  // 发布记录就是幂等依据：只有 fanqie + success + mode=publish 才算“已发布”，
-  // 草稿记录不跳过，否则用户改完草稿后无法再次提交。
-  const published = new Set<number>();
-  for (const record of detail.state.publishHistory ?? []) {
-    if (record.platform !== "fanqie" || record.status !== "success" || record.mode !== "publish") {
-      continue;
-    }
-    for (const index of record.chapters) published.add(index);
+  if (job.params.confirmPublish !== true) {
+    throw new Error("发布操作需要二次确认，请从发布页重新发起");
   }
 
   const written = await getWrittenChapters(job.slug);
-  const chapters = written.filter((chapter) => !published.has(chapter.index));
+  // 永久台账才是幂等依据；日志被裁剪或清空都不会让已发布章节重新提交。
+  const ledger = await getPublishLedger(job.slug);
+  const published = new Set<number>();
+  const uncertain = new Set<number>();
+  for (const chapter of written) {
+    const entry = findPublishEntry(ledger, config.bookId, config.bookName, chapter.index);
+    if (entry?.status === "published") published.add(chapter.index);
+    else if (entry?.status === "uncertain") uncertain.add(chapter.index);
+  }
+
+  const chapters = written.filter(
+    (chapter) => !published.has(chapter.index) && !uncertain.has(chapter.index),
+  );
   const skipped = written.length - chapters.length;
-  if (skipped > 0) logJob(job, `已跳过 ${skipped} 个此前发布成功的章节`);
+  if (skipped > 0) {
+    logJob(
+      job,
+      `已跳过 ${skipped} 个已发布或待人工确认的章节${
+        uncertain.size ? `（其中 ${uncertain.size} 章待人工确认）` : ""
+      }`,
+    );
+  }
 
   if (!chapters.length) {
     logJob(job, "没有新的已写章节需要发布；所有已写章节都已提交过。");
@@ -1457,6 +2020,31 @@ async function runFanqiePublish(job: Job): Promise<void> {
           mode: "publish",
           message: "已自动提交发布",
         });
+        await recordPublishOutcome(job.slug, {
+          bookId: config.bookId,
+          bookName: config.bookName,
+          chapter: index,
+          status: "published",
+          jobId: job.id,
+          message: "已自动提交发布",
+        });
+      },
+      onChapterUncertain: async (index, message) => {
+        uncertain.add(index);
+        await recordPublishOutcome(job.slug, {
+          bookId: config.bookId,
+          bookName: config.bookName,
+          chapter: index,
+          status: "uncertain",
+          jobId: job.id,
+          message,
+        }).catch((error) => {
+          logJob(job, `第 ${index} 章待确认状态记录失败：${errorMessage(error)}`);
+        });
+        logJob(
+          job,
+          `第 ${index} 章提交结果不确定，已标记为待人工确认；请到番茄后台核对后处理。`,
+        );
       },
       onLog: (message) => logJob(job, message),
       checkCancelled: () => throwIfCancelled(job),
@@ -1483,9 +2071,11 @@ async function runFanqiePublish(job: Job): Promise<void> {
       logJob(job, "流程完成；请到番茄后台确认草稿并手动发布。");
     }
   } catch (error) {
-    // 每成功一章已在 onChapterPublished 里单独记账；这里只补记“未确认”的章节，
-    // 避免任务中途失败时把已经提交成功的章节误标为失败。
-    const remaining = chapters.filter((chapter) => !confirmed.has(chapter.index));
+    // 每成功一章已在 onChapterPublished 里单独记账；这里只补记既未成功、
+    // 也不属于“待确认”的章节，避免把已成功或结果不明的章节误标为失败。
+    const remaining = chapters.filter(
+      (chapter) => !confirmed.has(chapter.index) && !uncertain.has(chapter.index),
+    );
     if (remaining.length) {
       await appendPublishRecord(job.slug, {
         platform: "fanqie",

@@ -11,8 +11,9 @@ import {
 } from "fs";
 import path from "path";
 import { JOBS_DIR } from "./config";
-import { writeTextSafe } from "./storage";
-import { nowIso } from "./utils";
+import * as sqliteJobRepo from "./db/job-repository";
+import { shouldUseSqlite } from "./storage-mode";
+import { assertSafeSlug, isSafeJobId, isSafeSlug, nowIso } from "./utils";
 import type { Job, JobLog, JobParams, JobStatus } from "./types";
 
 const JOB_TYPES = [
@@ -22,6 +23,7 @@ const JOB_TYPES = [
   "rewrite",
   "repair",
   "recanon",
+  "memory",
   "audit",
   "export",
   "fanqie-login",
@@ -101,6 +103,7 @@ function normalizeParams(input: unknown): JobParams {
   if (record.source === "review" || record.source === "audit") {
     params.source = record.source;
   }
+  if (record.confirmPublish === true) params.confirmPublish = true;
   return params;
 }
 
@@ -122,7 +125,15 @@ function normalizeJob(raw: unknown): Job | null {
   const record = raw as Record<string, unknown>;
   const id = text(record.id).trim();
   const slug = text(record.slug).trim();
-  if (!id || !slug || !isJobType(record.type)) return null;
+  if (
+    !id ||
+    !slug ||
+    !isJobType(record.type) ||
+    !isSafeJobId(id) ||
+    !isSafeSlug(slug)
+  ) {
+    return null;
+  }
 
   const createdAt = text(record.createdAt, nowIso());
   return {
@@ -181,15 +192,22 @@ function readJsonSync<T>(filePath: string): T | null {
   }
 }
 
+function assertSafeJobId(id: string): void {
+  if (!isSafeJobId(id)) throw new Error("任务 ID 不合法");
+}
+
 function jobPath(id: string): string {
+  assertSafeJobId(id);
   return path.join(JOBS_DIR, `${id}.json`);
 }
 
 function lockPath(slug: string): string {
+  assertSafeSlug(slug);
   return path.join(LOCKS_DIR, `${slug}.lock`);
 }
 
 function controlPath(id: string): string {
+  assertSafeJobId(id);
   return path.join(CONTROL_DIR, `${id}.json`);
 }
 
@@ -318,40 +336,71 @@ function listJobFileNames(): string[] {
   }
 }
 
+interface JobPersistence {
+  readAll(): Job[];
+  read(id: string): Job | null;
+  write(job: Job): void;
+  listIds(): string[];
+}
+
+const filePersistence: JobPersistence = {
+  readAll() {
+    const result: Job[] = [];
+    for (const fileName of listJobFileNames()) {
+      try {
+        const job = normalizeJob(
+          JSON.parse(readFileSync(path.join(JOBS_DIR, fileName), "utf8")),
+        );
+        if (job) result.push(job);
+      } catch (error) {
+        console.warn(
+          `[jobs] 跳过损坏的任务文件 ${fileName}：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return result;
+  },
+  read: (id) => readJobFile(id),
+  write: (job) => writeJobFileSync(job),
+  listIds: () => listJobFileNames().map((name) => name.replace(/\.json$/, "")),
+};
+
+const sqlitePersistence: JobPersistence = {
+  readAll: () => sqliteJobRepo.readAllJobs(),
+  read: (id) => sqliteJobRepo.readJob(id),
+  write: (job) => sqliteJobRepo.writeJob(job),
+  listIds: () => sqliteJobRepo.listJobIds(),
+};
+
+function persistence(): JobPersistence {
+  return shouldUseSqlite() ? sqlitePersistence : filePersistence;
+}
+
 function hydrate(): void {
   if (store.hydrated) return;
   store.hydrated = true;
 
   let interrupted = 0;
-  for (const fileName of listJobFileNames()) {
-    try {
-      const job = normalizeJob(JSON.parse(readFileSync(path.join(JOBS_DIR, fileName), "utf8")));
-      if (!job) continue;
-
-      if (job.status === "queued" || job.status === "running") {
-        const lock = readLock(job.slug);
-        const live = Boolean(lock && lock.jobId === job.id && lockIsLive(lock));
-        // 只有“没有存活锁”的运行中任务才是上次进程遗留的；
-        // 另一个进程正在执行时不能误标为中断。
-        if (!live) {
-          job.status = "interrupted";
-          job.error = "服务重启导致任务中断，可重试";
-          job.endedAt = job.endedAt ?? nowIso();
-          job.updatedAt = nowIso();
-          job.pauseRequested = false;
-          job.cancelRequested = false;
-          writeJobFileSync(job);
-          interrupted += 1;
-        }
-      } else {
-        clearControl(job.id);
+  for (const job of persistence().readAll()) {
+    if (job.status === "queued" || job.status === "running") {
+      const lock = readLock(job.slug);
+      const live = Boolean(lock && lock.jobId === job.id && lockIsLive(lock));
+      // 只有“没有存活锁”的运行中任务才是上次进程遗留的；
+      // 另一个进程正在执行时不能误标为中断。
+      if (!live) {
+        job.status = "interrupted";
+        job.error = "服务重启导致任务中断，可重试";
+        job.endedAt = job.endedAt ?? nowIso();
+        job.updatedAt = nowIso();
+        job.pauseRequested = false;
+        job.cancelRequested = false;
+        persistence().write(job);
+        interrupted += 1;
       }
-      jobs.set(job.id, job);
-    } catch (error) {
-      console.warn(
-        `[jobs] 跳过损坏的任务文件 ${fileName}：${error instanceof Error ? error.message : String(error)}`,
-      );
+    } else {
+      clearControl(job.id);
     }
+    jobs.set(job.id, job);
   }
 
   if (interrupted) {
@@ -365,17 +414,14 @@ function activeStatus(status: JobStatus): boolean {
   return status === "queued" || status === "running";
 }
 
-function persistSnapshot(job: Job): string {
-  return `${JSON.stringify(job, null, 2)}\n`;
-}
-
 // 同一任务的异步写入串行化，避免旧快照晚于新快照落盘。
 export function persistJob(job: Job): Promise<void> {
-  const data = persistSnapshot(job);
   const previous = writeQueues.get(job.id) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
-    .then(() => writeTextSafe(jobPath(job.id), data))
+    .then(() => {
+      persistence().write(job);
+    })
     .catch((error) => {
       console.warn(
         `[jobs] 任务 ${job.id} 持久化失败：${error instanceof Error ? error.message : String(error)}`,
@@ -429,7 +475,7 @@ function createJobRecord(
   };
   jobs.set(job.id, job);
   try {
-    writeJobFileSync(job);
+    persistence().write(job);
   } catch (error) {
     jobs.delete(job.id);
     throw error;
@@ -456,6 +502,7 @@ export function acquireProjectSlot(
   type: Job["type"],
   params: JobParams = {},
 ): Job {
+  assertSafeSlug(slug);
   const existing = getActiveJob(slug);
   if (existing) {
     throw new JobConflictError(`项目已有任务正在运行：${existing.type}`, existing);
@@ -496,8 +543,9 @@ export function releaseProjectSlot(slug: string, id: string): void {
 }
 
 export function getJob(id: string): Job | undefined {
+  if (!isSafeJobId(id)) return undefined;
   const memory = jobs.get(id);
-  const disk = readJobFile(id);
+  const disk = persistence().read(id);
   if (!disk) return memory;
   if (memory && memory.updatedAt > disk.updatedAt) return memory;
   jobs.set(id, disk);
@@ -518,14 +566,10 @@ export function getActiveJob(slug: string): Job | undefined {
 }
 
 export function getInterruptedJobs(slug: string): Job[] {
-  const result = new Map<string, Job>();
-  for (const fileName of listJobFileNames()) {
-    const job = normalizeJob(readJsonSync(path.join(JOBS_DIR, fileName)));
-    if (job && job.slug === slug && job.status === "interrupted") {
-      result.set(job.id, job);
-    }
-  }
-  return [...result.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return persistence()
+    .readAll()
+    .filter((job) => job.slug === slug && job.status === "interrupted")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export function requestPause(id: string, slug: string): Job | undefined {
@@ -551,7 +595,7 @@ export function requestCancel(id: string, slug: string): Job | undefined {
     job.updatedAt = job.endedAt;
     job.logs.push({ time: job.updatedAt, message: "任务已取消" });
     if (job.logs.length > 400) job.logs.splice(0, job.logs.length - 400);
-    writeJobFileSync(job);
+    persistence().write(job);
     releaseProjectSlot(slug, id);
     clearControl(id);
     return job;

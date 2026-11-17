@@ -3,6 +3,18 @@
 import { useState } from "react";
 import type { ProjectDetail } from "@/lib/types";
 import { Markdown } from "@/components/Markdown";
+import { errorMessage } from "@/lib/utils";
+
+interface IntegrityIssueView {
+  severity: "critical" | "warning";
+  code: string;
+  message: string;
+}
+
+interface IntegrityReportView {
+  ok: boolean;
+  issues: IntegrityIssueView[];
+}
 
 type OverviewView = "summary" | "canon" | "world" | "outline" | "chapters";
 
@@ -14,8 +26,72 @@ const VIEWS: { key: OverviewView; label: string }[] = [
   { key: "chapters", label: "章节细纲" },
 ];
 
-export function OverviewTab({ detail }: { detail: ProjectDetail }) {
+export function OverviewTab({
+  detail,
+  onRefresh,
+}: {
+  detail: ProjectDetail;
+  onRefresh?: () => Promise<void>;
+}) {
   const [view, setView] = useState<OverviewView>("summary");
+  const [integrity, setIntegrity] = useState<IntegrityReportView | null>(null);
+  const [integrityError, setIntegrityError] = useState("");
+  const [checkingIntegrity, setCheckingIntegrity] = useState(false);
+  const [fixingOutline, setFixingOutline] = useState(false);
+
+  async function checkIntegrity() {
+    setCheckingIntegrity(true);
+    setIntegrityError("");
+    try {
+      const response = await fetch(`/api/projects/${detail.meta.slug}/integrity`, {
+        cache: "no-store",
+      });
+      const data = (await response.json()) as IntegrityReportView & {
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error ?? "一致性检查失败");
+      setIntegrity(data);
+    } catch (error) {
+      setIntegrityError(errorMessage(error));
+    } finally {
+      setCheckingIntegrity(false);
+    }
+  }
+
+  async function fixOutline() {
+    setFixingOutline(true);
+    setIntegrityError("");
+    try {
+      const response = await fetch(`/api/projects/${detail.meta.slug}/integrity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "fix-outline" }),
+      });
+      const data = (await response.json()) as {
+        report?: IntegrityReportView;
+        fixedChapters?: number[];
+        error?: string;
+      };
+      if (!response.ok || !data.report) {
+        throw new Error(data.error ?? "自动修复失败");
+      }
+      setIntegrity(data.report);
+      await onRefresh?.();
+    } catch (error) {
+      setIntegrityError(errorMessage(error));
+    } finally {
+      setFixingOutline(false);
+    }
+  }
+
+  const canFixOutline = Boolean(
+    integrity?.issues.some(
+      (issue) =>
+        issue.code === "outline-missing-chapter" ||
+        issue.code === "outline-no-chapters" ||
+        issue.code === "outline-empty",
+    ),
+  );
   const written = detail.state.written.length;
   const totalWords = detail.chapters.reduce(
     (sum, chapter) => sum + (chapter.written ? chapter.words : 0),
@@ -133,6 +209,68 @@ export function OverviewTab({ detail }: { detail: ProjectDetail }) {
                   </dd>
                 </div>
               </dl>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2 className="panel-title">数据一致性</h2>
+              <div className="panel-head-tools">
+                {integrity ? (
+                  <span className={`status-pill ${integrity.ok ? "ok" : "bad"}`}>
+                    {integrity.ok ? "通过" : "需处理"}
+                  </span>
+                ) : null}
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={checkIntegrity}
+                  disabled={checkingIntegrity}
+                >
+                  {checkingIntegrity ? "检查中…" : "检查"}
+                </button>
+              </div>
+            </div>
+            <div className="panel-body">
+              <p className="hint">
+                检查章节编号、正文文件、事实台账，以及 plan.json 与 outline.md
+                是否同步。检查只读，不会修改数据。
+              </p>
+              {integrityError ? <p className="form-error">{integrityError}</p> : null}
+              {integrity ? (
+                integrity.issues.length ? (
+                  <ul className="integrity-list">
+                    {integrity.issues.slice(0, 20).map((issue, index) => (
+                      <li
+                        key={`${issue.code}-${index}`}
+                        className={`integrity-item ${issue.severity}`}
+                      >
+                        <span className={`review-severity ${issue.severity}`}>
+                          {issue.severity === "critical" ? "严重" : "提示"}
+                        </span>
+                        <span>{issue.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted small">未发现数据一致性问题。</p>
+                )
+              ) : (
+                <p className="muted small">点击「检查」生成报告。</p>
+              )}
+              {integrity && integrity.issues.length > 20 ? (
+                <p className="muted small">
+                  仅显示前 20 条，共 {integrity.issues.length} 条问题。
+                </p>
+              ) : null}
+              {canFixOutline ? (
+                <button
+                  className="btn btn-sm"
+                  onClick={fixOutline}
+                  disabled={fixingOutline}
+                >
+                  {fixingOutline ? "修复中…" : "自动补全主线大纲中的缺失章节"}
+                </button>
+              ) : null}
             </div>
           </section>
         </>

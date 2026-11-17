@@ -1094,6 +1094,7 @@ export function ContinuityTab({
                     const critical = draft.review.issues.filter(
                       (issue) => issue.severity === "critical",
                     ).length;
+                    const extractionFailed = draft.review.extractionOk === false;
                     return (
                       <article key={draft.index} className="continuity-chapter bad">
                         <div className="continuity-chapter-head">
@@ -1110,7 +1111,7 @@ export function ContinuityTab({
                               {new Date(draft.at).toLocaleString("zh-CN", { hour12: false })}
                             </span>
                             <span className="review-badge bad">
-                              {critical} 个严重问题
+                              {extractionFailed ? "事实抽取失败" : `${critical} 个严重问题`}
                             </span>
                           </div>
                         </div>

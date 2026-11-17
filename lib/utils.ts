@@ -12,6 +12,17 @@ export function isSafeSlug(slug: string): boolean {
   return /^[a-z0-9][a-z0-9-]{0,63}$/.test(slug);
 }
 
+export function assertSafeSlug(slug: string): void {
+  if (!isSafeSlug(slug)) throw new Error("slug 不合法");
+}
+
+export function isSafeJobId(id: string): boolean {
+  // 任务 ID 由 randomUUID 生成，会直接拼进 jobs/<id>.json；只接受 UUID。
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    id,
+  );
+}
+
 export function slugify(input: string): string {
   // 中文书名过滤掉非 ASCII 字符后可能为空，这时用时间戳兜底，
   // 保证每个项目都有可用的目录名，而不是退化成空 slug。
