@@ -4,7 +4,7 @@ import {
   filterSeedIssues,
   normalizeIssueText,
 } from "@/lib/repair-compare";
-import type { ContinuityIssue } from "@/lib/types";
+import type { Character, ContinuityIssue } from "@/lib/types";
 
 function issue(
   type: string,
@@ -12,6 +12,22 @@ function issue(
   detail = "与第 4 章事实台账冲突。",
 ): ContinuityIssue {
   return { severity: "critical", type, evidence, detail };
+}
+
+function character(name: string): Character {
+  return {
+    name,
+    role: "配角",
+    gender: "未知",
+    age: "未知",
+    appearance: "",
+    personality: "",
+    background: "",
+    goals: "",
+    arc: "",
+    relationships: "",
+    speechStyle: "",
+  };
 }
 
 describe("草稿修复问题对比", () => {
@@ -38,6 +54,51 @@ describe("草稿修复问题对比", () => {
     expect(result.resolved).toHaveLength(1);
   });
 
+  it("相同证据且冲突章节相同时仍能匹配", () => {
+    const text = "陈玉华在省城超市收银台旁接电话。";
+    const result = compareCriticalIssues(
+      [issue("时间线", text, "与第 4 章事实冲突。")],
+      [issue("时间线", text, "与第 4 章事实冲突。")],
+    );
+    expect(result.remaining).toHaveLength(1);
+    expect(result.resolved).toHaveLength(0);
+    expect(result.added).toHaveLength(0);
+  });
+
+  it("相同证据但冲突章节不同时必须识别为不同问题", () => {
+    const text = "陈玉华在省城超市收银台旁接电话。";
+    const result = compareCriticalIssues(
+      [issue("时间线", text, "与第 4 章事实冲突。")],
+      [issue("时间线", text, "与第 6 章事实冲突。")],
+    );
+    expect(result.remaining).toHaveLength(0);
+    expect(result.resolved).toHaveLength(1);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("不同问题类型不能仅凭相同证据匹配", () => {
+    const text = "陈玉华在省城超市收银台旁接电话。";
+    const result = compareCriticalIssues(
+      [issue("时间线", text)],
+      [issue("人物生死状态", text)],
+    );
+    expect(result.resolved).toHaveLength(1);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("相同证据但关键实体不同时不能被错误合并", () => {
+    const characters = [character("陈玉华"), character("李四")];
+    const evidence = "密室里发现了一具尸体。";
+    const result = compareCriticalIssues(
+      [issue("人物生死状态", evidence, "李四与第 4 章状态冲突。")],
+      [issue("人物生死状态", evidence, "陈玉华与第 4 章状态冲突。")],
+      characters,
+    );
+    expect(result.remaining).toHaveLength(0);
+    expect(result.resolved).toHaveLength(1);
+    expect(result.added).toHaveLength(1);
+  });
+
   it("章节锚点冲突时不会误判为同一问题", () => {
     const before = [
       issue(
@@ -58,7 +119,7 @@ describe("草稿修复问题对比", () => {
     expect(result.added).toHaveLength(1);
   });
 
-  it("贪心一对一匹配，一个问题不能消费多个旧问题", () => {
+  it("最大权重匹配，一个问题不能消费多个旧问题", () => {
     const before = [
       issue("时间线", "陈玉华在省城超市收银台旁接电话。"),
       issue("时间线", "陈玉华在省城超市收银台旁边接听电话。"),
@@ -68,6 +129,63 @@ describe("草稿修复问题对比", () => {
     expect(result.remaining).toHaveLength(1);
     expect(result.resolved).toHaveLength(1);
     expect(result.added).toHaveLength(0);
+  });
+
+  it("两个旧问题和两个新问题交叉相似时选择全局最优配对", () => {
+    const before = [
+      issue(
+        "时间线",
+        "陈玉华在省城超市收银台旁接电话。",
+        "与事实台账冲突。",
+      ),
+      issue(
+        "时间线",
+        "陈玉华在省城超市的收银台旁接听电话。",
+        "与第 4 章事实台账冲突。",
+      ),
+    ];
+    const after = [
+      issue(
+        "时间线",
+        "陈玉华在省城超市收银台旁接电话。",
+        "与第 4 章事实台账冲突。",
+      ),
+      issue(
+        "时间线",
+        "陈玉华在省城超市收银台旁接听电话。",
+        "与第 5 章事实台账冲突。",
+      ),
+    ];
+    const result = compareCriticalIssues(before, after);
+    // 全局最优会同时保留两个旧问题的匹配；贪心会错配成“解决 1、新增 1”。
+    expect(result.remaining).toHaveLength(2);
+    expect(result.resolved).toHaveLength(0);
+    expect(result.added).toHaveLength(0);
+  });
+
+  it("歧义匹配时保守处理，不会把多个新问题吸收成同一个旧问题", () => {
+    const before = [issue("时间线", "陈玉华在省城超市收银台旁接电话。")];
+    const after = [
+      issue("时间线", "陈玉华在省城超市收银台旁接电话。", "与第 4 章事实冲突。"),
+      issue("时间线", "陈玉华在省城超市收银台旁接电话。", "第 4 章时间线疑似冲突。"),
+    ];
+    const result = compareCriticalIssues(before, after);
+    expect(result.remaining).toHaveLength(1);
+    expect(result.resolved).toHaveLength(0);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("新增严重问题不能被错误吸收进旧问题", () => {
+    const text = "陈玉华在省城超市收银台旁接电话。";
+    const result = compareCriticalIssues(
+      [issue("时间线", text, "与第 4 章事实冲突。")],
+      [
+        issue("时间线", text, "与第 4 章事实冲突。"),
+        issue("时间线", text, "与第 8 章事实冲突。"),
+      ],
+    );
+    expect(result.resolved).toHaveLength(0);
+    expect(result.added).toHaveLength(1);
   });
 
   it("只有严重问题严格减少且没有新增时才接受新版本", () => {

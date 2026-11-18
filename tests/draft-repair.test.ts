@@ -10,12 +10,16 @@ interface AuditStep {
 
 const agentState = vi.hoisted(() => ({
   failExtraction: false,
+  failAudit: false,
+  auditError: "模拟审校不可用",
   scripted: false,
   auditSteps: [] as AuditStep[],
   auditCalls: 0,
   repairCalls: 0,
   repairIssues: [] as ContinuityIssue[][],
   repairFeedback: [] as string[],
+  onAudit: null as (() => void | Promise<void>) | null,
+  onRepair: null as (() => void | Promise<void>) | null,
 }));
 
 vi.mock("../lib/agents", async (importOriginal) => {
@@ -29,10 +33,16 @@ vi.mock("../lib/agents", async (importOriginal) => {
       return actual.extractChapterFacts(...args);
     },
     auditChapter: async (...args: Parameters<typeof actual.auditChapter>) => {
+      agentState.auditCalls += 1;
+      // 给测试留出在模型调用“进行中”发起暂停/取消的窗口。
+      if (agentState.onAudit) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await agentState.onAudit();
+      }
+      if (agentState.failAudit) throw new Error(agentState.auditError);
       if (!agentState.scripted) return actual.auditChapter(...args);
       const step = agentState.auditSteps.shift();
       if (!step) throw new Error("模拟审校脚本已用完");
-      agentState.auditCalls += 1;
       const chapter = args[3];
       return {
         summary: chapter.summary,
@@ -46,6 +56,10 @@ vi.mock("../lib/agents", async (importOriginal) => {
       };
     },
     repairChapter: async (...args: Parameters<typeof actual.repairChapter>) => {
+      if (agentState.onRepair) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await agentState.onRepair();
+      }
       if (!agentState.scripted) return actual.repairChapter(...args);
       agentState.repairCalls += 1;
       agentState.repairIssues.push(args[3]);
@@ -64,12 +78,16 @@ beforeEach(async () => {
   dataDir = await mkdtemp(path.join(tmpdir(), "quillmate-draft-repair-"));
   process.env.QUILLMATE_DATA_DIR = dataDir;
   agentState.failExtraction = false;
+  agentState.failAudit = false;
+  agentState.auditError = "模拟审校不可用";
   agentState.scripted = false;
   agentState.auditSteps = [];
   agentState.auditCalls = 0;
   agentState.repairCalls = 0;
   agentState.repairIssues = [];
   agentState.repairFeedback = [];
+  agentState.onAudit = null;
+  agentState.onRepair = null;
   vi.resetModules();
   store = await import("@/lib/store");
   pipeline = await import("@/lib/pipeline");
@@ -501,5 +519,161 @@ describe("未采用草稿修复", () => {
 
     const detail = await store.getProjectDetail(slug);
     expect(detail.chapters.find((item) => item.index === 1)?.written).toBeFalsy();
+  });
+
+  it("审校服务失败时不调用修复 Agent，并保留原草稿", async () => {
+    const slug = await projectWithPlan("审校失败不修复");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    agentState.failAudit = true;
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(0);
+    expect(agentState.auditCalls).toBe(1);
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    expect(saved?.content.trim()).toBe(content);
+    expect(saved?.draft.reason).toContain("连续性审校失败");
+    expect(saved?.draft.reason).toContain("需要人工处理");
+    expect(
+      finished.logs.some((line) => line.message.includes("未调用修复 Agent")),
+    ).toBe(true);
+    expect(
+      finished.logs.some((line) => line.message.includes("audit-failed")),
+    ).toBe(true);
+    expect(finished.result).toContain("1 份仍需处理");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.written).toBeFalsy();
+  });
+
+  it("审校结果无法解析时按审校失败处理", async () => {
+    const slug = await projectWithPlan("审校解析失败");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    agentState.failAudit = true;
+    agentState.auditError = "审校结果不是合法 JSON";
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(0);
+    expect(
+      finished.logs.some((line) => line.message.includes("不是合法 JSON")),
+    ).toBe(true);
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    expect(saved?.content.trim()).toBe(content);
+    expect(saved?.draft.reason).toContain("连续性审校失败");
+  });
+
+  it("首次审校期间暂停后不再调用修复 Agent", async () => {
+    const slug = await projectWithPlan("首次审校暂停");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    setAuditScript([{ critical: [] }]);
+    let running: Job | undefined;
+    agentState.onAudit = () => {
+      if (running) jobs.requestPause(running.id, slug);
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "draft",
+    });
+    running = job;
+    const finished = await waitForJob(job.id);
+
+    expect(finished.status, finished.error).toBe("paused");
+    expect(agentState.auditCalls).toBe(1);
+    expect(agentState.repairCalls).toBe(0);
+    expect(
+      finished.logs.some((line) => line.message.includes("草稿修复已暂停")),
+    ).toBe(true);
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    expect(saved?.content.trim()).toBe(content);
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.written).toBeFalsy();
+  });
+
+  it("修复期间暂停后不再进入下一轮审校或修复", async () => {
+    const slug = await projectWithPlan("修复期间暂停");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    setAuditScript([
+      { critical: [{ type: "时间线", evidence: content }] },
+    ]);
+    let running: Job | undefined;
+    agentState.onRepair = () => {
+      if (running) jobs.requestPause(running.id, slug);
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "draft",
+    });
+    running = job;
+    const finished = await waitForJob(job.id);
+
+    expect(finished.status, finished.error).toBe("paused");
+    expect(agentState.auditCalls).toBe(1);
+    expect(agentState.repairCalls).toBe(1);
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    expect(saved?.content.trim()).toBe(content);
+    expect(saved?.content).not.toContain("【修复");
+  });
+
+  it("第二轮审校期间暂停后不再发起后续模型调用", async () => {
+    const slug = await projectWithPlan("第二轮审校暂停");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    setAuditScript([
+      { critical: [{ type: "时间线", evidence: content }] },
+      { critical: [{ type: "时间线", evidence: content }] },
+    ]);
+    let running: Job | undefined;
+    agentState.onAudit = () => {
+      if (running && agentState.auditCalls >= 2) {
+        jobs.requestPause(running.id, slug);
+      }
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "draft",
+    });
+    running = job;
+    const finished = await waitForJob(job.id);
+
+    expect(finished.status, finished.error).toBe("paused");
+    expect(agentState.auditCalls).toBe(2);
+    expect(agentState.repairCalls).toBe(1);
+  });
+
+  it("取消任务后不再执行后续模型调用", async () => {
+    const slug = await projectWithPlan("审校期间取消");
+    const content = "陈玉华在省城超市收银台旁接电话。";
+    await saveDraft(slug, "write", content);
+    setAuditScript([{ critical: [] }]);
+    let running: Job | undefined;
+    agentState.onAudit = () => {
+      if (running) jobs.requestCancel(running.id, slug);
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "draft",
+    });
+    running = job;
+    const finished = await waitForJob(job.id);
+
+    expect(finished.status, finished.error).toBe("cancelled");
+    expect(agentState.auditCalls).toBe(1);
+    expect(agentState.repairCalls).toBe(0);
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    expect(saved?.content.trim()).toBe(content);
   });
 });

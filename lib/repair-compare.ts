@@ -96,6 +96,16 @@ function issueSimilarity(
   const rightType = normalizeIssueText(right.type);
   if (leftType !== rightType) return 0;
 
+  const leftText = normalizeIssueText(`${left.evidence}${left.detail}`);
+  const rightText = normalizeIssueText(`${right.evidence}${right.detail}`);
+
+  // 证据相同/互相包含不等于同一问题：先校验冲突章节和关键实体，
+  // 否则不同章节、不同人物的问题会被合并，新增严重问题也会被旧问题吸收。
+  if (!anchorOverlap(leftText, rightText)) return 0;
+  if (!entitiesOverlap(presentEntities(leftText, names), presentEntities(rightText, names))) {
+    return 0;
+  }
+
   const leftEvidence = normalizeIssueText(left.evidence);
   const rightEvidence = normalizeIssueText(right.evidence);
   if (
@@ -106,8 +116,6 @@ function issueSimilarity(
     return 1;
   }
 
-  const leftText = normalizeIssueText(`${left.evidence}${left.detail}`);
-  const rightText = normalizeIssueText(`${right.evidence}${right.detail}`);
   const evidenceScore = dice(bigrams(leftEvidence), bigrams(rightEvidence));
   const textScore = dice(bigrams(leftText), bigrams(rightText));
   const score = evidenceScore * 0.7 + textScore * 0.3;
@@ -115,10 +123,6 @@ function issueSimilarity(
     ? GENERIC_MATCH_THRESHOLD
     : MATCH_THRESHOLD;
   if (score < threshold) return 0;
-  if (!anchorOverlap(leftText, rightText)) return 0;
-  if (!entitiesOverlap(presentEntities(leftText, names), presentEntities(rightText, names))) {
-    return 0;
-  }
   return score;
 }
 
@@ -161,6 +165,92 @@ export function filterSeedIssues(
   return { active, stale };
 }
 
+// 最小权完美匹配（Hungarian）。传入方阵成本矩阵，返回每一行匹配到的列。
+function minimizeAssignment(cost: number[][]): number[] {
+  const size = cost.length;
+  const rowPotential = new Array<number>(size + 1).fill(0);
+  const columnPotential = new Array<number>(size + 1).fill(0);
+  const matchedRow = new Array<number>(size + 1).fill(0);
+  const previousColumn = new Array<number>(size + 1).fill(0);
+  for (let row = 1; row <= size; row += 1) {
+    matchedRow[0] = row;
+    let column = 0;
+    const minValue = new Array<number>(size + 1).fill(Number.POSITIVE_INFINITY);
+    const used = new Array<boolean>(size + 1).fill(false);
+    do {
+      used[column] = true;
+      const currentRow = matchedRow[column];
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let candidate = 1; candidate <= size; candidate += 1) {
+        if (used[candidate]) continue;
+        const value =
+          cost[currentRow - 1][candidate - 1] -
+          rowPotential[currentRow] -
+          columnPotential[candidate];
+        if (value < minValue[candidate]) {
+          minValue[candidate] = value;
+          previousColumn[candidate] = column;
+        }
+        if (minValue[candidate] < delta) {
+          delta = minValue[candidate];
+          nextColumn = candidate;
+        }
+      }
+      for (let candidate = 0; candidate <= size; candidate += 1) {
+        if (used[candidate]) {
+          rowPotential[matchedRow[candidate]] += delta;
+          columnPotential[candidate] -= delta;
+        } else {
+          minValue[candidate] -= delta;
+        }
+      }
+      column = nextColumn;
+    } while (matchedRow[column] !== 0);
+    do {
+      const next = previousColumn[column];
+      matchedRow[column] = matchedRow[next];
+      column = next;
+    } while (column !== 0);
+  }
+  const assignment = new Array<number>(size).fill(-1);
+  for (let column = 1; column <= size; column += 1) {
+    const row = matchedRow[column];
+    if (row !== 0) assignment[row - 1] = column - 1;
+  }
+  return assignment;
+}
+
+// 全局最大权重匹配，避免“先匹配最高分”导致后面的问题被迫错配。
+// 真实问题之间用负分数作为成本，配不上的行/列走 0 成本占位。
+function maximumWeightPairs(scores: number[][]): {
+  before: number;
+  after: number;
+  score: number;
+}[] {
+  const rows = scores.length;
+  const cols = rows ? scores[0].length : 0;
+  if (!rows || !cols) return [];
+  const size = rows + cols;
+  const cost = Array.from({ length: size }, () =>
+    new Array<number>(size).fill(0),
+  );
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < cols; column += 1) {
+      if (scores[row][column] > 0) cost[row][column] = -scores[row][column];
+    }
+  }
+  const assignment = minimizeAssignment(cost);
+  const pairs: { before: number; after: number; score: number }[] = [];
+  for (let row = 0; row < rows; row += 1) {
+    const column = assignment[row];
+    if (column >= 0 && column < cols && scores[row][column] > 0) {
+      pairs.push({ before: row, after: column, score: scores[row][column] });
+    }
+  }
+  return pairs;
+}
+
 export function compareCriticalIssues(
   before: ContinuityIssue[],
   after: ContinuityIssue[],
@@ -169,23 +259,14 @@ export function compareCriticalIssues(
   const beforeCritical = criticalIssues(before);
   const afterCritical = criticalIssues(after);
   const names = characterNames(characters);
-  const pairs: { before: number; after: number; score: number }[] = [];
-  for (let left = 0; left < beforeCritical.length; left += 1) {
-    for (let right = 0; right < afterCritical.length; right += 1) {
-      const score = issueSimilarity(
-        beforeCritical[left],
-        afterCritical[right],
-        names,
-      );
-      if (score > 0) pairs.push({ before: left, after: right, score });
-    }
-  }
-  pairs.sort((left, right) => right.score - left.score);
+  const scores = beforeCritical.map((left) =>
+    afterCritical.map((right) => issueSimilarity(left, right, names)),
+  );
+  const pairs = maximumWeightPairs(scores);
 
   const matchedBefore = new Set<number>();
   const matchedAfter = new Set<number>();
   for (const pair of pairs) {
-    if (matchedBefore.has(pair.before) || matchedAfter.has(pair.after)) continue;
     matchedBefore.add(pair.before);
     matchedAfter.add(pair.after);
   }
