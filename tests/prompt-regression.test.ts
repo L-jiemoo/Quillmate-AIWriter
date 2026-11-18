@@ -84,6 +84,39 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("不得为了让本章通过而修改事实台账");
   });
 
+  it("草稿修复提示词才追加局部修改约束", () => {
+    const detail = reviewProject();
+    const chapter = detail.plan.chapters[3];
+    const build = (draftRepair: boolean) =>
+      chapterRepairMessages(
+        detail.meta,
+        chapter,
+        "张三在密室里发现了一行旧字。",
+        [
+          {
+            severity: "critical",
+            type: "人物生死状态",
+            evidence: "李四走进来",
+            detail: "李四已在第 2 章死亡。",
+          },
+        ],
+        detail.canon,
+        "",
+        "",
+        "",
+        "",
+        { draftRepair },
+      )
+        .map((message) => message.content)
+        .join("\n");
+
+    const draft = build(true);
+    expect(draft).toContain("只处理【必须解决的问题】中列出的当前问题");
+    expect(draft).toContain("不得新增人物、事件、设定、物品、能力或伏笔");
+    expect(draft).toContain("如果某个问题无法在不破坏其他内容的前提下解决");
+    expect(build(false)).not.toContain("不得新增人物、事件、设定、物品、能力或伏笔");
+  });
+
   it("所有模型 Agent 都有稳定的内置提示词版本", () => {
     expect(PROMPT_AGENTS).toHaveLength(8);
     for (const agent of PROMPT_AGENTS) {

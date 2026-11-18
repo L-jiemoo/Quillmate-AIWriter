@@ -397,6 +397,7 @@ export async function repairChapter(
   nextOpening: string,
   rewriteInstruction: string,
   reviewFeedback: string,
+  options: { draftRepair?: boolean } = {},
 ): Promise<string> {
   if (isMock()) return chapterText;
 
@@ -412,6 +413,7 @@ export async function repairChapter(
       nextOpening,
       rewriteInstruction,
       reviewFeedback,
+      options,
     ),
     { temperature: 0.2, agent: "repair-editor", chapter: chapter.index },
   );

@@ -12,7 +12,6 @@ import {
   canonForChapter,
   countCritical,
   emptyCanon,
-  formatIssuesForPrompt,
   groundExtractedFacts,
   isCanonEmpty,
   mergeCanon,
@@ -46,6 +45,8 @@ import {
 import { promptVersionInfo } from "./prompt-store";
 import { findPublishEntry } from "./publish-ledger";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
+import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
+import type { IssueComparison } from "./repair-compare";
 import { reviewSuspicions } from "./review";
 import {
   applyChapterStory,
@@ -805,6 +806,411 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
   );
 }
 
+interface VerifyDraftChapterInput extends VerifyChapterInput {
+  seedIssues?: ContinuityIssue[];
+  seedReview?: ReviewResult;
+  maxRepairs?: number;
+}
+
+type DraftStopReason =
+  | "passed"
+  | "max-repairs"
+  | "no-improvement"
+  | "new-critical"
+  | "increased"
+  | "repair-failed"
+  | "extraction-failed"
+  | "paused";
+
+interface VerifyDraftChapterResult extends VerifyChapterResult {
+  repairCalls: number;
+  extractionFailed: boolean;
+  comparison?: IssueComparison;
+  stopReason: DraftStopReason;
+  seedStatus: "used" | "fallback";
+  initialCriticalCount: number;
+  finalCriticalCount: number;
+}
+
+// 草稿修复是独立流程：先修再验，最多两轮；正常写作的 verifyChapter 不变。
+async function verifyDraftChapter(
+  input: VerifyDraftChapterInput,
+): Promise<VerifyDraftChapterResult> {
+  const previousContext = [
+    input.previousEnding ? `上一章结尾：\n${input.previousEnding}` : "",
+    ...input.previousSummaries.map((summary, index) => `前情摘要 ${index + 1}：${summary}`),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const nextContext = [
+    input.nextOpening ? `下一章开头：\n${input.nextOpening}` : "",
+    input.nextSummary ? `下一章摘要：${input.nextSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const auditCanon = canonForChapter(input.canon, input.chapter.index);
+  const storyContext = buildStoryContext(
+    input.project,
+    input.chapter,
+    input.memory,
+    input.story,
+  ).text;
+  const previousChapters = input.project.chapters
+    .filter(
+      (chapter) =>
+        chapter.index < input.chapter.index &&
+        chapter.written &&
+        chapter.content.trim(),
+    )
+    .sort((a, b) => b.index - a.index)
+    .slice(0, 3);
+
+  const maxRepairs = Math.max(1, Math.min(2, input.maxRepairs ?? 2));
+  const seedIssues = input.seedIssues ?? [];
+  const seedStatus: "used" | "fallback" = seedIssues.length ? "used" : "fallback";
+  const maxAudits = seedStatus === "used" ? maxRepairs : maxRepairs + 1;
+  let currentText = input.text;
+  let best: VerifyChapterResult | null = null;
+  let comparison: IssueComparison | undefined;
+  let repairCalls = 0;
+  let extractionFailed = false;
+  let stopReason: DraftStopReason = "max-repairs";
+  let initialCriticalCount = countCritical(seedIssues);
+  let finalCriticalCount = initialCriticalCount;
+
+  const fallback = (): VerifyDraftChapterResult => {
+    const review =
+      input.seedReview ??
+      ({
+        summary: input.chapter.summary,
+        issues: seedIssues,
+        continuityOk: false,
+        repaired: false,
+        repairAttempts: 0,
+      } satisfies ReviewResult);
+    const critical = countCritical(review.issues);
+    return {
+      text: input.text,
+      review,
+      canon: input.canon,
+      passed: false,
+      repairCalls,
+      extractionFailed,
+      comparison,
+      stopReason,
+      seedStatus,
+      initialCriticalCount,
+      finalCriticalCount: critical,
+    };
+  };
+
+  const finish = (): VerifyDraftChapterResult =>
+    best
+      ? {
+          ...best,
+          repairCalls,
+          extractionFailed,
+          comparison,
+          stopReason,
+          seedStatus,
+          initialCriticalCount,
+          finalCriticalCount,
+        }
+      : fallback();
+
+  const logStop = () => {
+    if (comparison) {
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章修复对比：严重问题 ${comparison.beforeCount}→${comparison.afterCount}（已解决 ${comparison.resolved.length}，仍存在 ${comparison.remaining.length}，新增 ${comparison.added.length}）；${stopReason === "increased" ? "问题数量增加" : stopReason === "new-critical" ? "出现新的严重问题" : "没有取得改善"}，保留最佳草稿并停止自动修复。`,
+      );
+    }
+  };
+
+  const repairRound = async (
+    blocking: ContinuityIssue[],
+    logStart = true,
+  ): Promise<boolean> => {
+    const nextRound = repairCalls + 1;
+    if (logStart) {
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章基于最新审校问题尝试定点修复（第 ${nextRound} 轮）…`,
+      );
+    }
+    try {
+      const repaired = await repairChapter(
+        input.meta,
+        input.chapter,
+        currentText,
+        blocking,
+        auditCanon,
+        input.previousEnding,
+        input.nextOpening,
+        input.rewriteInstruction,
+        "",
+        { draftRepair: true },
+      );
+      if (!repaired.trim()) throw new Error("修复返回空正文");
+      currentText = repaired;
+      repairCalls = nextRound;
+      throwIfCancelled(input.job);
+      return true;
+    } catch (error) {
+      if (error instanceof JobCancelledError) throw error;
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章定点修复失败：${errorMessage(error)}`,
+      );
+      stopReason = "repair-failed";
+      return false;
+    }
+  };
+
+  if (seedStatus === "used") {
+    logJob(
+      input.job,
+      `第 ${input.chapter.index} 章根据原草稿审校问题直接修复（第 1 轮）…`,
+    );
+    if (!(await repairRound(seedIssues, false))) return fallback();
+    if (isPauseRequested(input.job)) {
+      stopReason = "paused";
+      return fallback();
+    }
+  }
+
+  for (let auditIndex = 0; auditIndex < maxAudits; auditIndex += 1) {
+    throwIfCancelled(input.job);
+    if (isPauseRequested(input.job) && auditIndex > 0) {
+      stopReason = "paused";
+      break;
+    }
+
+    let extracted: ExtractedFacts;
+    let extractionAttempts = 0;
+    try {
+      const extraction = await extractFactsWithRetry(
+        input.job,
+        input.meta,
+        input.bible,
+        input.chapter,
+        currentText,
+        auditCanon,
+      );
+      extracted = extraction.facts;
+      extractionAttempts = extraction.attempts;
+    } catch (error) {
+      if (error instanceof JobCancelledError) throw error;
+      extractionFailed = true;
+      stopReason = "extraction-failed";
+      const message = errorMessage(error);
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章事实抽取失败，未验证的修复稿不会被采用；保留最佳草稿并交由人工处理。`,
+      );
+      const result = finish();
+      return {
+        ...result,
+        review: {
+          ...result.review,
+          extractionOk: false,
+          extractionError: message,
+          extractionAttempts: EXTRACTION_MAX_ATTEMPTS,
+        },
+      };
+    }
+
+    const chapterMemory = buildChapterMemory(
+      input.chapter.index,
+      extracted.summary || input.chapter.summary,
+      extracted,
+      "ai",
+    );
+    const checks = reviewSuspicions({
+      project: input.project,
+      chapter: input.chapter,
+      text: currentText,
+      canon: auditCanon,
+      memory: input.memory,
+      story: input.story,
+      previousEnding: input.previousEnding,
+      previousChapters,
+      extracted: extracted.story,
+      chapterMemory,
+    });
+
+    let audit: ReviewResult;
+    try {
+      audit = await auditChapter(
+        input.meta,
+        auditCanon,
+        input.project.characters,
+        input.chapter,
+        currentText,
+        previousContext,
+        checks.suspicions,
+        nextContext,
+        storyContext,
+      );
+    } catch (error) {
+      logJob(input.job, `第 ${input.chapter.index} 章连续性审校失败，已标记为待复查`);
+      audit = {
+        summary: extracted.summary,
+        issues: [
+          {
+            severity: "critical",
+            type: "审校失败",
+            evidence: "",
+            detail: `连续性审校调用失败，本章未经检查：${errorMessage(error)}`,
+          },
+        ],
+        continuityOk: false,
+      };
+    }
+
+    throwIfCancelled(input.job);
+
+    const merged = mergeCanon(
+      auditCanon,
+      extracted,
+      input.chapter.index,
+      input.mode,
+    );
+    const mergedFull =
+      auditCanon === input.canon
+        ? merged
+        : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
+    const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
+    const critical = countCritical(issues);
+    const review: ReviewResult = {
+      summary: extracted.summary || audit.summary || input.chapter.summary,
+      issues,
+      continuityOk: critical === 0,
+      repaired: repairCalls > 0,
+      repairAttempts: repairCalls,
+      extractionOk: true,
+      extractionAttempts,
+    };
+    const memory = buildChapterMemory(
+      input.chapter.index,
+      review.summary,
+      extracted,
+      "ai",
+    );
+    const candidate: VerifyChapterResult = {
+      text: currentText,
+      review,
+      canon: review.continuityOk ? mergedFull.canon : input.canon,
+      passed: review.continuityOk,
+      memory,
+      story: extracted.story,
+    };
+
+    if (!best && seedStatus === "fallback") {
+      best = candidate;
+      initialCriticalCount = critical;
+      finalCriticalCount = critical;
+      if (review.continuityOk) {
+        stopReason = "passed";
+        return finish();
+      }
+      if (repairCalls >= maxRepairs) {
+        stopReason = "max-repairs";
+        break;
+      }
+      if (!(await repairRound(issues.filter((issue) => issue.severity === "critical")))) {
+        break;
+      }
+      continue;
+    }
+
+    if (seedStatus === "used" && auditIndex === 0) {
+      comparison = compareCriticalIssues(
+        seedIssues,
+        review.issues,
+        input.characters,
+      );
+      if (review.continuityOk) {
+        best = candidate;
+        finalCriticalCount = 0;
+        stopReason = "passed";
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章草稿修复第 1 轮后通过连续性检查。`,
+        );
+        return finish();
+      }
+      if (!comparison.accepted) {
+        stopReason =
+          comparison.afterCount > comparison.beforeCount
+            ? "increased"
+            : comparison.added.length
+              ? "new-critical"
+              : "no-improvement";
+        logStop();
+        return fallback();
+      }
+      best = candidate;
+      finalCriticalCount = critical;
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章草稿修复第 1 轮有改善：严重问题 ${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}。`,
+      );
+      if (repairCalls >= maxRepairs) {
+        stopReason = "max-repairs";
+        break;
+      }
+      if (!(await repairRound(issues.filter((issue) => issue.severity === "critical")))) {
+        break;
+      }
+      continue;
+    }
+
+    const previousBest = best;
+    if (!previousBest) break;
+    comparison = compareCriticalIssues(
+      previousBest.review.issues,
+      review.issues,
+      input.characters,
+    );
+    if (review.continuityOk) {
+      best = candidate;
+      finalCriticalCount = 0;
+      stopReason = "passed";
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章草稿经 ${repairCalls} 轮修复后通过连续性检查。`,
+      );
+      return finish();
+    }
+    if (!comparison.accepted) {
+      stopReason =
+        comparison.afterCount > comparison.beforeCount
+          ? "increased"
+          : comparison.added.length
+            ? "new-critical"
+            : "no-improvement";
+      logStop();
+      break;
+    }
+    best = candidate;
+    finalCriticalCount = critical;
+    logJob(
+      input.job,
+      `第 ${input.chapter.index} 章草稿修复第 ${repairCalls} 轮有改善：严重问题 ${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}。`,
+    );
+    if (repairCalls >= maxRepairs) {
+      stopReason = "max-repairs";
+      break;
+    }
+    if (!(await repairRound(issues.filter((issue) => issue.severity === "critical")))) {
+      break;
+    }
+  }
+
+  return finish();
+}
+
 async function runWrite(job: Job, requested: number): Promise<boolean> {
   const count = Math.max(1, Math.min(50, Math.round(Number(requested) || 1)));
   const detail = await getProjectDetail(job.slug);
@@ -1531,16 +1937,40 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       .sort((a, b) => a - b)
       .map((index) => detail.state.summaries[String(index)])
       .filter((item): item is string => Boolean(item));
-    const issues = draft.review.issues.filter((issue) => issue.severity !== "ignore");
-    const reviewFeedback = issues.length
-      ? formatIssuesForPrompt(issues)
-      : `原草稿未通过原因：${draft.reason}`;
+    const savedIssues = draft.review?.issues ?? [];
+    const seedCandidates = savedIssues.filter(
+      (issue) =>
+        issue.severity === "critical" &&
+        issue.type !== "事实抽取失败" &&
+        issue.type !== "审校失败",
+    );
+    const seedFilter = filterSeedIssues(seedCandidates, retrieved.content);
+    const canSeed =
+      draft.review?.extractionOk !== false &&
+      seedCandidates.length > 0 &&
+      seedFilter.active.length === seedCandidates.length;
+    if (canSeed) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章沿用原草稿审校的 ${seedCandidates.length} 个严重问题直接修复（最多 2 轮）…`,
+      );
+    } else if (seedCandidates.length) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章原审校记录有 ${seedFilter.stale.length} 个问题与当前草稿不匹配，先重新审校原稿再修复，避免按过期意见改稿。`,
+      );
+    } else {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章没有可用的旧审校问题，先重新审校原稿再修复。`,
+      );
+    }
 
     logJob(
       job,
       `开始修复第 ${requestedDraft.index} 章《${chapterPlan.title}》未采用草稿…`,
     );
-    const result = await verifyChapter({
+    const result = await verifyDraftChapter({
       job,
       project: detail,
       meta: detail.meta,
@@ -1557,7 +1987,10 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       nextSummary,
       mode: draft.mode,
       rewriteInstruction: "这是未采用草稿，只修复审校指出的问题，不要重写无关段落。",
-      reviewFeedback,
+      reviewFeedback: "",
+      seedIssues: canSeed ? seedFilter.active : [],
+      seedReview: draft.review,
+      maxRepairs: 2,
     });
     throwIfCancelled(job);
     if (!result.text.trim()) {
@@ -1566,23 +1999,29 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
 
     if (!result.passed) {
       const critical = countCritical(result.review.issues);
-      const extractionFailed = result.review.extractionOk === false;
+      const extractionFailed =
+        result.extractionFailed || result.review.extractionOk === false;
+      const comparisonText = result.comparison
+        ? `严重问题 ${result.initialCriticalCount}→${result.finalCriticalCount}（最后对比：已解决 ${result.comparison.resolved.length}，仍存在 ${result.comparison.remaining.length}，新增 ${result.comparison.added.length}）`
+        : `仍有 ${critical} 个严重问题`;
+      const reason = extractionFailed
+        ? "自动修复未完成：修复后事实抽取失败，已保留最佳草稿，需要人工处理"
+        : `自动修复未完成，需要人工处理：${comparisonText}`;
       const updated = await saveRejectedDraft(job.slug, {
         index: requestedDraft.index,
         content: result.text,
         mode: draft.mode,
-        reason: extractionFailed
-          ? "草稿修复后事实抽取仍失败"
-          : `草稿修复后仍未通过：${critical} 个严重问题`,
+        reason,
         review: result.review,
       });
       detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
       failed += 1;
+      const outcome = extractionFailed
+        ? `第 ${requestedDraft.index} 章草稿修复后事实抽取失败`
+        : `第 ${requestedDraft.index} 章草稿修复后仍未通过`;
       logJob(
         job,
-        extractionFailed
-          ? `第 ${requestedDraft.index} 章草稿修复后事实抽取仍失败，未写入正文；新草稿保存在 ${updated.path}，原正文未改动。`
-          : `第 ${requestedDraft.index} 章草稿修复后仍有 ${critical} 个严重问题，未写入正文；新草稿保存在 ${updated.path}，原正文未改动。`,
+        `${outcome}，未写入正文；repair-editor 调用 ${result.repairCalls} 次，停止原因：${result.stopReason}。新草稿保存在 ${updated.path}，原正文未改动。`,
       );
       continue;
     }
