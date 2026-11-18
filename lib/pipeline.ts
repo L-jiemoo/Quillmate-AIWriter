@@ -366,6 +366,28 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     `现有 ${detail.plan.chapters.length} 章大纲，正在从第 ${startIndex} 章起补充 ${count} 章…`,
   );
 
+  const [memory, storedStory] = await Promise.all([
+    getMemory(job.slug),
+    getStory(job.slug),
+  ]);
+  const story = buildEffectiveStory(detail, memory, storedStory);
+  const lastPlanned = detail.plan.chapters[detail.plan.chapters.length - 1];
+  const storyRetrieval = buildStoryContext(
+    detail,
+    {
+      index: startIndex,
+      title: "",
+      summary: lastPlanned?.summary ?? "",
+      keyBeats: lastPlanned?.keyBeats ?? [],
+    },
+    memory,
+    story,
+  );
+  logJob(
+    job,
+    `续排上下文：事实台账 ${detail.canon.characters.length} 位人物 / ${detail.canon.items.length} 件物品，人物卡 ${detail.characters.length} 位，剧情台账 ${storyRetrieval.text.length} 字。`,
+  );
+
   const chapters = await extendPlan(
     detail.meta,
     detail.plan,
@@ -373,6 +395,11 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     detail.outlineMd,
     summaries,
     count,
+    {
+      canon: detail.canon,
+      characters: detail.characters,
+      storyContext: storyRetrieval.text,
+    },
   );
   throwIfCancelled(job);
   // appendChapters 现在会在一次提交里同步 plan.json、outline.md 和项目元数据。

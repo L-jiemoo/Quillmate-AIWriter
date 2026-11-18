@@ -18,42 +18,42 @@ export interface PromptCatalogEntry {
 export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   architect: {
     label: "架构师",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "生成世界观、主线大纲和章节细纲。",
   },
   "extend-plan": {
     label: "大纲续排",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "在既有大纲后续排新章节。",
   },
   "title-repair": {
     label: "章节改名",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "为重复章节标题重新起名。",
   },
   "character-designer": {
     label: "角色设计",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "生成核心人物卡。",
   },
   writer: {
     label: "写作",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "续写或重写章节正文。",
   },
   "fact-extractor": {
     label: "事实抽取",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "从正文抽取事实台账、长期记忆和剧情台账。",
   },
   auditor: {
     label: "连续性与质量审校",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "检查人物、时间线、规则、因果、伏笔和章节重复。",
   },
   "repair-editor": {
     label: "定点修复",
-    version: "2026.11.17-p6",
+    version: "2026.11.18-p7",
     description: "只修改与审校问题直接相关的正文段落。",
   },
 };

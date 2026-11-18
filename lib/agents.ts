@@ -216,6 +216,11 @@ export async function extendPlan(
   outlineMd: string,
   recentSummaries: string[],
   count: number,
+  context: {
+    canon?: CanonFacts;
+    characters?: Character[];
+    storyContext?: string;
+  } = {},
 ): Promise<ChapterPlan[]> {
   const startIndex = plan.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
@@ -225,7 +230,16 @@ export async function extendPlan(
 
   const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
-    extendMessages(meta, plan, bible, outlineMd, recentSummaries, count, startIndex),
+    extendMessages(
+      meta,
+      plan,
+      bible,
+      outlineMd,
+      recentSummaries,
+      count,
+      startIndex,
+      context,
+    ),
     { agent: "extend-plan" },
   );
   const raw = Array.isArray(data.chapters) ? data.chapters : [];

@@ -2,6 +2,7 @@ import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { promptBaseVersion } from "@/lib/prompt-registry";
 
 let dataDir: string;
 let store: typeof import("@/lib/prompt-store");
@@ -31,6 +32,7 @@ describe("提示词版本与调用记录", () => {
       instructions: "必须检查伏笔是否回收。",
       label: "加强伏笔",
     });
+    expect(first.baseVersion).toBe(promptBaseVersion("writer"));
     expect(store.promptVersionInfo("writer").overrideId).toBe(first.id);
 
     const applied = store.applyPromptOverrides("writer", messages);
@@ -86,7 +88,7 @@ describe("提示词版本与调用记录", () => {
       maxTokens: 8192,
       chapter: 3,
       promptHash: hash,
-      promptVersion: "builtin:2026.11.17-p6",
+      promptVersion: `builtin:${promptBaseVersion("auditor")}`,
     });
     expect(JSON.stringify(usage)).not.toContain("apiKey");
   });
