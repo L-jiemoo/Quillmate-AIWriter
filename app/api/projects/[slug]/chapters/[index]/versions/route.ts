@@ -6,10 +6,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: { slug: string; index: string };
+  params: Promise<{ slug: string; index: string }>;
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     const slug = assertSafeSlugParam(params.slug);
     const index = parsePositiveInt(params.index, "章节序号");

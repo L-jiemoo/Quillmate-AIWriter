@@ -13,17 +13,18 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: { slug: string; index: string; version: string };
+  params: Promise<{ slug: string; index: string; version: string }>;
 }
 
-function parseTarget(params: RouteContext["params"]) {
+function parseTarget(params: { index: string; version: string }) {
   return {
     index: parsePositiveInt(params.index, "章节序号"),
     version: parsePositiveInt(params.version, "版本号"),
   };
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     const slug = assertSafeSlugParam(params.slug);
     const target = parseTarget(params);
@@ -34,7 +35,8 @@ export async function GET(_request: Request, { params }: RouteContext) {
   }
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     assertSameOrigin(request);
     const slug = assertSafeSlugParam(params.slug);

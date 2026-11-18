@@ -64,7 +64,7 @@ describe("项目与发布路由确认", () => {
 
     const without = await route.DELETE(
       jsonRequest(`http://localhost/api/projects/${slug}`, "DELETE"),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(without.status).toBe(400);
     await expect(store.getProjectDetail(slug)).resolves.toBeTruthy();
@@ -73,7 +73,7 @@ describe("项目与发布路由确认", () => {
       jsonRequest(`http://localhost/api/projects/${slug}`, "DELETE", {
         confirmSlug: slug,
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(withConfirm.status).toBe(200);
     await expect(store.getProjectDetail(slug)).rejects.toBeTruthy();
@@ -92,7 +92,7 @@ describe("项目与发布路由确认", () => {
         },
         body: JSON.stringify({ confirmSlug: slug }),
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(response.status).toBe(403);
     await expect(store.getProjectDetail(slug)).resolves.toBeTruthy();
@@ -104,7 +104,7 @@ describe("项目与发布路由确认", () => {
 
     const without = await route.DELETE(
       jsonRequest(`http://localhost/api/projects/${slug}/publish`, "DELETE"),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(without.status).toBe(400);
 
@@ -112,7 +112,7 @@ describe("项目与发布路由确认", () => {
       jsonRequest(`http://localhost/api/projects/${slug}/publish`, "DELETE", {
         confirm: "clear-publish-history",
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(withConfirm.status).toBe(200);
   });
@@ -125,7 +125,7 @@ describe("项目与发布路由确认", () => {
       jsonRequest(`http://localhost/api/projects/${slug}/jobs`, "POST", {
         type: "fanqie-publish",
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(without.status).toBe(400);
     expect(startJobMock).not.toHaveBeenCalled();
@@ -135,7 +135,7 @@ describe("项目与发布路由确认", () => {
         type: "fanqie-publish",
         confirmPublish: true,
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(withConfirm.status).toBe(202);
     expect(startJobMock).toHaveBeenCalledWith(
@@ -154,7 +154,7 @@ describe("项目与发布路由确认", () => {
         type: "repair",
         source: "draft",
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(without.status).toBe(400);
     expect(startJobMock).not.toHaveBeenCalled();
@@ -165,7 +165,7 @@ describe("项目与发布路由确认", () => {
         source: "draft",
         indices: [2],
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(withDraft.status).toBe(202);
     expect(startJobMock).toHaveBeenCalledWith(
@@ -184,7 +184,7 @@ describe("项目与发布路由确认", () => {
         chapter: 1,
         published: true,
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(without.status).toBe(400);
   });
@@ -215,7 +215,7 @@ describe("项目与发布路由确认", () => {
       jsonRequest(`http://localhost/api/projects/${slug}/chapters/1/versions/${target}`, "POST", {
         action: "restore",
       }),
-      { params: { slug, index: "1", version: String(target) } },
+      { params: Promise.resolve({ slug, index: "1", version: String(target) }) },
     );
     expect(without.status).toBe(400);
 
@@ -224,7 +224,7 @@ describe("项目与发布路由确认", () => {
         action: "restore",
         confirm: true,
       }),
-      { params: { slug, index: "1", version: String(target) } },
+      { params: Promise.resolve({ slug, index: "1", version: String(target) }) },
     );
     expect(withConfirm.status).toBe(200);
   });
@@ -273,7 +273,7 @@ describe("设置与参数校验路由", () => {
       jsonRequest(`http://localhost/api/projects/${slug}/jobs`, "POST", {
         type: "not-a-job",
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(jobsResponse.status).toBe(400);
 
@@ -292,7 +292,7 @@ describe("设置与参数校验路由", () => {
       jsonRequest(`http://localhost/api/projects/${slug}/integrity`, "POST", {
         action: "unknown",
       }),
-      { params: { slug } },
+      { params: Promise.resolve({ slug }) },
     );
     expect(integrityResponse.status).toBe(400);
   });

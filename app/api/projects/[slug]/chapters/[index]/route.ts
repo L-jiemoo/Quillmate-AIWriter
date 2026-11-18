@@ -12,10 +12,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: { slug: string; index: string };
+  params: Promise<{ slug: string; index: string }>;
 }
 
-export async function PUT(request: Request, { params }: RouteContext) {
+export async function PUT(request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     assertSameOrigin(request);
     const slug = assertSafeSlugParam(params.slug);

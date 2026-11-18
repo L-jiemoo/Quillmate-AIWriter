@@ -21,7 +21,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }
 
 async function load(slug: string) {
@@ -36,7 +36,8 @@ async function load(slug: string) {
   };
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     const slug = assertSafeSlugParam(params.slug);
     const data = await load(slug);
@@ -50,7 +51,8 @@ export async function GET(_request: Request, { params }: RouteContext) {
   }
 }
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     assertSameOrigin(request);
     const slug = assertSafeSlugParam(params.slug);

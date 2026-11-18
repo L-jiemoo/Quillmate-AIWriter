@@ -7,10 +7,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 interface RouteContext {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     const slug = assertSafeSlugParam(params.slug);
     const chapter = parsePositiveInt(

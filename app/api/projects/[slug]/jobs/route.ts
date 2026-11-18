@@ -28,10 +28,11 @@ const ALLOWED: Job["type"][] = [
 ];
 
 interface RouteContext {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     const slug = assertSafeSlugParam(params.slug);
     return NextResponse.json({
@@ -44,7 +45,8 @@ export async function GET(_request: Request, { params }: RouteContext) {
   }
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
+  const params = await context.params;
   try {
     assertSameOrigin(request);
     const slug = assertSafeSlugParam(params.slug);

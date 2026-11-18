@@ -152,7 +152,7 @@ describe("项目与任务路径穿越防护", () => {
     const route = await import("@/app/api/projects/[slug]/route");
     const response = await route.GET(
       new Request("http://localhost/api/projects/..%2Fsecret"),
-      { params: { slug: "../secret" } },
+      { params: Promise.resolve({ slug: "../secret" }) },
     );
     expect(response.status).toBe(400);
     const text = await response.text();
