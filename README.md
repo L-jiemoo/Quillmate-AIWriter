@@ -178,12 +178,13 @@ npm run db:rollback -- --yes       # 回到最近一次迁移前快照，并移�
 
 ## 技术栈
 
-- **Next.js 14（App Router）+ React 18 + TypeScript**
+- **Next.js 16（App Router，Turbopack 构建）+ React 19 + TypeScript**
 - **OpenAI Node SDK**：调用任意 OpenAI 兼容接口
 - **Playwright**：番茄小说发布自动化，持久化浏览器会话
 - **SQLite + Markdown 混合存储**：结构化元数据、台账、审校、任务、发布状态、分层记忆和剧情台账在 `data/db/quillmate.sqlite`；章节正文、世界观、大纲、审校报告和版本正文仍在 Markdown/文件里
 - **文件兼容后端**：未迁移项目仍可继续使用 JSON 文件；`QUILLMATE_STORAGE=file|sqlite|auto` 切换
 - **react-markdown + remark-gfm**：世界观与大纲渲染
+- **依赖安全**：生产依赖 `npm audit --omit=dev` 为 0；完整审计仍有开发依赖链的 picomatch 告警，上游暂无修复版本，不影响生产运行时
 
 ## 快速开始
 
@@ -223,6 +224,8 @@ npm run test          # Vitest 单元 / 集成测试
 npm run test:coverage # Vitest + 覆盖率报告（coverage/）
 npm run test:real     # 真实模型测试，默认跳过，需显式授权
 npm run build         # Next.js 生产构建
+npm audit --omit=dev  # 生产依赖漏洞审计
+npm audit             # 含开发依赖的完整审计
 npm run db:migrate  # JSON/文件迁移到 SQLite
 npm run db:verify   # 数据库完整性与项目读取校验
 npm run db:backup   # 完整备份（数据库 + 项目文件）
@@ -231,6 +234,8 @@ npm run db:rollback # 回滚到迁移前快照
 ```
 
 CI 位于 `.github/workflows/ci.yml`，在 push 到 `main` 和 Pull Request 时执行 `npm ci → lint → typecheck → test:coverage → build`，并上传 `coverage/` 报告。CI 不配置 API Key，不调用真实模型，也不执行真实番茄发布。
+
+当前生产依赖审计为 0；完整 `npm audit` 仍会报告开发依赖（ESLint / Vitest 的 picomatch 链路）的 High 告警。该链路只用于本地开发和测试工具，上游暂未发布修复版本，不能通过降级或忽略来消除。
 
 `@emnapi/core` 和 `@emnapi/runtime` 以固定版本保留在开发依赖中：npm 在 Windows 上重新生成 lockfile 时可能丢失 Linux 可选依赖，导致 CI 的 `npm ci` 报 lockfile 不同步；不要随意移除这两项。
 
@@ -480,6 +485,7 @@ Quillmate/
 - [x] 人物动态状态、剧情事件与伏笔生命周期（第五阶段）
 - [x] 提示词版本管理与增强审校（第六阶段）
 - [x] 自动化测试覆盖率、GitHub Actions 与安全加固（第七阶段）
+- [x] Next.js 16 / React 19 / ESLint 9 依赖安全升级
 - [ ] 向量检索 / 语义召回增强长篇记忆
 - [ ] 多模型路由（架构用强模型、正文用快模型）
 - [ ] AI 封面与简介生成
