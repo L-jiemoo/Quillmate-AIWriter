@@ -1051,13 +1051,17 @@ export function openingRepeatSuspicion(
   ];
 }
 
-export function formatIssuesForPrompt(issues: ContinuityIssue[]): string {
+export function formatIssuesForPrompt(
+  issues: ContinuityIssue[],
+  options: { withIds?: boolean } = {},
+): string {
   if (!issues.length) return "（没有发现明确冲突）";
   return issues
     .slice(0, 20)
     .map((issue) => {
       const evidence = issue.evidence ? `（证据：${clip(issue.evidence, 100)}）` : "";
-      return `- [${issue.severity}] ${issue.type}：${clip(issue.detail, 200)}${evidence}`;
+      const id = options.withIds && issue.id ? `[${issue.id}] ` : "";
+      return `- ${id}[${issue.severity}] ${issue.type}：${clip(issue.detail, 200)}${evidence}`;
     })
     .join("\n");
 }

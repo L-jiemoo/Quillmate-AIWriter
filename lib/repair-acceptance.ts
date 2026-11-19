@@ -1,13 +1,21 @@
-import { compareCriticalIssues, type IssueComparison } from "./repair-compare";
+import {
+  compareCriticalIssues,
+  compareWarningIssues,
+  type IssueComparison,
+} from "./repair-compare";
 import type { Character, ContinuityIssue } from "./types";
 
 export type RepairAcceptanceStatus =
   | "ACCEPTED"
   | "REJECTED_UNRESOLVED"
   | "REJECTED_NEW_CRITICAL"
+  | "REJECTED_NEW_WARNING"
   | "REJECTED_FACT_CONFLICT"
+  | "REJECTED_SCOPE_VIOLATION"
   | "NEEDS_AUTHOR_DECISION"
   | "VERIFY_FAILED";
+
+export type RepairAcceptanceMode = "STRICT" | "STANDARD";
 
 export interface RepairAcceptanceInput {
   before: ContinuityIssue[];
@@ -20,15 +28,22 @@ export interface RepairAcceptanceInput {
   factConflicts?: ContinuityIssue[];
   // Repair Agent 认为证据不足，需要作者决定。
   needsAuthorDecision?: boolean;
+  // 补丁超出授权范围或改动过大。
+  scopeViolation?: boolean;
   // 修复目标只有建议类问题时，允许没有严重问题基线。
   allowNoBaseline?: boolean;
+  // 默认严格模式：新增 warning 也不允许自动写回。
+  mode?: RepairAcceptanceMode;
 }
 
 export interface RepairAcceptanceResult {
   status: RepairAcceptanceStatus;
   accepted: boolean;
   comparison: IssueComparison;
+  warningComparison?: IssueComparison;
   reasons: string[];
+  // 不阻止写回、但必须记录的遗留问题（未解决 warning、新增建议等）。
+  leftovers: string[];
 }
 
 const FACT_CONFLICT_TYPES = new Set([
@@ -46,30 +61,53 @@ const FACT_CONFLICT_TYPES = new Set([
   "事实冲突",
 ]);
 
-function isFactIssue(issue: ContinuityIssue): boolean {
+const EXPRESSION_HINTS =
+  /(表达|修辞|文风|用词|措辞|语言|语感|节奏|描写|风格|建议|润色|行文)/u;
+
+export type IssueClass = "fact" | "expression" | "unknown";
+
+export function classifyIssue(issue: ContinuityIssue): IssueClass {
   const category = issue.conflictCategory?.trim();
-  if (category && category !== "other") return true;
-  return FACT_CONFLICT_TYPES.has(issue.type.trim());
+  if (category && category !== "other") return "fact";
+  if (category === "other") return "unknown";
+  if (FACT_CONFLICT_TYPES.has(issue.type.trim())) return "fact";
+  if (EXPRESSION_HINTS.test(issue.type)) return "expression";
+  return "unknown";
+}
+
+function isFactIssue(issue: ContinuityIssue): boolean {
+  return classifyIssue(issue) === "fact";
 }
 
 /**
- * 统一修复验收：只有原问题全部解决、没有新增严重问题、没有破坏既定事实，
+ * 统一修复验收：只有原有严重问题全部解决、没有新增不允许的问题、没有破坏既定事实，
  * 且事实抽取和审校都成功时，才允许把候选稿写入正式正文。
  * “严重问题数量减少”只代表 improved，不能当作通过。
+ *
+ * STRICT（默认）：新增 warning 也拒绝写回；STANDARD 仅拒绝新增的事实类 warning。
  */
 export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceResult {
+  const strict = (input.mode ?? "STRICT") === "STRICT";
   const comparison = compareCriticalIssues(
     input.before,
     input.after,
     input.characters ?? [],
   );
+  const warningComparison = compareWarningIssues(
+    input.before,
+    input.after,
+    input.characters ?? [],
+  );
   const reasons: string[] = [];
+  const leftovers: string[] = [];
 
   const fail = (status: RepairAcceptanceStatus): RepairAcceptanceResult => ({
     status,
     accepted: false,
     comparison,
+    warningComparison,
     reasons,
+    leftovers,
   });
 
   if (input.auditFailed) {
@@ -83,6 +121,10 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
   if (input.needsAuthorDecision) {
     reasons.push("修复 Agent 证据不足，需要作者决定，不能自动采用。");
     return fail("NEEDS_AUTHOR_DECISION");
+  }
+  if (input.scopeViolation) {
+    reasons.push("修复修改超出问题授权范围，候选稿不能被自动采用。");
+    return fail("REJECTED_SCOPE_VIOLATION");
   }
 
   const newFactConflicts = (input.factConflicts ?? []).filter(
@@ -106,9 +148,7 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
     return fail("REJECTED_NEW_CRITICAL");
   }
   if (comparison.remaining.length) {
-    reasons.push(
-      `原有 ${comparison.remaining.length} 个严重问题仍未解决。`,
-    );
+    reasons.push(`原有 ${comparison.remaining.length} 个严重问题仍未解决。`);
     return fail("REJECTED_UNRESOLVED");
   }
   if (!comparison.beforeCount && !input.allowNoBaseline) {
@@ -116,18 +156,68 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
     return fail("REJECTED_UNRESOLVED");
   }
 
+  // 警告级问题：严格模式下新增 warning 一律拒绝；标准模式只拒绝事实类新增。
+  if (warningComparison.ambiguous && strict) {
+    reasons.push("修复前后警告级问题存在歧义匹配，无法确认是否真正解决，需要作者确认。");
+    return fail("NEEDS_AUTHOR_DECISION");
+  }
+  const newWarnings = warningComparison.added;
+  const blockingWarnings = strict
+    ? newWarnings
+    : newWarnings.filter((issue) => classifyIssue(issue) === "fact");
+  if (blockingWarnings.length) {
+    reasons.push(
+      `修复引入了 ${blockingWarnings.length} 个新的警告级问题：${blockingWarnings
+        .map((issue) => issue.type)
+        .join("、")}。`,
+    );
+    return fail("REJECTED_NEW_WARNING");
+  }
+  const recordedWarnings = newWarnings.filter(
+    (issue) => !blockingWarnings.includes(issue),
+  );
+  if (recordedWarnings.length) {
+    leftovers.push(
+      `新增 ${recordedWarnings.length} 条表达建议类 warning（已记录，不作为剧情矛盾）。`,
+    );
+  }
+  if (warningComparison.remaining.length) {
+    leftovers.push(
+      `原有 ${warningComparison.remaining.length} 条 warning 未解决（已记录，不阻断写回）。`,
+    );
+  }
+  if (warningComparison.ambiguous && !strict) {
+    leftovers.push("警告级问题存在歧义匹配，已保守记录。");
+  }
+  const newSuggestions = input.after.filter(
+    (issue) => issue.severity === "ignore",
+  ).length;
+  if (newSuggestions) {
+    leftovers.push(`修复稿含 ${newSuggestions} 条建议类问题（仅记录）。`);
+  }
+
   return {
     status: "ACCEPTED",
     accepted: true,
     comparison,
+    warningComparison,
     reasons,
+    leftovers,
   };
 }
 
 export function describeAcceptance(result: RepairAcceptanceResult): string {
   const { comparison } = result;
-  const base = `严重问题 ${comparison.beforeCount}→${comparison.afterCount}（已解决 ${comparison.resolved.length}，仍存在 ${comparison.remaining.length}，新增 ${comparison.added.length}）`;
-  return result.reasons.length
-    ? `${base}；${result.reasons.join("")}`
-    : base;
+  const parts = [
+    `严重问题 ${comparison.beforeCount}→${comparison.afterCount}（已解决 ${comparison.resolved.length}，仍存在 ${comparison.remaining.length}，新增 ${comparison.added.length}）`,
+  ];
+  if (result.warningComparison) {
+    const warning = result.warningComparison;
+    parts.push(
+      `warning ${warning.beforeCount}→${warning.afterCount}（解决 ${warning.resolved.length}，遗留 ${warning.remaining.length}，新增 ${warning.added.length}）`,
+    );
+  }
+  if (result.reasons.length) parts.push(result.reasons.join(""));
+  if (result.leftovers.length) parts.push(result.leftovers.join(""));
+  return parts.join("；");
 }

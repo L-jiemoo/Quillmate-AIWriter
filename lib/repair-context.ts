@@ -20,10 +20,17 @@ export interface EvidenceSnippet {
   reason: string;
 }
 
+export interface ExcludedEvidence {
+  chapter: number;
+  reason: string;
+}
+
 export interface RepairEvidenceContext {
   text: string;
   snippets: EvidenceSnippet[];
   missingChapters: number[];
+  // 因章节数或字数上限未纳入上下文的证据，必须显式告知模型。
+  excluded: ExcludedEvidence[];
 }
 
 interface Candidate {
@@ -153,6 +160,18 @@ function storyFacts(
       }${foreshadow.plantedChapter > chapter ? "（属于后文，仅用于衔接，不得据此否定本章）" : ""}`,
     );
   }
+  for (const relation of story.relations) {
+    if (!names.includes(relation.from) && !names.includes(relation.to)) continue;
+    lines.push(
+      `人物关系：${relation.from}—${relation.to}｜${relation.type || "关系未注明"}｜${relation.status || "状态未注明"}｜确立于第 ${relation.chapter} 章`,
+    );
+  }
+  for (const event of story.events) {
+    if (!event.participants.some((name) => names.includes(name))) continue;
+    lines.push(
+      `剧情事件：${event.name || "未命名事件"}｜第 ${event.chapter} 章｜时间：${event.time || "未注明"}｜地点：${event.location || "未注明"}｜参与者：${event.participants.join("、") || "未注明"}｜结果：${event.result || "未注明"}`,
+    );
+  }
   return lines;
 }
 
@@ -198,6 +217,10 @@ export function collectRepairEvidence(input: {
       candidates.set(chapter, { chapter, reason, keywords: [...keywords] });
       return;
     }
+    // 同一章节可能同时因人物和具体事件命中，保留全部检索原因，避免丢失事件定位信息。
+    if (!current.reason.includes(reason)) {
+      current.reason = `${current.reason}；${reason}`;
+    }
     for (const keyword of keywords) {
       if (!current.keywords.includes(keyword)) current.keywords.push(keyword);
     }
@@ -239,6 +262,32 @@ export function collectRepairEvidence(input: {
     }
   }
 
+  // 3b. 事件级检索：同一人物可能有多个事件，按事件名称、地点、时间和参与者定位。
+  const keywordsOf = (...values: string[]): string[] =>
+    values
+      .map((value) => value.trim())
+      .filter((value) => value.length >= 2);
+  for (const event of input.story?.events ?? []) {
+    if (!event.participants.some((name) => names.includes(name))) continue;
+    addCandidate(
+      event.chapter,
+      `相关事件：${event.name || "未命名事件"}`,
+      keywordsOf(event.name, event.location, event.time, ...event.participants),
+    );
+  }
+  for (const relation of input.story?.relations ?? []) {
+    if (!names.includes(relation.from) && !names.includes(relation.to)) continue;
+    addCandidate(
+      relation.chapter,
+      `人物关系：${relation.from}—${relation.to}`,
+      keywordsOf(relation.from, relation.to),
+    );
+  }
+  for (const state of input.story?.states ?? []) {
+    if (!names.includes(state.name)) continue;
+    addCandidate(state.chapter, `${state.name} 的状态记录`, keywordsOf(state.name, state.location));
+  }
+
   // 4. 相邻章节用于衔接检查。
   addCandidate(input.chapter.index - 1, "上一章衔接", []);
   addCandidate(input.chapter.index + 1, "下一章衔接", []);
@@ -254,29 +303,46 @@ export function collectRepairEvidence(input: {
     }
   }
 
-  const prioritized = [...candidates.values()]
-    .sort((left, right) => {
-      const score = (candidate: Candidate): number => {
-        if (candidate.reason === "问题引用章节") return 0;
-        if (candidate.reason.startsWith("涉及人物")) return 1;
-        if (candidate.reason.includes("状态来源") || candidate.reason.includes("伏笔")) {
-          return 2;
-        }
-        if (candidate.reason.includes("衔接")) return 3;
-        return 4;
-      };
-      return score(left) - score(right) || left.chapter - right.chapter;
-    })
-    .slice(0, MAX_CHAPTERS);
+  const ordered = [...candidates.values()].sort((left, right) => {
+    const score = (candidate: Candidate): number => {
+      if (candidate.reason === "问题引用章节") return 0;
+      if (candidate.reason.startsWith("涉及人物")) return 1;
+      if (
+        candidate.reason.includes("状态来源") ||
+        candidate.reason.includes("伏笔") ||
+        candidate.reason.includes("事件") ||
+        candidate.reason.includes("关系") ||
+        candidate.reason.includes("状态记录")
+      ) {
+        return 2;
+      }
+      if (candidate.reason.includes("衔接")) return 3;
+      return 4;
+    };
+    return score(left) - score(right) || left.chapter - right.chapter;
+  });
+  const prioritized = ordered.slice(0, MAX_CHAPTERS);
+  const excluded: ExcludedEvidence[] = ordered
+    .slice(MAX_CHAPTERS)
+    .map((candidate) => ({
+      chapter: candidate.chapter,
+      reason: "超出章节数量上限",
+    }));
 
   const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS;
   const snippets: EvidenceSnippet[] = [];
   let used = 0;
-  for (const candidate of prioritized) {
+  for (let index = 0; index < prioritized.length; index += 1) {
+    const candidate = prioritized[index];
     const chapter = written.get(candidate.chapter);
     if (!chapter) continue;
+    // 事件/地点关键词优先于单纯的人物名，确保同一人物的多个事件定位到正确段落。
     const keyword =
-      candidate.keywords.find((item) => chapter.content.includes(item)) ?? null;
+      candidate.keywords.find(
+        (item) => chapter.content.includes(item) && !names.includes(item),
+      ) ??
+      candidate.keywords.find((item) => chapter.content.includes(item)) ??
+      null;
     const { snippet, locator } = snippetAround(chapter.content, keyword, candidate.chapter);
     const entry = {
       chapter: candidate.chapter,
@@ -287,7 +353,12 @@ export function collectRepairEvidence(input: {
       reason: candidate.reason,
     };
     const size = snippet.length;
-    if (used + size > maxChars && snippets.length > 0) break;
+    if (used + size > maxChars && snippets.length > 0) {
+      for (const rest of prioritized.slice(index)) {
+        excluded.push({ chapter: rest.chapter, reason: "超出上下文字数上限" });
+      }
+      break;
+    }
     snippets.push(entry);
     used += size;
   }
@@ -298,7 +369,7 @@ export function collectRepairEvidence(input: {
   ];
 
   const sections: string[] = [
-    "【原文证据使用规则】以下内容按来源章节摘录自正式正文；事实台账单独标注，摘要与模型推断不得当作原文事实。修复时不得删除或改写证据来规避矛盾。",
+    "【原文证据使用规则】以下内容按来源章节摘录自正式正文；事实台账是结构化抽取结果，模型摘要与推断都不是原文事实。修复时不得删除或改写证据来规避矛盾；证据不足时必须说明，不得编造剧情解释。",
   ];
   if (ledger.length) {
     sections.push(
@@ -310,6 +381,13 @@ export function collectRepairEvidence(input: {
       `【缺失证据】以下被问题引用的章节没有可检索正文，不能凭想象补写：第 ${[
         ...missingChapters,
       ].join("、")} 章。`,
+    );
+  }
+  if (excluded.length) {
+    sections.push(
+      `【未纳入证据】以下章节因检索上限未进入上下文，不得用推测替代：${excluded
+        .map((item) => `第 ${item.chapter} 章（${item.reason}）`)
+        .join("、")}。`,
     );
   }
   if (!snippets.length) {
@@ -328,5 +406,6 @@ export function collectRepairEvidence(input: {
     text: sections.join("\n\n"),
     snippets,
     missingChapters: [...missingChapters].sort((a, b) => a - b),
+    excluded: excluded.sort((a, b) => a.chapter - b.chapter),
   };
 }

@@ -55,16 +55,48 @@ vi.mock("../lib/agents", async (importOriginal) => {
         continuityOk: step.critical.length === 0,
       };
     },
-    repairChapter: async (...args: Parameters<typeof actual.repairChapter>) => {
+    repairChapterPatches: async (
+      ...args: Parameters<typeof actual.repairChapterPatches>
+    ) => {
       if (agentState.onRepair) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         await agentState.onRepair();
       }
-      if (!agentState.scripted) return actual.repairChapter(...args);
+      if (!agentState.scripted) return actual.repairChapterPatches(...args);
       agentState.repairCalls += 1;
-      agentState.repairIssues.push(args[3]);
+      const issues = args[3];
+      const text = args[2];
+      agentState.repairIssues.push(issues);
       agentState.repairFeedback.push(args[8] ?? "");
-      return `${args[2]}\n【修复${agentState.repairCalls}】`;
+      const anchorOf = (evidence: string): string => {
+        const trimmed = evidence.trim();
+        const count = (value: string): number => text.split(value).length - 1;
+        if (trimmed && count(trimmed) === 1) return trimmed;
+        const withoutTail = trimmed.replace(/[。！？；,.!?;\s]+$/u, "");
+        if (withoutTail && count(withoutTail) === 1) return withoutTail;
+        const head = withoutTail.slice(0, 8);
+        return (
+          text.split("\n").find((line) => head && line.includes(head)) ??
+          text.split("\n")[0]
+        );
+      };
+      return {
+        patches: issues.map((issue, index) => {
+          const anchor = anchorOf(issue.evidence);
+          return {
+            issueId: issue.id ?? `issue-${index + 1}`,
+            edits: [
+              {
+                originalText: anchor,
+                replacement: `${anchor}【修复${agentState.repairCalls}】`,
+                reason: "测试修复",
+              },
+            ],
+          };
+        }),
+        planText: "",
+        regressionScope: "",
+      };
     },
   };
 });

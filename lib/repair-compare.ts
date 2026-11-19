@@ -55,16 +55,31 @@ function chapterRefs(text: string): Set<string> {
 }
 
 function numericTokens(text: string): Set<string> {
+  // 先移除“第 N 章”，避免章节编号被当成普通数字参与比较。
+  const cleaned = text.replace(/第\s*\d+\s*章/gu, "");
   const result = new Set<string>();
-  for (const match of text.matchAll(/\d+(?:[:：]\d+)?/gu)) result.add(match[0]);
+  for (const match of cleaned.matchAll(/\d+(?:[:：]\d+)?/gu)) result.add(match[0]);
   return result;
 }
 
+// 章节编号与普通数字使用独立命名空间，避免“4 点”误配“第 4 章”。
 function anchorsOf(issue: ContinuityIssue): Set<string> {
   const text = normalizeIssueText(`${issue.evidence}${issue.detail}`);
-  const anchors = new Set([...chapterRefs(text), ...numericTokens(text)]);
-  if (issue.sourceChapter) anchors.add(String(issue.sourceChapter));
+  const anchors = new Set<string>();
+  for (const chapter of chapterRefs(text)) anchors.add(`chapter:${chapter}`);
+  for (const token of numericTokens(text)) anchors.add(`number:${token}`);
+  if (issue.sourceChapter) anchors.add(`chapter:${issue.sourceChapter}`);
   return anchors;
+}
+
+// 一边有来源章节/受影响人物、另一边没有时，文本相似度只能算候选，不能直接确认已解决。
+function structuredAsymmetry(left: ContinuityIssue, right: ContinuityIssue): boolean {
+  const leftChapter = Boolean(left.sourceChapter);
+  const rightChapter = Boolean(right.sourceChapter);
+  if (leftChapter !== rightChapter) return true;
+  const leftCharacters = (left.affectedCharacters ?? []).some((name) => name.trim());
+  const rightCharacters = (right.affectedCharacters ?? []).some((name) => name.trim());
+  return leftCharacters !== rightCharacters;
 }
 
 function anchorsOverlap(left: Set<string>, right: Set<string>): boolean {
@@ -175,10 +190,6 @@ function uniqueIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
   });
 }
 
-function criticalIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
-  return uniqueIssues(issues.filter((issue) => issue.severity === "critical"));
-}
-
 export function filterSeedIssues(
   issues: ContinuityIssue[],
   chapterText: string,
@@ -286,13 +297,21 @@ function maximumWeightPairs(scores: number[][]): {
   return pairs;
 }
 
-export function compareCriticalIssues(
+function issuesWithSeverity(
+  issues: ContinuityIssue[],
+  severity: ContinuityIssue["severity"],
+): ContinuityIssue[] {
+  return uniqueIssues(issues.filter((issue) => issue.severity === severity));
+}
+
+function compareBySeverity(
   before: ContinuityIssue[],
   after: ContinuityIssue[],
-  characters: Character[] = [],
+  characters: Character[],
+  severity: ContinuityIssue["severity"],
 ): IssueComparison {
-  const beforeCritical = criticalIssues(before);
-  const afterCritical = criticalIssues(after);
+  const beforeCritical = issuesWithSeverity(before, severity);
+  const afterCritical = issuesWithSeverity(after, severity);
   const names = characterNames(characters);
   const scores = beforeCritical.map((left) =>
     afterCritical.map((right) => issueSimilarity(left, right, names)),
@@ -310,6 +329,18 @@ export function compareCriticalIssues(
   // 保守起见标记歧义，验收不得据此判定原问题已解决。
   const AMBIGUITY_MARGIN = 0.05;
   let ambiguous = false;
+  for (const pair of pairs) {
+    const left = beforeCritical[pair.before];
+    const right = afterCritical[pair.after];
+    const sameFingerprint =
+      Boolean(left.fingerprint) &&
+      Boolean(right.fingerprint) &&
+      left.fingerprint!.trim().toLowerCase() === right.fingerprint!.trim().toLowerCase();
+    if (!sameFingerprint && structuredAsymmetry(left, right)) {
+      ambiguous = true;
+      break;
+    }
+  }
   for (const pair of pairs) {
     const row = scores[pair.before];
     for (let column = 0; column < row.length; column += 1) {
@@ -346,4 +377,20 @@ export function compareCriticalIssues(
     improved: beforeCritical.length > afterCritical.length && added.length === 0,
     ambiguous,
   };
+}
+
+export function compareCriticalIssues(
+  before: ContinuityIssue[],
+  after: ContinuityIssue[],
+  characters: Character[] = [],
+): IssueComparison {
+  return compareBySeverity(before, after, characters, "critical");
+}
+
+export function compareWarningIssues(
+  before: ContinuityIssue[],
+  after: ContinuityIssue[],
+  characters: Character[] = [],
+): IssueComparison {
+  return compareBySeverity(before, after, characters, "warning");
 }

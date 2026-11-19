@@ -61,10 +61,26 @@ vi.mock("../lib/agents", async (importOriginal) => {
         continuityOk: step.critical.length === 0,
       };
     },
-    repairChapter: async (...args: Parameters<typeof actual.repairChapter>) => {
+    repairChapterPatches: async (
+      ...args: Parameters<typeof actual.repairChapterPatches>
+    ) => {
       agentState.repairCalls += 1;
-      agentState.repairIssues.push(args[3]);
-      return `${args[2]}\n【修复${agentState.repairCalls}】`;
+      const issues = args[3];
+      agentState.repairIssues.push(issues);
+      return {
+        patches: issues.map((issue, index) => ({
+          issueId: issue.id ?? `issue-${index + 1}`,
+          edits: [
+            {
+              originalText: issue.evidence,
+              replacement: `${issue.evidence}【修复${agentState.repairCalls}】`,
+              reason: "测试修复",
+            },
+          ],
+        })),
+        planText: "",
+        regressionScope: "",
+      };
     },
     auditRepairRegression: async (
       ...args: Parameters<typeof actual.auditRepairRegression>
@@ -413,6 +429,183 @@ describe("正文定点修复验收", () => {
     expect(agentState.repairCalls).toBe(0);
     const detail = await store.getProjectDetail(slug);
     expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+  });
+
+  it("陈默陈玉华长夜教电话案：删除第 4 章电话证据被回归审校拒绝", async () => {
+    const original =
+      "陈玉华在省城超市收银台旁接电话，背景有收银机声音，她主动说出只有本人才知道的内情。";
+    const problem = criticalIssue("伏笔连续性", original);
+    const slug = await projectWithWrittenChapter("电话真相冲突", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [
+      {
+        critical: [
+          {
+            type: "伏笔连续性",
+            evidence: "修复稿删除了第 4 章的电话证据。",
+            detail:
+              "后续章节声称电话是长夜教伪造的录音、陈玉华提前被带走，修复稿通过删除收银台背景音和本人内情来规避矛盾，破坏伏笔生命周期。",
+          },
+        ],
+      },
+    ];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("回归审校未通过");
+    expect(draft?.draft.reason).toContain("伏笔");
+  });
+
+  it("回归审校发现新的死亡状态冲突时拒绝写回", async () => {
+    const original = "陈玉华在省城超市收银台旁接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("死亡状态冲突", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [
+      {
+        critical: [
+          {
+            type: "人物生死状态",
+            evidence: "修复后陈玉华再次以活人身份出场。",
+            detail: "陈玉华已在第 3 章死亡，修复引入复活矛盾。",
+          },
+        ],
+      },
+    ];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("REJECTED_FACT_CONFLICT");
+  });
+
+  it("修复期间用户手改正文时哈希不一致，拒绝覆盖新内容", async () => {
+    const original = "陈玉华在省城超市收银台旁接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("哈希冲突", original, [problem]);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.onAudit = async () => {
+      if (agentState.auditCalls === 2) {
+        await store.writeChapterFile(slug, 1, "用户手动修改后的正文。", {
+          source: "user",
+          title: "示例章节 1",
+          summary: "用户修改",
+        });
+      }
+    };
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toContain(
+      "用户手动修改后的正文",
+    );
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("哈希");
+    expect(
+      finished.logs.some((line) => line.message.includes("已被修改")),
+    ).toBe(true);
+  });
+
+  it("基线审校期间取消任务时原文不变且不再修复", async () => {
+    const original = "陈玉华在省城超市收银台旁接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("取消修复", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+    ];
+    let running: Job | undefined;
+    agentState.onAudit = () => {
+      if (running) jobs.requestCancel(running.id, slug);
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [1],
+      source: "review",
+    });
+    running = job;
+    const finished = await waitForJob(job.id);
+
+    expect(finished.status, finished.error).toBe("cancelled");
+    expect(agentState.repairCalls).toBe(0);
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+  });
+
+  it("问题引用没有正文的此前章节时拒绝自动修复", async () => {
+    const slug = await projectWithWrittenChapter("引用缺失章节", "第一章正文。", []);
+    const detail = await store.getProjectDetail(slug);
+    const chapter3 = detail.plan.chapters.find((item) => item.index === 3);
+    expect(chapter3).toBeTruthy();
+    const content = "第三章正文：陈默继续调查。";
+    await store.writeChapterFile(slug, 3, content, {
+      source: "user",
+      title: chapter3!.title,
+      summary: "第三章摘要",
+    });
+    const seedIssue = criticalIssue(
+      "时间线",
+      "陈默继续调查。",
+      "与第 2 章事实台账冲突。",
+    );
+    await store.markChapterWritten(slug, 3, "第三章摘要", reviewWith([seedIssue]));
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      {
+        critical: [
+          {
+            type: "时间线",
+            evidence: "陈默继续调查。",
+            detail: "与第 2 章事实台账冲突。",
+          },
+        ],
+      },
+    ];
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [3],
+      source: "review",
+    });
+    const finished = await waitForJob(job.id);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(0);
+    expect(
+      finished.logs.some(
+        (line) =>
+          line.message.includes("第 2 章") && line.message.includes("证据不足"),
+      ),
+    ).toBe(true);
+
+    const after = await store.getProjectDetail(slug);
+    expect(after.chapters.find((item) => item.index === 3)?.content).toContain(
+      content,
+    );
   });
 
   it("候选稿事实抽取失败时不覆盖原文", async () => {

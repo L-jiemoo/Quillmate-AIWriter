@@ -125,6 +125,128 @@ describe("修复原文证据检索", () => {
     expect(evidence.text).toContain("不能凭想象补写");
   });
 
+  it("同一人物多个事件时按事件关键词定位到正确章节", () => {
+    const project = detail([
+      chapter(2, "第2章：陈玉华在省城超市收银台旁接电话。"),
+      chapter(3, "第3章：陈默独自调查。"),
+      chapter(6, "第6章：陈玉华在阴巷被长夜教的人围住。"),
+      chapter(8, "本章正文。"),
+    ]);
+    project.characters = [
+      {
+        name: "陈玉华",
+        role: "配角",
+        gender: "女",
+        age: "未知",
+        appearance: "",
+        personality: "",
+        background: "",
+        goals: "",
+        arc: "",
+        relationships: "",
+        speechStyle: "",
+      },
+    ];
+    const story: StoryLedger = {
+      version: 1,
+      states: [],
+      relations: [],
+      events: [
+        {
+          id: "event-1",
+          name: "超市电话",
+          chapter: 2,
+          time: "白天",
+          location: "省城超市",
+          participants: ["陈玉华"],
+          cause: "",
+          process: "",
+          result: "",
+          impact: "",
+          relatedEventIds: [],
+          foreshadowIds: [],
+          source: "manual",
+          updatedAt: "",
+        },
+        {
+          id: "event-2",
+          name: "阴巷对峙",
+          chapter: 6,
+          time: "夜晚",
+          location: "阴巷",
+          participants: ["陈玉华"],
+          cause: "",
+          process: "",
+          result: "",
+          impact: "",
+          relatedEventIds: [],
+          foreshadowIds: [],
+          source: "manual",
+          updatedAt: "",
+        },
+      ],
+      foreshadows: [],
+      suppressedIds: [],
+      updatedAt: "",
+    };
+    const eventIssue: ContinuityIssue = {
+      severity: "critical",
+      type: "人物行为",
+      evidence: "陈玉华在阴巷被围住。",
+      detail: "与既有事件不一致。",
+    };
+
+    const evidence = collectRepairEvidence({
+      project,
+      chapter: plan,
+      issues: [eventIssue],
+      story,
+    });
+
+    const found = evidence.snippets.find((item) => item.chapter === 6);
+    expect(found).toBeTruthy();
+    expect(found?.reason).toContain("事件");
+    expect(found?.snippet).toContain("阴巷");
+  });
+
+  it("超出检索上限的章节会明确记录，不静默丢弃", () => {
+    const chapters = Array.from({ length: 10 }, (_, index) =>
+      chapter(index + 1, `第${index + 1}章：陈玉华说了一些话。`),
+    );
+    const project = detail(chapters);
+    project.characters = [
+      {
+        name: "陈玉华",
+        role: "配角",
+        gender: "女",
+        age: "未知",
+        appearance: "",
+        personality: "",
+        background: "",
+        goals: "",
+        arc: "",
+        relationships: "",
+        speechStyle: "",
+      },
+    ];
+    const noRef: ContinuityIssue = {
+      severity: "critical",
+      type: "人物行为",
+      evidence: "陈玉华突然沉默。",
+      detail: "与既有行为不符。",
+    };
+
+    const evidence = collectRepairEvidence({
+      project,
+      chapter: plan,
+      issues: [noRef],
+    });
+
+    expect(evidence.excluded.length).toBeGreaterThan(0);
+    expect(evidence.text).toContain("未纳入证据");
+    expect(evidence.text).toContain("不得用推测替代");
+  });
+
   it("原文证据与事实台账分开标注", () => {
     const project = detail([
       chapter(4, "陈玉华在省城超市收银台旁接电话。"),

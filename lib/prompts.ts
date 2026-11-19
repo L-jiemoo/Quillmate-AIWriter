@@ -632,11 +632,12 @@ export function repairRegressionMessages(
   characters: Character[],
   previousEnding: string,
   nextOpening: string,
+  regressionScope = "",
 ): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你是中文小说修复回归审校员。修复稿可能解决了原问题却引入新矛盾，必须同时核对来源章节因果、相邻章节衔接、人物时间线和伏笔生命周期。只报告修复稿中真实存在、且需要作者处理的问题；没有问题就返回空 issues。${JSON_ONLY}`,
+      content: `你是中文小说修复回归审校员。修复稿可能解决了原问题却引入新矛盾，必须同时核对来源章节因果、相邻章节衔接、人物状态与关系、时间地点连续性、剧情因果和伏笔生命周期。只报告修复稿中真实存在、且需要作者处理的问题；没有问题就返回空 issues。${JSON_ONLY}`,
     },
     {
       role: "user",
@@ -654,7 +655,7 @@ ${clip(evidenceContext || "（未检索到原文证据）", 6000)}
 【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
 
-${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}【修复前正文（仅作对比参考）】
+${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${regressionScope.trim() ? `【本次回归审校扩大范围】\n${clip(regressionScope.trim(), 1200)}\n\n` : ""}【修复前正文（仅作对比参考）】
 ${clip(originalText, 12000)}
 
 【修复后正文（本次审校对象）】
@@ -677,12 +678,19 @@ ${clip(repairedText, 16000)}
 }
 
 回归审校要求（逐项执行，不能只看修改段落）：
-1. 修复是否真正解决了原问题，而不是通过删除证据、改写前文含义或回避关键剧情来掩盖。
-2. 修复是否改变了人物、事件、地点、时间或关键关系，并与来源章节原文产生新的因果矛盾。
-3. 修复后的开头是否仍承接上一章结尾，结尾是否仍能过渡到下一章开头。
-4. 相关人物时间线是否仍然成立（同一时间是否出现在多个地点、生死状态是否被改写）。
-5. 相关伏笔的埋设与回收生命周期是否被破坏（不能未埋先收、提前回收或删掉埋设）。
-6. 只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。`,
+1. 原有问题是否真正解决，而不是通过删除原文证据、改变证据含义或回避关键剧情来掩盖。
+2. 是否产生新的 critical。
+3. 是否产生新的 warning（包括表达建议与审校不确定性，按严重程度如实标注）。
+4. 是否破坏人物状态（生死、身份、所在位置、掌握的信息）。
+5. 是否破坏人物关系（关系类型、亲疏、敌对/同盟是否被改写）。
+6. 是否破坏时间线（同一时间是否出现在多个地点、事件先后是否颠倒）。
+7. 是否破坏地点连续性（人物转场是否有依据、地点描写是否与前文冲突）。
+8. 是否改变已经确立的事件因果（原因、经过、结果或影响是否被替换）。
+9. 是否破坏伏笔生命周期（不能未埋先收、提前回收、删掉埋设或改写回收内容）。
+10. 是否通过删除或改写原文证据来规避矛盾。
+11. 是否修改了问题授权范围之外的段落，或顺带润色无关内容。
+12. 是否与上一章结尾、下一章开头或来源章节产生新的冲突。
+只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。修复范围之外发现的历史问题不要当作本次修复引入的新问题。`,
     },
   ];
 }
@@ -709,8 +717,8 @@ export function chapterRepairPlanMessages(
       role: "user",
       content: `请为《${meta.title}》第 ${chapter.index} 章《${chapter.title}》制定修复方案。
 
-【需要解决的问题（按序号对应）】
-${formatIssuesForPrompt(issues)}
+【需要解决的问题（按序号对应，方括号内为问题 ID）】
+${formatIssuesForPrompt(issues, { withIds: true })}
 ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
 【不可违背的事实台账】
 ${formatCanonForPrompt(canon)}
@@ -731,7 +739,8 @@ ${clip(chapterText, 12000)}
       "locations": ["计划修改的段首短句或章内位置"],
       "strategy": "最小化修改策略，说明如何在不引入新矛盾的前提下修复",
       "affectedFacts": ["可能受影响的人物/物品/时间线/伏笔事实"],
-      "sideEffects": "潜在副作用及规避方式"
+      "sideEffects": "潜在副作用及规避方式",
+      "regressionScope": "需要扩大回归审校的范围，例如涉及的来源章节、人物、事件、地点"
     }
   ],
   "needsAuthorDecision": false,
@@ -741,9 +750,74 @@ ${clip(chapterText, 12000)}
 约束：
 - issueIndex 必须对应【需要解决的问题】的序号从 1 开始。
 - 每个问题都必须有可执行的 strategy；没有足够证据时把 needsAuthorDecision 设为 true，不要编造。
+- evidence 必须是当前正文或给定原文证据中真实存在的短句，不能用事实台账、摘要或你的推断冒充原文。
+- locations 必须是当前正文中真实存在的段首短句或位置；找不到可定位的原文时不要臆造。
+- regressionScope 必须写明需要扩大到哪些来源章节、人物、事件或地点，供回归审校使用。
 - 不允许通过删除关键剧情、改写证据、修改台账或把矛盾解释成回忆/幻觉来修复。
 - 只做必要的最小修改，不重写整章，不新增人物、设定或伏笔。
 - affectedFacts 和 sideEffects 必须如实填写，供后续回归审校使用。`,
+    },
+  ];
+}
+
+// Repair Agent 第二阶段：按已通过约束检查的方案输出结构化补丁，不返回整章正文。
+export function chapterRepairPatchMessages(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  chapterText: string,
+  issues: ContinuityIssue[],
+  canon: CanonFacts,
+  previousEnding: string,
+  nextOpening: string,
+  rewriteInstruction: string,
+  reviewFeedback: string,
+  options: { draftRepair?: boolean; evidenceContext?: string; planText?: string } = {},
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `你是中文小说局部修订编辑。你不能重写整章，只能针对每个已确认问题输出最小修改补丁。补丁必须锚定当前正文中真实存在且唯一的原文片段，程序会逐条校验后应用；任何一项校验失败，整批补丁都不会被采用。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `请为《${meta.title}》第 ${chapter.index} 章《${chapter.title}》输出局部修复补丁。
+
+【待修问题（必须全部覆盖，方括号内为问题 ID）】
+${formatIssuesForPrompt(issues, { withIds: true })}
+${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问题以“待修问题”为准）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
+【不可违背的事实台账（不是原文，不得当作补丁锚点）】
+${formatCanonForPrompt(canon)}
+
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}【上一章结尾】
+${clip(previousEnding || "（无）", 1200)}
+
+${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次修复要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文（补丁锚点必须逐字来自这里）】
+${clip(chapterText, 16000)}
+
+请只输出 JSON 补丁：
+{
+  "patches": [
+    {
+      "issueId": "对应的问题 ID",
+      "edits": [
+        {
+          "originalText": "必须逐字复制当前正文中的一个完整短句或段落，且在正文中只出现一次",
+          "replacement": "替换后的文本，保留原句其余部分，只改必要内容",
+          "reason": "这处修改如何解决对应问题"
+        }
+      ]
+    }
+  ]
+}
+
+约束：
+- 每个待修问题都必须至少有一个 edit；没有把握安全修改时不要编造锚点。
+- originalText 必须逐字存在于【当前章节正文】且只出现一次；不能用台账、摘要、上一版或推断文本作为锚点。
+- 只允许修改包含问题证据或方案位置的段落；不得修改未授权段落，不得顺带润色无关内容。
+- 不同 edit 的原文锚点不得重叠；同一段落内多处修改请分别给出互不重叠的锚点。
+- replacement 必须保留原段落中与问题无关的内容，不得删除关键证据来规避矛盾。
+- 不得新增人物、事件、设定、物品、能力或伏笔；不得改变已确认的事实、时间线和伏笔生命周期。
+- 直接输出 JSON，不要输出解释或修改记录。`,
     },
   ];
 }

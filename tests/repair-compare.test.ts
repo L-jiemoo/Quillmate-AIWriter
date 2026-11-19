@@ -290,6 +290,45 @@ describe("结构化问题字段", () => {
     expect(result.added).toHaveLength(1);
   });
 
+  it("只有一边提供来源章节时不能仅凭文本相似度确认已解决", () => {
+    const before = [
+      {
+        ...issue("时间线", "陈玉华在省城超市收银台旁接电话。"),
+        sourceChapter: 4,
+      },
+    ];
+    const after = [issue("时间线", "陈玉华在省城超市收银台旁接电话。")];
+    const result = compareCriticalIssues(before, after);
+    expect(result.ambiguous).toBe(true);
+    expect(result.accepted).toBe(false);
+    const acceptance = evaluateRepair({ before, after });
+    expect(acceptance.status).toBe("REJECTED_UNRESOLVED");
+  });
+
+  it("只有一边提供受影响人物时标记歧义", () => {
+    const before = [
+      {
+        ...issue("人物行为", "身份暴露。"),
+        affectedCharacters: ["陈默"],
+      },
+    ];
+    const after = [issue("人物行为", "身份暴露。")];
+    const result = compareCriticalIssues(before, after);
+    expect(result.ambiguous).toBe(true);
+  });
+
+  it("章节编号与普通数字不混用锚点", () => {
+    const evidence = "陈玉华在省城接电话。";
+    const result = compareCriticalIssues(
+      [issue("时间线", evidence, "与第 4 章冲突。")],
+      [issue("时间线", evidence, "下午 4 点时间对不上。")],
+    );
+    // “第 4 章”与“4 点”不属于同一锚点，不能仅凭文本相同就认定问题已解决。
+    expect(result.remaining).toHaveLength(0);
+    expect(result.resolved).toHaveLength(1);
+    expect(result.added).toHaveLength(1);
+  });
+
   it("相同指纹且类型一致时视为同一问题", () => {
     const before = [
       { ...issue("时间线", "前后日期矛盾。"), fingerprint: "timeline-4-chen" },
@@ -395,5 +434,115 @@ describe("统一修复验收", () => {
   it("只有建议类修复目标时允许没有严重问题基线", () => {
     const result = evaluateRepair({ before: [], after: [], allowNoBaseline: true });
     expect(result.status).toBe("ACCEPTED");
+  });
+});
+
+describe("全严重度严格验收", () => {
+  function warningIssue(
+    type: string,
+    evidence: string,
+    conflictCategory?: ContinuityIssue["conflictCategory"],
+  ): ContinuityIssue {
+    return {
+      severity: "warning",
+      type,
+      evidence,
+      detail: "需要注意。",
+      conflictCategory,
+    };
+  }
+
+  it("严格模式下新增事实类 warning 也拒绝写回", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [
+        warningIssue("时间线", "陈玉华下午又出现在省城。", "timeline"),
+      ],
+    });
+    expect(result.status).toBe("REJECTED_NEW_WARNING");
+  });
+
+  it("严格模式下新增表达建议类 warning 也拒绝自动写回", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [warningIssue("表达建议", "这句话可以更简洁。")],
+    });
+    expect(result.status).toBe("REJECTED_NEW_WARNING");
+  });
+
+  it("标准模式只拒绝新增事实类 warning，并记录表达建议", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [warningIssue("表达建议", "这句话可以更简洁。")],
+      mode: "STANDARD",
+    });
+    expect(result.status).toBe("ACCEPTED");
+    expect(result.leftovers.join("")).toContain("表达建议");
+
+    const factual = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [warningIssue("物品归属", "匕首持有人发生了变化。", "fact")],
+      mode: "STANDARD",
+    });
+    expect(factual.status).toBe("REJECTED_NEW_WARNING");
+  });
+
+  it("原有 warning 未解决时记录遗留问题但仍可写回", () => {
+    const warning = warningIssue("表达建议", "结尾略显仓促。");
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。"), warning],
+      after: [warning],
+    });
+    expect(result.status).toBe("ACCEPTED");
+    expect(result.leftovers.join("")).toContain("warning 未解决");
+  });
+
+  it("新增建议类问题只记录，不当作剧情矛盾", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [
+        {
+          severity: "ignore",
+          type: "用词建议",
+          evidence: "可以换一个动词。",
+          detail: "仅建议。",
+        },
+      ],
+    });
+    expect(result.status).toBe("ACCEPTED");
+    expect(result.leftovers.join("")).toContain("建议类问题");
+  });
+
+  it("无类别的新增 warning 按不确定问题保守拒绝", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [warningIssue("其他", "这里似乎有点不对劲。")],
+    });
+    expect(result.status).toBe("REJECTED_NEW_WARNING");
+  });
+
+  it("warning 匹配存在歧义时转交作者决定", () => {
+    const result = evaluateRepair({
+      before: [
+        issue("时间线", "陈玉华上午被绑走。"),
+        warningIssue("表达建议", "陈玉华在省城超市收银台旁接电话。"),
+        {
+          ...warningIssue("表达建议", "陈玉华在省城超市收银台旁接电话。"),
+          detail: "另一条接近的措辞建议。",
+        },
+      ],
+      after: [warningIssue("表达建议", "陈玉华在省城超市收银台旁接电话。")],
+      characters: [character("陈玉华")],
+    });
+    expect(result.status).toBe("NEEDS_AUTHOR_DECISION");
+  });
+
+  it("补丁超出授权范围时返回范围违规状态", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [],
+      scopeViolation: true,
+    });
+    expect(result.status).toBe("REJECTED_SCOPE_VIOLATION");
   });
 });

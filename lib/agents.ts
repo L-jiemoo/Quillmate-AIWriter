@@ -15,6 +15,7 @@ import {
   architectMessages,
   auditMessages,
   chapterRepairMessages,
+  chapterRepairPatchMessages,
   chapterRepairPlanMessages,
   repairRegressionMessages,
   characterMessages,
@@ -23,6 +24,10 @@ import {
   titleRepairMessages,
   writerMessages,
 } from "./prompts";
+import {
+  normalizeRepairPatches,
+  type RepairPatch,
+} from "./repair-patch";
 import { normalizeCharacter } from "./store";
 import type {
   CanonFacts,
@@ -415,6 +420,7 @@ export async function auditRepairRegression(
   evidenceContext: string,
   previousEnding: string,
   nextOpening: string,
+  regressionScope = "",
 ): Promise<ReviewResult> {
   if (isMock()) {
     return {
@@ -436,6 +442,7 @@ export async function auditRepairRegression(
       characters,
       previousEnding,
       nextOpening,
+      regressionScope,
     ),
     { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
@@ -449,7 +456,18 @@ export class RepairNeedsAuthorDecisionError extends Error {
   }
 }
 
-interface RepairPlanIssue {
+// 修复方案格式正确但证据不成立时抛出，由调用方拒绝本章而不是让整个任务失败。
+export class RepairPlanRejectedError extends Error {
+  readonly details: string[];
+
+  constructor(message: string, details: string[] = []) {
+    super(message);
+    this.name = "RepairPlanRejectedError";
+    this.details = details;
+  }
+}
+
+export interface RepairPlanIssue {
   issueIndex: number;
   rootCause: string;
   evidence: string;
@@ -457,17 +475,22 @@ interface RepairPlanIssue {
   strategy: string;
   affectedFacts: string[];
   sideEffects: string;
+  regressionScope: string;
 }
 
-interface RepairPlan {
+export interface RepairPlan {
   issuePlans: RepairPlanIssue[];
   needsAuthorDecision: boolean;
   decisionReason: string;
 }
 
-function normalizeRepairPlan(input: unknown): RepairPlan {
+export function normalizeRepairPlan(input: unknown): RepairPlan {
   const record = (input ?? {}) as Record<string, unknown>;
-  const rawPlans = Array.isArray(record.issuePlans) ? record.issuePlans : [];
+  const rawPlans = Array.isArray(record.issuePlans)
+    ? record.issuePlans
+    : Array.isArray(record.issue_plans)
+      ? record.issue_plans
+      : [];
   const issuePlans: RepairPlanIssue[] = rawPlans.map((item) => {
     const plan = (item ?? {}) as Record<string, unknown>;
     return {
@@ -478,6 +501,7 @@ function normalizeRepairPlan(input: unknown): RepairPlan {
       strategy: str(plan.strategy).trim(),
       affectedFacts: arr(plan.affectedFacts ?? plan.affected_facts),
       sideEffects: str(plan.sideEffects ?? plan.side_effects).trim(),
+      regressionScope: str(plan.regressionScope ?? plan.regression_scope).trim(),
     };
   });
   return {
@@ -487,28 +511,95 @@ function normalizeRepairPlan(input: unknown): RepairPlan {
   };
 }
 
-function validateRepairPlan(plan: RepairPlan, issueCount: number): void {
+const EVIDENCE_NOISE = /[\s，。！？；：、“”‘’（）()《》【】〔〕…—\-·,.!?;:'"\\/\[\]{}<>|]/gu;
+
+function compactEvidence(value: string): string {
+  return value.normalize("NFKC").replace(EVIDENCE_NOISE, "").toLowerCase();
+}
+
+function originalEvidenceSection(context: string): string {
+  const parts: string[] = [];
+  for (const match of context.matchAll(/（原文）([\s\S]*?)(?=\n【|$)/gu)) {
+    parts.push(match[1]);
+  }
+  return parts.join("\n");
+}
+
+function containsEvidence(haystack: string, needle: string): boolean {
+  const compactNeedle = compactEvidence(needle);
+  if (compactNeedle.length < 4) return false;
+  const compactHaystack = compactEvidence(haystack);
+  if (compactHaystack.includes(compactNeedle)) return true;
+  // 长证据可能被模型截断；只比较前 60 个有效字符，避免整段比对失败。
+  if (compactNeedle.length > 60) {
+    return compactHaystack.includes(compactNeedle.slice(0, 60));
+  }
+  return false;
+}
+
+export function validateRepairPlan(
+  plan: RepairPlan,
+  issueCount: number,
+  context: { chapterText?: string; evidenceContext?: string } = {},
+): void {
   if (!plan.issuePlans.length) {
-    throw new Error("修复方案没有覆盖任何问题，已拒绝修改正文");
+    throw new RepairPlanRejectedError("修复方案没有覆盖任何问题，已拒绝修改正文");
   }
   const covered = new Set<number>();
+  const details: string[] = [];
   for (const item of plan.issuePlans) {
     if (
       !Number.isInteger(item.issueIndex) ||
       item.issueIndex < 1 ||
       item.issueIndex > issueCount
     ) {
-      throw new Error(`修复方案引用了不存在的问题编号：${String(item.issueIndex)}`);
+      throw new RepairPlanRejectedError(
+        `修复方案引用了不存在的问题编号：${String(item.issueIndex)}`,
+      );
     }
     if (!item.strategy) {
-      throw new Error(`问题 ${item.issueIndex} 的修复方案缺少可执行策略`);
+      throw new RepairPlanRejectedError(
+        `问题 ${item.issueIndex} 的修复方案缺少可执行策略`,
+      );
+    }
+    if (!item.regressionScope) {
+      throw new RepairPlanRejectedError(
+        `问题 ${item.issueIndex} 的修复方案没有说明回归审校范围`,
+      );
+    }
+    if (context.chapterText !== undefined) {
+      const chapterText = context.chapterText;
+      if (!item.evidence) {
+        details.push(`问题 ${item.issueIndex} 没有引用任何原文证据`);
+      } else if (
+        !containsEvidence(chapterText, item.evidence) &&
+        !containsEvidence(originalEvidenceSection(context.evidenceContext ?? ""), item.evidence)
+      ) {
+        details.push(
+          `问题 ${item.issueIndex} 引用的证据只来自台账、摘要或推断，不在当前正文和原文证据中`,
+        );
+      }
+      const located = item.locations.some(
+        (location) => location.trim() && containsEvidence(chapterText, location),
+      );
+      if (!located) {
+        details.push(
+          `问题 ${item.issueIndex} 计划修改的位置在当前正文中不存在`,
+        );
+      }
     }
     covered.add(item.issueIndex);
   }
   for (let index = 1; index <= issueCount; index += 1) {
     if (!covered.has(index)) {
-      throw new Error(`修复方案遗漏了问题 ${index}，已拒绝修改正文`);
+      details.push(`修复方案遗漏了问题 ${index}`);
     }
+  }
+  if (details.length) {
+    throw new RepairPlanRejectedError(
+      `修复方案未通过证据校验，已拒绝修改正文：${details.join("；")}`,
+      details,
+    );
   }
 }
 
@@ -522,7 +613,8 @@ function formatRepairPlan(plan: RepairPlan): string {
 - 计划修改位置：${item.locations.join("；") || "未说明"}
 - 修改策略：${item.strategy}
 - 受影响事实：${item.affectedFacts.join("；") || "未说明"}
-- 潜在副作用：${item.sideEffects || "未说明"}`,
+- 潜在副作用：${item.sideEffects || "未说明"}
+- 回归审校范围：${item.regressionScope || "未说明"}`,
     )
     .join("\n\n");
 }
@@ -589,4 +681,89 @@ export async function repairChapter(
     { temperature: 0.2, agent: "repair-editor", chapter: chapter.index },
   );
   return stripFences(raw);
+}
+
+export interface RepairPatchPlanResult {
+  patches: RepairPatch[];
+  planText: string;
+  regressionScope: string;
+}
+
+/**
+ * 补丁式修复：只返回结构化局部修改，不返回整章正文。
+ * 方案阶段必须在当前正文和原文证据中真实成立，否则拒绝生成补丁。
+ */
+export async function repairChapterPatches(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  chapterText: string,
+  issues: ContinuityIssue[],
+  canon: CanonFacts,
+  previousEnding: string,
+  nextOpening: string,
+  rewriteInstruction: string,
+  reviewFeedback: string,
+  options: {
+    draftRepair?: boolean;
+    evidenceContext?: string;
+    twoStage?: boolean;
+  } = {},
+): Promise<RepairPatchPlanResult> {
+  if (isMock()) return { patches: [], planText: "", regressionScope: "" };
+  if (!issues.length) return { patches: [], planText: "", regressionScope: "" };
+
+  const llm = new LLMClient();
+  let planText = "";
+  let regressionScope = "";
+  if (options.twoStage !== false) {
+    const planData = await llm.json<Record<string, unknown>>(
+      chapterRepairPlanMessages(
+        meta,
+        chapter,
+        chapterText,
+        issues,
+        canon,
+        previousEnding,
+        nextOpening,
+        rewriteInstruction,
+        reviewFeedback,
+        options,
+      ),
+      { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+    );
+    const plan = normalizeRepairPlan(planData);
+    if (plan.needsAuthorDecision) {
+      throw new RepairNeedsAuthorDecisionError(plan.decisionReason);
+    }
+    validateRepairPlan(plan, issues.length, {
+      chapterText,
+      evidenceContext: options.evidenceContext ?? "",
+    });
+    planText = formatRepairPlan(plan);
+    regressionScope = plan.issuePlans
+      .map((item) => item.regressionScope)
+      .filter(Boolean)
+      .join("；");
+  }
+
+  const data = await llm.json<Record<string, unknown>>(
+    chapterRepairPatchMessages(
+      meta,
+      chapter,
+      chapterText,
+      issues,
+      canon,
+      previousEnding,
+      nextOpening,
+      rewriteInstruction,
+      reviewFeedback,
+      { ...options, planText },
+    ),
+    { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+  );
+  return {
+    patches: normalizeRepairPatches(data),
+    planText,
+    regressionScope,
+  };
 }
