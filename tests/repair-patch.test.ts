@@ -34,39 +34,39 @@ function errorCode(fn: () => unknown): string {
     if (error instanceof RepairPatchError) return error.code;
     throw error;
   }
-  throw new Error("预期抛出补丁校验错误");
+  throw new Error("预期抛出补角色丁校验错误");
 }
 
-describe("修复补丁应用", () => {
+describe("修复补角色丁应用", () => {
   it("正常局部修复只改动授权段落并记录差异", () => {
-    const text = "第一段无关内容。\n陈玉华在省城超市收银台旁接电话。\n第三段无关内容。";
-    const issues = [issue("陈玉华在省城超市收银台旁接电话。")];
+    const text = "第一段无关内容。\n角色乙在外地超市收银台旁接电话。\n第三段无关内容。";
+    const issues = [issue("角色乙在外地超市收银台旁接电话。")];
     const batch = applyRepairPatches({
       originalText: text,
       issues,
       patches: [
         patch(
           "issue-1",
-          "陈玉华在省城超市收银台旁接电话。",
-          "陈玉华在阴巷口接电话。",
+          "角色乙在外地超市收银台旁接电话。",
+          "角色乙在巷口接电话。",
         ),
       ],
     });
-    expect(batch.text).toContain("陈玉华在阴巷口接电话。");
+    expect(batch.text).toContain("角色乙在巷口接电话。");
     expect(batch.text).toContain("第一段无关内容。");
     expect(batch.records).toHaveLength(1);
-    expect(batch.records[0].removed).toContain("省城超市");
-    expect(batch.records[0].added).toContain("阴巷口");
+    expect(batch.records[0].removed).toContain("外地超市");
+    expect(batch.records[0].added).toContain("巷口");
     expect(batch.paragraphs).toEqual([1]);
   });
 
-  it("原文锚点不存在时拒绝整批补丁", () => {
+  it("原文锚点不存在时拒绝整批补角色丁", () => {
     expect(
       errorCode(() =>
         applyRepairPatches({
-          originalText: "第一段。\n陈玉华在阴巷口接电话。",
-          issues: [issue("陈玉华在阴巷口接电话。")],
-          patches: [patch("issue-1", "陈玉华在省城接电话。", "陈玉华在阴巷口接电话。")],
+          originalText: "第一段。\n角色乙在巷口接电话。",
+          issues: [issue("角色乙在巷口接电话。")],
+          patches: [patch("issue-1", "角色乙在外地接电话。", "角色乙在巷口接电话。")],
         }),
       ),
     ).toBe("ANCHOR_NOT_FOUND");
@@ -76,18 +76,18 @@ describe("修复补丁应用", () => {
     expect(
       errorCode(() =>
         applyRepairPatches({
-          originalText: "陈玉华接电话。\n陈玉华接电话。",
-          issues: [issue("陈玉华接电话。")],
-          patches: [patch("issue-1", "陈玉华接电话。", "陈玉华关机。")],
+          originalText: "角色乙接电话。\n角色乙接电话。",
+          issues: [issue("角色乙接电话。")],
+          patches: [patch("issue-1", "角色乙接电话。", "角色乙关机。")],
         }),
       ),
     ).toBe("ANCHOR_NOT_UNIQUE");
   });
 
-  it("两个补丁修改区域重叠时整批拒绝", () => {
-    const text = "陈玉华在省城超市收银台旁接电话。";
+  it("两个补角色丁修改区域重叠时整批拒绝", () => {
+    const text = "角色乙在外地超市收银台旁接电话。";
     const issues = [
-      issue("陈玉华在省城超市收银台旁接电话。", "issue-1"),
+      issue("角色乙在外地超市收银台旁接电话。", "issue-1"),
       issue("超市收银台旁接电话。", "issue-2", "人物行为"),
     ];
     expect(
@@ -96,7 +96,7 @@ describe("修复补丁应用", () => {
           originalText: text,
           issues,
           patches: [
-            patch("issue-1", "陈玉华在省城超市收银台旁接电话。", "陈玉华关机。"),
+            patch("issue-1", "角色乙在外地超市收银台旁接电话。", "角色乙关机。"),
             patch("issue-2", "超市收银台旁接电话。", "超市收银台旁无人接听。"),
           ],
         }),
@@ -105,12 +105,12 @@ describe("修复补丁应用", () => {
   });
 
   it("修改未授权段落时拒绝", () => {
-    const text = "第一段无关内容。\n陈玉华在省城超市收银台旁接电话。\n第三段无关内容。";
+    const text = "第一段无关内容。\n角色乙在外地超市收银台旁接电话。\n第三段无关内容。";
     expect(
       errorCode(() =>
         applyRepairPatches({
           originalText: text,
-          issues: [issue("陈玉华在省城超市收银台旁接电话。")],
+          issues: [issue("角色乙在外地超市收银台旁接电话。")],
           patches: [patch("issue-1", "第一段无关内容。", "第一段被改写。")],
         }),
       ),
@@ -120,15 +120,15 @@ describe("修复补丁应用", () => {
   it("方案位置显式授权的其他段落可以修改", () => {
     const text = [
       "第一段无关内容。",
-      "乙在办公室里接电话。",
-      "甲忽然想起电话里的背景音。",
+      "角色乙在办公室里接电话。",
+      "角色甲忽然想起电话里的背景音。",
     ].join("\n");
     const batch = applyRepairPatches({
       originalText: text,
-      issues: [issue("乙在办公室里接电话。")],
-      extraAuthorizedAnchors: ["甲忽然想起电话里的背景音。"],
+      issues: [issue("角色乙在办公室里接电话。")],
+      extraAuthorizedAnchors: ["角色甲忽然想起电话里的背景音。"],
       patches: [
-        patch("issue-1", "甲忽然想起电话里的背景音。", "甲忽然想起电话里的录音。"),
+        patch("issue-1", "角色甲忽然想起电话里的背景音。", "角色甲忽然想起电话里的录音。"),
       ],
     });
     expect(batch.text).toContain("电话里的录音");
@@ -136,7 +136,7 @@ describe("修复补丁应用", () => {
   });
 
   it("修改范围明显过大时拒绝，而不是强行局部改写", () => {
-    const text = "陈玉华接电话。";
+    const text = "角色乙接电话。";
     expect(
       errorCode(() =>
         applyRepairPatches({
@@ -151,21 +151,21 @@ describe("修复补丁应用", () => {
   it("证据用省略号跨段引用时，被引用的每个段落都可修改", () => {
     const text = [
       "开头无关段落。",
-      "“你姑比你早到半天。”沈长庚往旁边让了让。",
+      "“你姑比你早到了半天。”角色丙往旁边让了让。",
       "中间无关段落。",
       "“你姑今天一早出门进货，我的人在批发市场后巷把她带走了。”",
       "结尾无关段落。",
     ].join("\n");
     const evidence =
-      "“你姑比你早到半天。”……“你姑今天一早出门进货，我的人在批发市场后巷把她带走了。”";
+      "“你姑比你早到了半天。”……“你姑今天一早出门进货，我的人在批发市场后巷把她带走了。”";
     const batch = applyRepairPatches({
       originalText: text,
       issues: [issue(evidence)],
       patches: [
         patch(
           "issue-1",
-          "“你姑比你早到半天。”沈长庚往旁边让了让。",
-          "“你姑比你早到两个钟头。”沈长庚往旁边让了让。",
+          "“你姑比你早到了半天。”角色丙往旁边让了让。",
+          "“你姑比你早到两个钟头。”角色丙往旁边让了让。",
         ),
       ],
     });
@@ -177,45 +177,45 @@ describe("修复补丁应用", () => {
     expect(
       errorCode(() =>
         applyRepairPatches({
-          originalText: "第一段。\n陈玉华接电话。",
-          issues: [issue("陈默出现在石室。")],
-          patches: [patch("issue-1", "陈玉华接电话。", "陈玉华关机。")],
+          originalText: "第一段。\n角色乙接电话。",
+          issues: [issue("角色甲出现在石室。")],
+          patches: [patch("issue-1", "角色乙接电话。", "角色乙关机。")],
         }),
       ),
     ).toBe("NO_AUTHORIZED_PARAGRAPH");
   });
 
-  it("补丁引用不存在的问题编号时拒绝", () => {
+  it("补角色丁引用不存在的问题编号时拒绝", () => {
     expect(
       errorCode(() =>
         applyRepairPatches({
-          originalText: "陈玉华接电话。",
-          issues: [issue("陈玉华接电话。")],
-          patches: [patch("issue-9", "陈玉华接电话。", "陈玉华关机。")],
+          originalText: "角色乙接电话。",
+          issues: [issue("角色乙接电话。")],
+          patches: [patch("issue-9", "角色乙接电话。", "角色乙关机。")],
         }),
       ),
     ).toBe("UNKNOWN_ISSUE");
   });
 
-  it("补丁没有覆盖全部问题时拒绝", () => {
-    const text = "陈玉华接电话。陈默走进阴巷。";
+  it("补角色丁没有覆盖全部问题时拒绝", () => {
+    const text = "角色乙接电话。角色甲走进巷口。";
     const issues = [
-      issue("陈玉华接电话。", "issue-1"),
-      issue("陈默走进阴巷。", "issue-2", "人物行为"),
+      issue("角色乙接电话。", "issue-1"),
+      issue("角色甲走进巷口。", "issue-2", "人物行为"),
     ];
     expect(
       errorCode(() =>
         applyRepairPatches({
           originalText: text,
           issues,
-          patches: [patch("issue-1", "陈玉华接电话。", "陈玉华关机。")],
+          patches: [patch("issue-1", "角色乙接电话。", "角色乙关机。")],
         }),
       ),
     ).toBe("UNCOVERED_ISSUE");
   });
 
-  it("空补丁、空锚点、缺少理由和无实际修改都拒绝", () => {
-    const text = "陈玉华接电话。";
+  it("空补角色丁、空锚点、缺少理由和无实际修改都拒绝", () => {
+    const text = "角色乙接电话。";
     const issues = [issue(text)];
     expect(
       errorCode(() =>
@@ -245,7 +245,7 @@ describe("修复补丁应用", () => {
         applyRepairPatches({
           originalText: text,
           issues,
-          patches: [patch("issue-1", text, "陈玉华关机。", "")],
+          patches: [patch("issue-1", text, "角色乙关机。", "")],
         }),
       ),
     ).toBe("MISSING_REASON");
@@ -260,11 +260,11 @@ describe("修复补丁应用", () => {
     ).toBe("UNCHANGED_EDIT");
   });
 
-  it("批量补丁部分失败时整批不应用", () => {
-    const text = "陈玉华接电话。陈默走进阴巷。";
+  it("批量补角色丁部分失败时整批不应用", () => {
+    const text = "角色乙接电话。角色甲走进巷口。";
     const issues = [
-      issue("陈玉华接电话。", "issue-1"),
-      issue("陈默走进阴巷。", "issue-2", "人物行为"),
+      issue("角色乙接电话。", "issue-1"),
+      issue("角色甲走进巷口。", "issue-2", "人物行为"),
     ];
     let applied = "";
     try {
@@ -272,8 +272,8 @@ describe("修复补丁应用", () => {
         originalText: text,
         issues,
         patches: [
-          patch("issue-1", "陈玉华接电话。", "陈玉华关机。"),
-          patch("issue-2", "不存在的句子。", "陈默离开阴巷。"),
+          patch("issue-1", "角色乙接电话。", "角色乙关机。"),
+          patch("issue-2", "不存在的句子。", "角色甲离开巷口。"),
         ],
       });
       applied = "applied";
@@ -284,10 +284,10 @@ describe("修复补丁应用", () => {
   });
 });
 
-describe("跨章补丁应用", () => {
-  const targetText = "第5章：陈玉华上午已被带到阴巷。";
-  const sourceText = "第4章：陈玉华在省城超市收银台旁接电话。";
-  const crossIssue = issue("陈玉华上午已被带到阴巷。");
+describe("跨章补角色丁应用", () => {
+  const targetText = "第5章：角色乙上午已被带到巷口。";
+  const sourceText = "第4章：角色乙在外地超市收银台旁接电话。";
+  const crossIssue = issue("角色乙上午已被带到巷口。");
 
   it("作者确认的根因章节可以同时修改，仍逐章校验差异", () => {
     const batches = applyRepairPatchesAcross({
@@ -302,14 +302,14 @@ describe("跨章补丁应用", () => {
           issueId: "issue-1",
           edits: [
             {
-              originalText: "陈玉华上午已被带到阴巷。",
-              replacement: "陈玉华下午被带到阴巷。",
+              originalText: "角色乙上午已被带到巷口。",
+              replacement: "角色乙下午被带到巷口。",
               reason: "保留第 4 章电话真实性",
             },
             {
               chapterIndex: 4,
               originalText: sourceText,
-              replacement: "第4章：电话是长夜教伪造的录音。",
+              replacement: "第4章：电话是某组织伪造的录音。",
               reason: "保留第 5 章时间线",
             },
           ],
@@ -317,7 +317,7 @@ describe("跨章补丁应用", () => {
       ],
     });
     const byChapter = new Map(batches.map((batch) => [batch.chapterIndex, batch]));
-    expect(byChapter.get(5)?.text).toContain("下午被带到阴巷");
+    expect(byChapter.get(5)?.text).toContain("下午被带到巷口");
     expect(byChapter.get(4)?.text).toContain("伪造的录音");
     expect(byChapter.get(4)?.records).toHaveLength(1);
   });
@@ -362,8 +362,8 @@ describe("跨章补丁应用", () => {
               issueId: "issue-1",
               edits: [
                 {
-                  originalText: "陈玉华上午已被带到阴巷。",
-                  replacement: "陈玉华下午被带到阴巷。",
+                  originalText: "角色乙上午已被带到巷口。",
+                  replacement: "角色乙下午被带到巷口。",
                   reason: "目标章修复",
                 },
                 {
@@ -381,7 +381,7 @@ describe("跨章补丁应用", () => {
   });
 });
 
-describe("补丁输入规范化与问题 ID", () => {
+describe("补角色丁输入规范化与问题 ID", () => {
   it("兼容 camelCase / snake_case 的模型输出", () => {
     const patches = normalizeRepairPatches({
       patches: [

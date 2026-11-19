@@ -25,9 +25,9 @@ describe("两轮修复分组与确认", () => {
   it("按根因分组，每组最多 3 个问题且不丢问题", () => {
     const issues = [
       ...Array.from({ length: 7 }, (_, index) =>
-        issue(`甲在第${index + 1}处出现。`, { type: "时间线" }),
+        issue(`角色甲在第${index + 1}处出现。`, { type: "时间线" }),
       ),
-      issue("乙的物品归属错误。", { type: "物品归属" }),
+      issue("角色乙的物品归属错误。", { type: "物品归属" }),
     ];
     const groups = groupIssuesByRootCause(issues, 3);
     expect(groups.map((group) => group.issues.length)).toEqual([3, 3, 1, 1]);
@@ -38,17 +38,17 @@ describe("两轮修复分组与确认", () => {
     const baseline = buildRepairBaseline({
       jobId: "job-1",
       chapterIndex: 5,
-      text: "乙在办公室里接电话。",
-      issues: [issue("乙在办公室里接电话。")],
+      text: "角色乙在办公室里接电话。",
+      issues: [issue("角色乙在办公室里接电话。")],
     });
     expect(baseline.issueIds).toHaveLength(1);
     expect(baseline.textHash).toHaveLength(64);
-    expect(baseline.factEvidence).toContain("乙在办公室里接电话。");
+    expect(baseline.factEvidence).toContain("角色乙在办公室里接电话。");
     expect(baseline.chapterVersion.startsWith("ch5:")).toBe(true);
   });
 
   it("原文已有的证据归为 pre_existing", () => {
-    const text = "乙在办公室里接电话。";
+    const text = "角色乙在办公室里接电话。";
     const baseline = buildRepairBaseline({
       jobId: "job-1",
       chapterIndex: 1,
@@ -56,7 +56,7 @@ describe("两轮修复分组与确认", () => {
       issues: [issue(text)],
     });
     const result = classifyRegressionByEvidence(
-      issue("乙在办公室里接电话。"),
+      issue("角色乙在办公室里接电话。"),
       baseline,
       `${text}【修复】`,
     );
@@ -67,13 +67,13 @@ describe("两轮修复分组与确认", () => {
     const baseline = buildRepairBaseline({
       jobId: "job-1",
       chapterIndex: 1,
-      text: "乙在办公室里接电话。",
-      issues: [issue("乙在办公室里接电话。")],
+      text: "角色乙在办公室里接电话。",
+      issues: [issue("角色乙在办公室里接电话。")],
     });
     const result = classifyRegressionByEvidence(
       issue("这句证据不存在于任何稿子。"),
       baseline,
-      "乙在办公室里接电话。【修复】",
+      "角色乙在办公室里接电话。【修复】",
     );
     expect(result.verdict).toBe("uncertain");
   });

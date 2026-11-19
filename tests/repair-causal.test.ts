@@ -12,14 +12,14 @@ import type { ContinuityIssue } from "@/lib/types";
 const before: ContinuityIssue = {
   severity: "critical",
   type: "剧情因果",
-  evidence: "陈默念出沈长庚的罪行。",
+  evidence: "角色甲念出角色丙的罪行。",
   detail: "与第 4 章冲突。",
 };
 
 function change(
   classification: CausalChange["classification"],
-  beforeText = "陈默念罪行，书自动生成沈长庚页",
-  afterText = "陈默念罪行，书自动生成沈长庚页",
+  beforeText = "角色甲念罪行，书自动生成角色丙页",
+  afterText = "角色甲念罪行，书自动生成角色丙页",
 ): CausalChange {
   return {
     issueIndex: 1,
@@ -34,16 +34,16 @@ describe("修复前因果结构", () => {
   it("兼容 camel/snake 字段并要求核心字段完整", () => {
     const baseline = normalizeCausalBaseline({
       issue_index: 1,
-      actor: "陈默",
+      actor: "角色甲",
       action: "念出罪行",
-      target: "记录之书",
-      object: "沈长庚",
-      effect: "生成沈长庚对应的记录页",
+      target: "记录载体",
+      object: "角色丙",
+      effect: "生成角色丙对应的记录页",
     });
     expect(baseline.issueIndex).toBe(1);
     expect(isCausalBaselineComplete(baseline)).toBe(true);
     expect(
-      isCausalBaselineComplete(normalizeCausalBaseline({ actor: "陈默" })),
+      isCausalBaselineComplete(normalizeCausalBaseline({ actor: "角色甲" })),
     ).toBe(false);
   });
 });
@@ -58,8 +58,8 @@ describe("修复后因果变更分类", () => {
     const { changes, verified } = normalizeCausalChanges([
       {
         issue_index: 1,
-        before: "陈默念罪行，书自动生成沈长庚页",
-        after: "陈默按住周坤页，书在周坤页后生成沈长庚页",
+        before: "角色甲念罪行，书自动生成角色丙页",
+        after: "角色甲按住角色丁页，书在角色丁页后生成角色丙页",
         explanation: "新增了中间页",
       },
     ]);
@@ -67,12 +67,12 @@ describe("修复后因果变更分类", () => {
     expect(changes[0].classification).toBe("CAUSAL_CHANGE");
   });
 
-  it("记录之书案例：新增周坤页作为中间媒介判为 CAUSAL_CHANGE", () => {
+  it("记录载体案例：新增角色丁页作为中间媒介判为 CAUSAL_CHANGE", () => {
     const evaluation = evaluateCausalChanges([
       change(
         "CAUSAL_CHANGE",
-        "陈默念出沈长庚罪行，记录之书自动生成沈长庚页",
-        "陈默按住周坤页空白处念罪行，书在周坤页后翻出沈长庚页",
+        "角色甲念出角色丙罪行，记录载体自动生成角色丙页",
+        "角色甲按住角色丁页空白处念罪行，书在角色丁页后翻出角色丙页",
       ),
     ]);
     expect(evaluation.status).toBe("REJECTED_CAUSAL_CHANGE");

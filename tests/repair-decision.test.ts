@@ -41,7 +41,7 @@ function input(slug: string) {
       {
         severity: "critical" as const,
         type: "时间线",
-        evidence: "陈玉华上午已被带到阴巷。",
+        evidence: "角色乙上午已被带到巷口。",
         detail: "与第 4 章下午电话冲突。",
       },
     ],
@@ -50,13 +50,13 @@ function input(slug: string) {
         label: "A 保留第 4 章电话",
         description: "修改第 5 章时间线",
         affectedChapters: [5],
-        anchors: ["陈玉华在省城超市收银台旁接电话。"],
+        anchors: ["角色乙在外地超市收银台旁接电话。"],
       },
       {
         label: "B 保留第 5 章时间线",
         description: "把第 4 章电话改为录音",
         affectedChapters: [4, 5],
-        anchors: ["陈玉华在省城超市收银台旁接电话。"],
+        anchors: ["角色乙在外地超市收银台旁接电话。"],
       },
     ],
   };

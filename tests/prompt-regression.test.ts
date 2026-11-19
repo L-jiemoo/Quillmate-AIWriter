@@ -160,12 +160,12 @@ describe("典型小说审校提示词回归", () => {
       chapterRepairPlanMessages(
         detail.meta,
         detail.plan.chapters[3],
-        "甲说出了乙的罪证，记录载体自动生成乙的记录页。",
+        "角色甲说出了角色乙的罪证，记录载体自动生成角色乙的记录页。",
         [
           {
             severity: "critical",
             type: "剧情因果",
-            evidence: "甲说出了乙的罪证。",
+            evidence: "角色甲说出了角色乙的罪证。",
             detail: "与第 4 章冲突。",
           },
         ],

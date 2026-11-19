@@ -9,38 +9,38 @@ import {
 import type { ContinuityIssue } from "@/lib/types";
 
 const chapterText = [
-  "第一段：陈默在阴巷等待。",
-  "陈玉华在省城超市收银台旁接电话。",
-  "第三段：长夜教的人出现。",
+  "第一段：角色甲在巷口等待。",
+  "角色乙在外地超市收银台旁接电话。",
+  "第三段：某组织的人出现。",
 ].join("\n");
 
 const evidenceContext = [
   "【原文证据使用规则】以下内容来自正式正文。",
   "【事实台账（硬约束，不是原文摘录）】",
-  "- 人物状态：陈玉华｜alive｜所在：省城｜状态确立于第 4 章",
+  "- 人物状态：角色乙｜alive｜所在：外地｜状态确立于第 4 章",
   "【原文证据 1｜第 4 章《电话》｜第 4 章第 2 行附近】",
-  "（原文）陈玉华在省城超市收银台旁接电话。",
+  "（原文）角色乙在外地超市收银台旁接电话。",
 ].join("\n");
 
 function planIssue(overrides: Partial<RepairPlanIssue> = {}): RepairPlanIssue {
   return {
     issueIndex: 1,
     rootCause: "与第 4 章电话事实冲突",
-    evidence: "陈玉华在省城超市收银台旁接电话。",
-    locations: ["陈玉华在省城超市收银台旁接电话。"],
+    evidence: "角色乙在外地超市收银台旁接电话。",
+    locations: ["角色乙在外地超市收银台旁接电话。"],
     strategy: "改写电话来源，保留收银机背景音",
     affectedFacts: ["第 4 章电话事件"],
     sideEffects: "可能影响后续伏笔",
     regressionScope: "第 4 章与相邻章节",
     causalBaseline: {
-      actor: "陈默",
-      action: "拨打陈玉华的电话",
+      actor: "角色甲",
+      action: "拨打角色乙的电话",
       target: "电话",
-      object: "陈玉华",
-      location: "阴巷附近",
-      sequence: "先通话，后前往阴巷",
-      cause: "确认陈玉华的情况",
-      effect: "陈玉华透露阴巷内幕",
+      object: "角色乙",
+      location: "巷口附近",
+      sequence: "先通话，后前往巷口",
+      cause: "确认角色乙的情况",
+      effect: "角色乙透露巷口内幕",
       rule: "无",
     },
     ...overrides,
@@ -76,7 +76,7 @@ describe("修复方案证据校验", () => {
   it("证据只来自事实台账时拒绝", () => {
     const message = rejectionMessage(() =>
       validateRepairPlan(
-        plan(planIssue({ evidence: "人物状态：陈玉华｜alive｜所在：省城" })),
+        plan(planIssue({ evidence: "人物状态：角色乙｜alive｜所在：外地" })),
         1,
         { chapterText, evidenceContext },
       ),
@@ -87,7 +87,7 @@ describe("修复方案证据校验", () => {
   it("模型推断不能当作原文证据", () => {
     const message = rejectionMessage(() =>
       validateRepairPlan(
-        plan(planIssue({ evidence: "陈玉华可能是被长夜教威胁才接电话。" })),
+        plan(planIssue({ evidence: "角色乙可能是被某组织威胁才接电话。" })),
         1,
         { chapterText, evidenceContext },
       ),
@@ -96,19 +96,19 @@ describe("修复方案证据校验", () => {
   });
 
   it("方案复述证据失真但问题原证据在正文中时通过", () => {
-    const neutralText = "第一段：甲在车站等车。\n第二段：乙在办公室里接电话。";
+    const neutralText = "第一段：角色甲在车站等车。\n第二段：角色乙在办公室里接电话。";
     const issue: ContinuityIssue = {
       severity: "critical",
       type: "时间线",
-      evidence: "乙在办公室里接电话。",
+      evidence: "角色乙在办公室里接电话。",
       detail: "与上一章冲突。",
     };
     expect(() =>
       validateRepairPlan(
         plan(
           planIssue({
-            evidence: "电话里乙在办公室里说话",
-            locations: ["乙在办公室里接电话。"],
+            evidence: "电话里角色乙在办公室里说话",
+            locations: ["角色乙在办公室里接电话。"],
           }),
         ),
         1,
@@ -118,19 +118,19 @@ describe("修复方案证据校验", () => {
   });
 
   it("问题原证据也不在正文中时仍然拒绝", () => {
-    const neutralText = "第一段：甲在车站等车。";
+    const neutralText = "第一段：角色甲在车站等车。";
     const issue: ContinuityIssue = {
       severity: "critical",
       type: "时间线",
-      evidence: "推断：乙可能提前离开办公室。",
+      evidence: "推断：角色乙可能提前离开办公室。",
       detail: "只来自推断。",
     };
     const message = rejectionMessage(() =>
       validateRepairPlan(
         plan(
           planIssue({
-            evidence: "乙可能提前离开办公室",
-            locations: ["甲在车站等车。"],
+            evidence: "角色乙可能提前离开办公室",
+            locations: ["角色甲在车站等车。"],
           }),
         ),
         1,
@@ -141,7 +141,7 @@ describe("修复方案证据校验", () => {
   });
 
   it("证据来自检索到的原文证据时通过", () => {
-    const remoteEvidence = "陈玉华警告陈默今晚不要去阴巷。";
+    const remoteEvidence = "角色乙警告角色甲今晚不要去巷口。";
     expect(() =>
       validateRepairPlan(
         plan(planIssue({ evidence: remoteEvidence })),
@@ -216,8 +216,8 @@ describe("修复方案证据校验", () => {
         {
           issue_index: 1,
           root_cause: "原因",
-          evidence: "陈玉华在省城超市收银台旁接电话。",
-          locations: ["陈玉华在省城超市收银台旁接电话。"],
+          evidence: "角色乙在外地超市收银台旁接电话。",
+          locations: ["角色乙在外地超市收银台旁接电话。"],
           strategy: "改写",
           affected_facts: ["电话"],
           side_effects: "无",

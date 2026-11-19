@@ -40,20 +40,20 @@ const plan: ChapterPlan = { index: 8, title: "第八章", summary: "", keyBeats:
 const issue: ContinuityIssue = {
   severity: "critical",
   type: "时间线",
-  evidence: "陈玉华今晚不该在阴巷。",
+  evidence: "角色乙今晚不该在巷口。",
   detail: "与第 4 章电话内容冲突。",
 };
 
 describe("修复原文证据检索", () => {
   it("问题明确提到第 4 章时，即使不在最近三章也能检索到原文", () => {
     const project = detail([
-      chapter(1, "第一章：陈默进城。"),
-      chapter(2, "第二章：陈默找到住处。"),
-      chapter(3, "第三章：长夜教出现。"),
-      chapter(4, "陈玉华在省城超市收银台旁接电话，警告陈默今晚不要去阴巷。"),
-      chapter(5, "第五章：陈默收到消息。"),
-      chapter(6, "第六章：陈默前往阴巷。"),
-      chapter(7, "第七章：陈默见到陈玉华。"),
+      chapter(1, "第一章：角色甲进城。"),
+      chapter(2, "第二章：角色甲找到住处。"),
+      chapter(3, "第三章：某组织出现。"),
+      chapter(4, "角色乙在外地超市收银台旁接电话，警告角色甲今晚不要去巷口。"),
+      chapter(5, "第五章：角色甲收到消息。"),
+      chapter(6, "第六章：角色甲前往巷口。"),
+      chapter(7, "第七章：角色甲见到角色乙。"),
       chapter(8, "第八章：冲突爆发。"),
     ]);
 
@@ -66,7 +66,7 @@ describe("修复原文证据检索", () => {
     const found = evidence.snippets.find((item) => item.chapter === 4);
     expect(found).toBeTruthy();
     expect(found?.reason).toBe("问题引用章节");
-    expect(found?.snippet).toContain("陈玉华在省城超市收银台旁接电话");
+    expect(found?.snippet).toContain("角色乙在外地超市收银台旁接电话");
     expect(found?.locator).toContain("第 4 章");
     expect(evidence.text).toContain("【原文证据");
     expect(evidence.text).toContain("（原文）");
@@ -74,13 +74,13 @@ describe("修复原文证据检索", () => {
 
   it("问题未写章节时按涉及人物检索原文", () => {
     const project = detail([
-      chapter(2, "陈玉华在电话里说自己在省城。"),
-      chapter(3, "陈默独自调查。"),
+      chapter(2, "角色乙在电话里说自己在外地。"),
+      chapter(3, "角色甲独自调查。"),
       chapter(8, "本章正文。"),
     ]);
     project.characters = [
       {
-        name: "陈玉华",
+        name: "角色乙",
         role: "配角",
         gender: "女",
         age: "未知",
@@ -96,7 +96,7 @@ describe("修复原文证据检索", () => {
     const noRef: ContinuityIssue = {
       severity: "critical",
       type: "人物行为",
-      evidence: "陈玉华突然出现在阴巷。",
+      evidence: "角色乙突然出现在巷口。",
       detail: "与既有行为不符。",
     };
 
@@ -127,14 +127,14 @@ describe("修复原文证据检索", () => {
 
   it("同一人物多个事件时按事件关键词定位到正确章节", () => {
     const project = detail([
-      chapter(2, "第2章：陈玉华在省城超市收银台旁接电话。"),
-      chapter(3, "第3章：陈默独自调查。"),
-      chapter(6, "第6章：陈玉华在阴巷被长夜教的人围住。"),
+      chapter(2, "第2章：角色乙在外地超市收银台旁接电话。"),
+      chapter(3, "第3章：角色甲独自调查。"),
+      chapter(6, "第6章：角色乙在巷口被某组织的人围住。"),
       chapter(8, "本章正文。"),
     ]);
     project.characters = [
       {
-        name: "陈玉华",
+        name: "角色乙",
         role: "配角",
         gender: "女",
         age: "未知",
@@ -157,8 +157,8 @@ describe("修复原文证据检索", () => {
           name: "超市电话",
           chapter: 2,
           time: "白天",
-          location: "省城超市",
-          participants: ["陈玉华"],
+          location: "外地超市",
+          participants: ["角色乙"],
           cause: "",
           process: "",
           result: "",
@@ -170,11 +170,11 @@ describe("修复原文证据检索", () => {
         },
         {
           id: "event-2",
-          name: "阴巷对峙",
+          name: "巷口对峙",
           chapter: 6,
           time: "夜晚",
-          location: "阴巷",
-          participants: ["陈玉华"],
+          location: "巷口",
+          participants: ["角色乙"],
           cause: "",
           process: "",
           result: "",
@@ -192,7 +192,7 @@ describe("修复原文证据检索", () => {
     const eventIssue: ContinuityIssue = {
       severity: "critical",
       type: "人物行为",
-      evidence: "陈玉华在阴巷被围住。",
+      evidence: "角色乙在巷口被围住。",
       detail: "与既有事件不一致。",
     };
 
@@ -206,17 +206,17 @@ describe("修复原文证据检索", () => {
     const found = evidence.snippets.find((item) => item.chapter === 6);
     expect(found).toBeTruthy();
     expect(found?.reason).toContain("事件");
-    expect(found?.snippet).toContain("阴巷");
+    expect(found?.snippet).toContain("巷口");
   });
 
   it("超出检索上限的章节会明确记录，不静默丢弃", () => {
     const chapters = Array.from({ length: 10 }, (_, index) =>
-      chapter(index + 1, `第${index + 1}章：陈玉华说了一些话。`),
+      chapter(index + 1, `第${index + 1}章：角色乙说了一些话。`),
     );
     const project = detail(chapters);
     project.characters = [
       {
-        name: "陈玉华",
+        name: "角色乙",
         role: "配角",
         gender: "女",
         age: "未知",
@@ -232,7 +232,7 @@ describe("修复原文证据检索", () => {
     const noRef: ContinuityIssue = {
       severity: "critical",
       type: "人物行为",
-      evidence: "陈玉华突然沉默。",
+      evidence: "角色乙突然沉默。",
       detail: "与既有行为不符。",
     };
 
@@ -249,16 +249,16 @@ describe("修复原文证据检索", () => {
 
   it("原文证据与事实台账分开标注", () => {
     const project = detail([
-      chapter(4, "陈玉华在省城超市收银台旁接电话。"),
+      chapter(4, "角色乙在外地超市收银台旁接电话。"),
       chapter(8, "本章正文。"),
     ]);
     const canon: CanonFacts = {
       characters: [
         {
-          name: "陈玉华",
+          name: "角色乙",
           aliases: [],
           status: "alive",
-          location: "省城",
+          location: "外地",
           note: "",
           statusChapter: 4,
           chapter: 4,
@@ -289,7 +289,7 @@ describe("修复原文证据检索", () => {
     });
 
     expect(evidence.text).toContain("【事实台账（硬约束，不是原文摘录）】");
-    expect(evidence.text).toContain("人物状态：陈玉华");
+    expect(evidence.text).toContain("人物状态：角色乙");
     expect(evidence.text).toContain("【原文证据 1｜第 4 章");
   });
 });

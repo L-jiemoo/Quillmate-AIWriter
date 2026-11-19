@@ -242,10 +242,10 @@ async function runBodyRepair(slug: string, index = 1): Promise<Job> {
 
 describe("正文定点修复验收", () => {
   it("原问题全部解决且没有新增时写回正文", async () => {
-    const problem = criticalIssue("时间线", "陈玉华在省城超市收银台旁接电话。");
+    const problem = criticalIssue("时间线", "角色乙在外地超市收银台旁接电话。");
     const slug = await projectWithWrittenChapter(
       "正文修复通过",
-      "陈玉华在省城超市收银台旁接电话。",
+      "角色乙在外地超市收银台旁接电话。",
       [problem],
     );
     agentState.scripted = true;
@@ -267,7 +267,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("无法确认是否新增的严重问题时暂停，原文字节级不变", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复新问题", original, [problem]);
     const stored = await chapterContent(slug);
@@ -277,7 +277,7 @@ describe("正文定点修复验收", () => {
       {
         critical: [
           { type: problem.type, evidence: problem.evidence },
-          { type: "剧情因果", evidence: "陈默突然出现在石室。" },
+          { type: "剧情因果", evidence: "角色甲突然出现在石室。" },
         ],
       },
     ];
@@ -297,7 +297,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("确认的新增严重问题进入第二轮，解决后写回", async () => {
-    const original = "乙在办公室里接电话。";
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("两轮修复通过", original, [problem]);
     agentState.scripted = true;
@@ -324,7 +324,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("第二轮重新引入原始问题时拒绝写回", async () => {
-    const original = "乙在办公室里接电话。";
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("两轮重新引入", original, [problem]);
     const stored = await chapterContent(slug);
@@ -348,7 +348,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("第二轮产生新的严重问题时停止，不进第三轮", async () => {
-    const original = "乙在办公室里接电话。";
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("两轮第三问题", original, [problem]);
     const stored = await chapterContent(slug);
@@ -371,7 +371,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("误报的新增问题不阻断验收", async () => {
-    const original = "乙在办公室里接电话。";
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("误报不阻断", original, [problem]);
     agentState.scripted = true;
@@ -390,8 +390,8 @@ describe("正文定点修复验收", () => {
     expect(detail.chapters.find((item) => item.index === 1)?.content).toContain("【修复1】");
   });
 
-  it("方案级失败时停止，不在错误方案上继续打补丁", async () => {
-    const original = "乙在办公室里接电话。";
+  it("方案级失败时停止，不在错误方案上继续打补角色丁", async () => {
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("方案级失败", original, [problem]);
     const stored = await chapterContent(slug);
@@ -413,7 +413,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("回归审校只有 warning 时不阻断写回", async () => {
-    const original = "乙在办公室里接电话。";
+    const original = "角色乙在办公室里接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("回归仅警告", original, [problem]);
     agentState.scripted = true;
@@ -443,7 +443,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("原问题没有全部解决时拒绝写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复未解决", original, [problem]);
     const stored = await chapterContent(slug);
@@ -463,7 +463,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("候选稿审校失败时不覆盖原文，保存草稿并暂停", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复审校失败", original, [problem]);
     const stored = await chapterContent(slug);
@@ -482,7 +482,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("基线审校失败时不调用修复 Agent，原稿不动", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复基线失败", original, [problem]);
     const stored = await chapterContent(slug);
@@ -499,7 +499,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("删除前文关键证据来规避矛盾时，回归审校拒绝写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("伏笔连续性", original);
     const slug = await projectWithWrittenChapter("回归删除证据", original, [problem]);
     const stored = await chapterContent(slug);
@@ -533,7 +533,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("修复导致新时间线冲突时拒绝写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("回归时间线", original, [problem]);
     const stored = await chapterContent(slug);
@@ -548,7 +548,7 @@ describe("正文定点修复验收", () => {
         critical: [
           {
             type: "时间线",
-            evidence: "修复后陈玉华同时出现在省城和阴巷。",
+            evidence: "修复后角色乙同时出现在外地和巷口。",
             detail: "与第 4 章时间线冲突。",
           },
         ],
@@ -565,7 +565,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("修复改写剧情因果结构时拒绝写回", async () => {
-    const original = "陈默念出沈长庚的罪行，记录之书自动生成沈长庚页。";
+    const original = "角色甲念出角色丙的罪行，记录载体自动生成角色丙页。";
     const problem = criticalIssue("剧情因果", original);
     const slug = await projectWithWrittenChapter("回归因果改写", original, [problem]);
     const stored = await chapterContent(slug);
@@ -581,9 +581,9 @@ describe("正文定点修复验收", () => {
         causal: [
           {
             classification: "CAUSAL_CHANGE",
-            before: "陈默念罪行，书自动生成沈长庚页",
-            after: "陈默按住周坤页念罪行，书在周坤页后生成沈长庚页",
-            explanation: "新增周坤页作为中间媒介，记录对象与页面归属错位",
+            before: "角色甲念罪行，书自动生成角色丙页",
+            after: "角色甲按住角色丁页念罪行，书在角色丁页后生成角色丙页",
+            explanation: "新增角色丁页作为中间媒介，记录对象与页面归属错位",
           },
         ],
       },
@@ -600,7 +600,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("修复后因果与原文直接冲突时阻断写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("剧情因果", original);
     const slug = await projectWithWrittenChapter("回归因果冲突", original, [problem]);
     const stored = await chapterContent(slug);
@@ -616,8 +616,8 @@ describe("正文定点修复验收", () => {
         causal: [
           {
             classification: "CAUSAL_CONTRADICTION",
-            before: "陈默念罪行，记录对象是沈长庚",
-            after: "记录对象变成陈玉华",
+            before: "角色甲念罪行，记录对象是角色丙",
+            after: "记录对象变成角色乙",
             explanation: "结果指向另一个人物",
           },
         ],
@@ -633,7 +633,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("回归审校没有返回因果对比时不能写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("剧情因果", original);
     const slug = await projectWithWrittenChapter("回归因果缺失", original, [problem]);
     const stored = await chapterContent(slug);
@@ -655,7 +655,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("回归审校服务失败时不覆盖原文并暂停", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("回归审校失败", original, [problem]);
     const stored = await chapterContent(slug);
@@ -677,7 +677,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("基线审校期间暂停后不再调用修复 Agent，原文不变", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复暂停", original, [problem]);
     const stored = await chapterContent(slug);
@@ -703,9 +703,9 @@ describe("正文定点修复验收", () => {
     expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
   });
 
-  it("陈默陈玉华长夜教电话案：删除第 4 章电话证据被回归审校拒绝", async () => {
+  it("角色甲角色乙某组织电话案：删除第 4 章电话证据被回归审校拒绝", async () => {
     const original =
-      "陈玉华在省城超市收银台旁接电话，背景有收银机声音，她主动说出只有本人才知道的内情。";
+      "角色乙在外地超市收银台旁接电话，背景有收银机声音，她主动说出只有本人才知道的内情。";
     const problem = criticalIssue("伏笔连续性", original);
     const slug = await projectWithWrittenChapter("电话真相冲突", original, [problem]);
     const stored = await chapterContent(slug);
@@ -722,7 +722,7 @@ describe("正文定点修复验收", () => {
             type: "伏笔连续性",
             evidence: "修复稿删除了第 4 章的电话证据。",
             detail:
-              "后续章节声称电话是长夜教伪造的录音、陈玉华提前被带走，修复稿通过删除收银台背景音和本人内情来规避矛盾，破坏伏笔生命周期。",
+              "后续章节声称电话是某组织伪造的录音、角色乙提前被带走，修复稿通过删除收银台背景音和本人内情来规避矛盾，破坏伏笔生命周期。",
           },
         ],
       },
@@ -739,7 +739,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("回归审校发现新的死亡状态冲突时拒绝写回", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("死亡状态冲突", original, [problem]);
     const stored = await chapterContent(slug);
@@ -754,8 +754,8 @@ describe("正文定点修复验收", () => {
         critical: [
           {
             type: "人物生死状态",
-            evidence: "修复后陈玉华再次以活人身份出场。",
-            detail: "陈玉华已在第 3 章死亡，修复引入复活矛盾。",
+            evidence: "修复后角色乙再次以活人身份出场。",
+            detail: "角色乙已在第 3 章死亡，修复引入复活矛盾。",
           },
         ],
       },
@@ -771,7 +771,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("修复期间用户手改正文时哈希不一致，拒绝覆盖新内容", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("哈希冲突", original, [problem]);
     agentState.scripted = true;
@@ -804,7 +804,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("基线审校期间取消任务时原文不变且不再修复", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("取消修复", original, [problem]);
     const stored = await chapterContent(slug);
@@ -835,7 +835,7 @@ describe("正文定点修复验收", () => {
     const detail = await store.getProjectDetail(slug);
     const chapter3 = detail.plan.chapters.find((item) => item.index === 3);
     expect(chapter3).toBeTruthy();
-    const content = "第三章正文：陈默继续调查。";
+    const content = "第三章正文：角色甲继续调查。";
     await store.writeChapterFile(slug, 3, content, {
       source: "user",
       title: chapter3!.title,
@@ -843,7 +843,7 @@ describe("正文定点修复验收", () => {
     });
     const seedIssue = criticalIssue(
       "时间线",
-      "陈默继续调查。",
+      "角色甲继续调查。",
       "与第 2 章事实台账冲突。",
     );
     await store.markChapterWritten(slug, 3, "第三章摘要", reviewWith([seedIssue]));
@@ -853,7 +853,7 @@ describe("正文定点修复验收", () => {
         critical: [
           {
             type: "时间线",
-            evidence: "陈默继续调查。",
+            evidence: "角色甲继续调查。",
             detail: "与第 2 章事实台账冲突。",
           },
         ],
@@ -881,7 +881,7 @@ describe("正文定点修复验收", () => {
   });
 
   it("候选稿事实抽取失败时不覆盖原文", async () => {
-    const original = "陈玉华在省城超市收银台旁接电话。";
+    const original = "角色乙在外地超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复抽取失败", original, [problem]);
     const stored = await chapterContent(slug);

@@ -33,7 +33,7 @@ describe("审校问题分类归一化", () => {
       {
         severity: "critical",
         type: "世界观规则",
-        evidence: "陈默把执念作为独立对象押入书中。",
+        evidence: "角色甲把执念作为独立对象押入书中。",
         detail: "可能是规则拓展。",
         issueClass: "rule_extension",
       },
@@ -54,15 +54,15 @@ describe("审校问题分类归一化", () => {
       {
         severity: "critical",
         type: "时间线",
-        evidence: "陈玉华上午已被带到阴巷。",
-        detail: "与第 4 章下午在省城接电话冲突。",
+        evidence: "角色乙上午已被带到巷口。",
+        detail: "与第 4 章下午在外地接电话冲突。",
         classification: "ESTABLISHED_CONTRADICTION",
         ruleLevel: "unknown_rule",
       },
       {
         severity: "critical",
         type: "时间线",
-        evidence: "陈玉华上午已被带到阴巷。",
+        evidence: "角色乙上午已被带到巷口。",
         detail: "旧版审校记录。",
       },
     ]);
@@ -77,7 +77,7 @@ describe("审校问题分类归一化", () => {
 describe("分类与修复验收", () => {
   it("严格模式下新增规则拓展只记录，不阻断写回", () => {
     const result = evaluateRepair({
-      before: [critical("陈玉华上午被绑走。")],
+      before: [critical("角色乙上午被绑走。")],
       after: [
         {
           severity: "warning",
@@ -94,7 +94,7 @@ describe("分类与修复验收", () => {
 
   it("严格模式下新增解释不足只记录，不阻断写回", () => {
     const result = evaluateRepair({
-      before: [critical("陈玉华上午被绑走。")],
+      before: [critical("角色乙上午被绑走。")],
       after: [
         {
           severity: "warning",
@@ -111,12 +111,12 @@ describe("分类与修复验收", () => {
 
   it("新增明确矛盾或无语义类别时仍然拒绝", () => {
     const contradiction = evaluateRepair({
-      before: [critical("陈玉华上午被绑走。")],
+      before: [critical("角色乙上午被绑走。")],
       after: [
         {
           severity: "warning",
           type: "其他",
-          evidence: "陈玉华又出现在省城。",
+          evidence: "角色乙又出现在外地。",
           detail: "与已建立的时间线冲突。",
           classification: "established-contradiction",
         },
@@ -125,7 +125,7 @@ describe("分类与修复验收", () => {
     expect(contradiction.status).toBe("REJECTED_NEW_WARNING");
 
     const unclassified = evaluateRepair({
-      before: [critical("陈玉华上午被绑走。")],
+      before: [critical("角色乙上午被绑走。")],
       after: [
         {
           severity: "warning",
@@ -148,9 +148,9 @@ describe("两个真实案例的分类结果", () => {
         {
           severity: "critical",
           type: "时间线",
-          evidence: "“你姑比你早到半天。”",
+          evidence: "“你姑比你早到了半天。”",
           detail:
-            "第 4 章下午陈玉华仍在省城接电话；即使电话是伪造的，她上午已被带到阴巷仍与电话时间冲突。",
+            "第 4 章下午角色乙仍在外地接电话；即使电话是伪造的，她上午已被带到巷口仍与电话时间冲突。",
           classification: "ESTABLISHED_CONTRADICTION",
           sourceChapter: 4,
         },
@@ -165,9 +165,9 @@ describe("两个真实案例的分类结果", () => {
       {
         severity: "critical",
         type: "世界观规则",
-        evidence: "书页显示“血脉引水阵（残），已噬”。",
+        evidence: "书页显示“血脉引水阵（残），已清除”。",
         detail:
-          "既有规则只禁止活人进入书中；陈默押入的是作为独立对象的血脉执念，尚不能证明违反硬规则。",
+          "既有规则只禁止活人进入书中；角色甲押入的是作为独立对象的血脉执念，尚不能证明违反硬规则。",
         classification: "RULE_EXTENSION",
         ruleLevel: "UNKNOWN_RULE",
       },
@@ -175,7 +175,7 @@ describe("两个真实案例的分类结果", () => {
     expect(after[0].severity).toBe("warning");
 
     const result = evaluateRepair({
-      before: [critical("陈玉华上午被绑走。")],
+      before: [critical("角色乙上午被绑走。")],
       after,
     });
     expect(result.status).toBe("ACCEPTED");

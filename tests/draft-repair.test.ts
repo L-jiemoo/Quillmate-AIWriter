@@ -288,7 +288,7 @@ describe("未采用草稿修复", () => {
 
   it("严重问题没有减少但也没有增加时保留候选稿继续修复", async () => {
     const slug = await projectWithPlan("同数继续修复");
-    const content = "甲在车站等车，随后上车。";
+    const content = "角色甲在车站等车，随后上车。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     setAuditScript([
@@ -314,14 +314,14 @@ describe("未采用草稿修复", () => {
 
   it("修复后严重问题增加时拒绝新版本", async () => {
     const slug = await projectWithPlan("问题增加拒绝");
-    const content = "陈玉华在省城超市收银台旁接电话，随后关机。";
+    const content = "角色乙在外地超市收银台旁接电话，随后关机。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     setAuditScript([
       {
         critical: [
           { type: issue.type, evidence: issue.evidence },
-          { type: "剧情因果", evidence: "陈默突然出现在石室。", detail: "新增问题。" },
+          { type: "剧情因果", evidence: "角色甲突然出现在石室。", detail: "新增问题。" },
         ],
       },
     ]);
@@ -338,9 +338,9 @@ describe("未采用草稿修复", () => {
 
   it("严重问题数量没有减少时继续修复，下一轮解决后采用", async () => {
     const slug = await projectWithPlan("同数新问题继续");
-    const content = "甲在车站等车，随后上车。乙在办公室里接电话。";
-    const first = criticalIssue("时间线", "甲在车站等车。");
-    const second = criticalIssue("人物行为", "乙在办公室里接电话。");
+    const content = "角色甲在车站等车，随后上车。角色乙在办公室里接电话。";
+    const first = criticalIssue("时间线", "角色甲在车站等车。");
+    const second = criticalIssue("人物行为", "角色乙在办公室里接电话。");
     await saveDraft(slug, "write", content, {
       review: reviewWith([first, second]),
     });
@@ -348,7 +348,7 @@ describe("未采用草稿修复", () => {
       {
         critical: [
           { type: "剧情因果", evidence: "随后上车。" },
-          { type: "世界观规则", evidence: "乙在办公室里接电话。" },
+          { type: "世界观规则", evidence: "角色乙在办公室里接电话。" },
         ],
       },
       { critical: [] },
@@ -368,7 +368,7 @@ describe("未采用草稿修复", () => {
 
   it("严重问题严格减少且没有新增时采用修复稿", async () => {
     const slug = await projectWithPlan("严格减少采用");
-    const content = "陈玉华在省城超市收银台旁接电话，随后关机。";
+    const content = "角色乙在外地超市收银台旁接电话，随后关机。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     setAuditScript([{ critical: [] }]);
@@ -387,9 +387,9 @@ describe("未采用草稿修复", () => {
 
   it("最多两轮，第二轮只接收最新仍未解决的问题", async () => {
     const slug = await projectWithPlan("两轮上限");
-    const textA = "陈玉华在省城超市收银台旁接电话。";
-    const textB = "沈长庚说陈玉华早到半天。";
-    const textC = "陈默把周坤的因果转嫁给沈长庚。";
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
+    const textC = "角色甲把角色丁的因果转嫁给角色丙。";
     const content = `${textA}${textB}${textC}`;
     const issues = [
       criticalIssue("时间线", textA),
@@ -434,8 +434,8 @@ describe("未采用草稿修复", () => {
 
   it("两轮后仍失败时保留第一轮最佳版本并标记人工处理", async () => {
     const slug = await projectWithPlan("两轮失败最佳版");
-    const textA = "陈玉华在省城超市收银台旁接电话。";
-    const textB = "沈长庚说陈玉华早到半天。";
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
     const content = `${textA}${textB}`;
     const first = criticalIssue("时间线", textA);
     const second = criticalIssue("人物行为", textB);
@@ -462,7 +462,7 @@ describe("未采用草稿修复", () => {
 
   it("修复后事实抽取失败时不采用未验证文本", async () => {
     const slug = await projectWithPlan("修复后抽取失败");
-    const content = "陈玉华在省城超市收银台旁接电话，随后关机。";
+    const content = "角色乙在外地超市收银台旁接电话，随后关机。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     setAuditScript([{ critical: [] }]);
@@ -507,8 +507,8 @@ describe("未采用草稿修复", () => {
 
   it("多草稿中一份失败不会影响另一份采用和其他章节", async () => {
     const slug = await projectWithPlan("多草稿隔离");
-    const textA = "陈玉华在省城超市收银台旁接电话。";
-    const textB = "沈长庚说陈玉华早到半天。";
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
     await saveDraft(slug, "write", textA, {
       index: 1,
       review: reviewWith([criticalIssue("时间线", textA)]),
@@ -541,7 +541,7 @@ describe("未采用草稿修复", () => {
 
   it("原始草稿文件始终保留，不会被修复结果覆盖", async () => {
     const slug = await projectWithPlan("原始草稿保留");
-    const content = "陈玉华在省城超市收银台旁接电话，随后关机。";
+    const content = "角色乙在外地超市收银台旁接电话，随后关机。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     const before = await store.getRejectedDraftContent(slug, 1);
@@ -581,7 +581,7 @@ describe("未采用草稿修复", () => {
 
   it("审校服务失败时不调用修复 Agent，并保留原草稿", async () => {
     const slug = await projectWithPlan("审校失败不修复");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     agentState.failAudit = true;
 
@@ -608,7 +608,7 @@ describe("未采用草稿修复", () => {
 
   it("审校结果无法解析时按审校失败处理", async () => {
     const slug = await projectWithPlan("审校解析失败");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     agentState.failAudit = true;
     agentState.auditError = "审校结果不是合法 JSON";
@@ -627,7 +627,7 @@ describe("未采用草稿修复", () => {
 
   it("首次审校期间暂停后不再调用修复 Agent", async () => {
     const slug = await projectWithPlan("首次审校暂停");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     setAuditScript([{ critical: [] }]);
     let running: Job | undefined;
@@ -657,7 +657,7 @@ describe("未采用草稿修复", () => {
 
   it("修复期间暂停后不再进入下一轮审校或修复", async () => {
     const slug = await projectWithPlan("修复期间暂停");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     setAuditScript([
       { critical: [{ type: "时间线", evidence: content }] },
@@ -685,7 +685,7 @@ describe("未采用草稿修复", () => {
 
   it("第二轮审校期间暂停后不再发起后续模型调用", async () => {
     const slug = await projectWithPlan("第二轮审校暂停");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     setAuditScript([
       { critical: [{ type: "时间线", evidence: content }] },
@@ -716,7 +716,7 @@ describe("未采用草稿修复", () => {
     const planJob = await pipeline.startJob(slug, "plan");
     expect((await waitForJob(planJob.id)).status).toBe("done");
 
-    const ch4text = "第4章：陈玉华在省城超市收银台旁接电话，背景有收银机声音。";
+    const ch4text = "第4章：角色乙在外地超市收银台旁接电话，背景有收银机声音。";
     const detail0 = await store.getProjectDetail(slug);
     const ch4plan = detail0.plan.chapters.find((item) => item.index === 4);
     expect(ch4plan).toBeTruthy();
@@ -727,10 +727,10 @@ describe("未采用草稿修复", () => {
     });
     await store.markChapterWritten(slug, 4, "第4章摘要", reviewWith([]));
 
-    const draftText = "第5章草稿：沈长庚说陈玉华上午已被带到阴巷。";
+    const draftText = "第5章草稿：角色丙说角色乙上午已被带到巷口。";
     const issue = criticalIssue(
       "时间线",
-      "沈长庚说陈玉华上午已被带到阴巷。",
+      "角色丙说角色乙上午已被带到巷口。",
       "与第 4 章下午电话冲突。",
     );
     await saveDraft(slug, "write", draftText, {
@@ -762,7 +762,7 @@ describe("未采用草稿修复", () => {
     agentState.crossEdit = {
       chapterIndex: 4,
       originalText: ch4text,
-      replacement: "第4章：所谓电话其实是长夜教伪造的录音。",
+      replacement: "第4章：所谓电话其实是某组织伪造的录音。",
     };
 
     const job = await pipeline.startJob(slug, "repair", {
@@ -785,7 +785,7 @@ describe("未采用草稿修复", () => {
 
   it("取消任务后不再执行后续模型调用", async () => {
     const slug = await projectWithPlan("审校期间取消");
-    const content = "陈玉华在省城超市收银台旁接电话。";
+    const content = "角色乙在外地超市收银台旁接电话。";
     await saveDraft(slug, "write", content);
     setAuditScript([{ critical: [] }]);
     let running: Job | undefined;
