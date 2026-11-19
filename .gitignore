@@ -18,6 +18,8 @@ note/
 *.db
 *.db-journal
 *.tsbuildinfo
+# Next 自动生成，随本地 .next 目录变化
+next-env.d.ts
 .DS_Store
 .claude/
 BookFace/
