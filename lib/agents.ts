@@ -449,10 +449,20 @@ export async function auditRepairRegression(
   return normalizeReviewResult(data, chapter.summary);
 }
 
+export interface RepairDecisionOptionPlan {
+  label: string;
+  description: string;
+  affectedChapters: number[];
+  anchors: string[];
+}
+
 export class RepairNeedsAuthorDecisionError extends Error {
-  constructor(reason: string) {
+  readonly options: RepairDecisionOptionPlan[];
+
+  constructor(reason: string, options: RepairDecisionOptionPlan[] = []) {
     super(reason || "修复证据不足，需要作者决定");
     this.name = "RepairNeedsAuthorDecisionError";
+    this.options = options;
   }
 }
 
@@ -482,6 +492,7 @@ export interface RepairPlan {
   issuePlans: RepairPlanIssue[];
   needsAuthorDecision: boolean;
   decisionReason: string;
+  decisionOptions: RepairDecisionOptionPlan[];
 }
 
 export function normalizeRepairPlan(input: unknown): RepairPlan {
@@ -504,10 +515,29 @@ export function normalizeRepairPlan(input: unknown): RepairPlan {
       regressionScope: str(plan.regressionScope ?? plan.regression_scope).trim(),
     };
   });
+  const rawOptions = Array.isArray(record.decisionOptions)
+    ? record.decisionOptions
+    : Array.isArray(record.decision_options)
+      ? record.decision_options
+      : [];
+  const decisionOptions: RepairDecisionOptionPlan[] = rawOptions
+    .map((item) => {
+      const option = (item ?? {}) as Record<string, unknown>;
+      return {
+        label: str(option.label).trim(),
+        description: str(option.description).trim(),
+        affectedChapters: arr(option.affectedChapters ?? option.affected_chapters)
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isInteger(value) && value > 0),
+        anchors: arr(option.anchors),
+      };
+    })
+    .filter((option) => option.label && option.description);
   return {
     issuePlans,
     needsAuthorDecision: record.needsAuthorDecision === true || record.needs_author_decision === true,
     decisionReason: str(record.decisionReason ?? record.decision_reason).trim(),
+    decisionOptions,
   };
 }
 
@@ -540,7 +570,11 @@ function containsEvidence(haystack: string, needle: string): boolean {
 export function validateRepairPlan(
   plan: RepairPlan,
   issueCount: number,
-  context: { chapterText?: string; evidenceContext?: string } = {},
+  context: {
+    chapterText?: string;
+    evidenceContext?: string;
+    crossChapterText?: string;
+  } = {},
 ): void {
   if (!plan.issuePlans.length) {
     throw new RepairPlanRejectedError("修复方案没有覆盖任何问题，已拒绝修改正文");
@@ -569,22 +603,26 @@ export function validateRepairPlan(
     }
     if (context.chapterText !== undefined) {
       const chapterText = context.chapterText;
+      const crossText = context.crossChapterText ?? "";
       if (!item.evidence) {
         details.push(`问题 ${item.issueIndex} 没有引用任何原文证据`);
       } else if (
         !containsEvidence(chapterText, item.evidence) &&
+        !containsEvidence(crossText, item.evidence) &&
         !containsEvidence(originalEvidenceSection(context.evidenceContext ?? ""), item.evidence)
       ) {
         details.push(
-          `问题 ${item.issueIndex} 引用的证据只来自台账、摘要或推断，不在当前正文和原文证据中`,
+          `问题 ${item.issueIndex} 引用的证据只来自台账、摘要或推断，不在当前正文、此前章节原文或原文证据中`,
         );
       }
       const located = item.locations.some(
-        (location) => location.trim() && containsEvidence(chapterText, location),
+        (location) =>
+          location.trim() &&
+          (containsEvidence(chapterText, location) || containsEvidence(crossText, location)),
       );
       if (!located) {
         details.push(
-          `问题 ${item.issueIndex} 计划修改的位置在当前正文中不存在`,
+          `问题 ${item.issueIndex} 计划修改的位置在当前正文和授权此前章节中都不存在`,
         );
       }
     }
@@ -659,7 +697,10 @@ export async function repairChapter(
     );
     const plan = normalizeRepairPlan(planData);
     if (plan.needsAuthorDecision) {
-      throw new RepairNeedsAuthorDecisionError(plan.decisionReason);
+      throw new RepairNeedsAuthorDecisionError(
+        plan.decisionReason,
+        plan.decisionOptions,
+      );
     }
     validateRepairPlan(plan, issues.length);
     planText = formatRepairPlan(plan);
@@ -687,6 +728,7 @@ export interface RepairPatchPlanResult {
   patches: RepairPatch[];
   planText: string;
   regressionScope: string;
+  affectedChapters: number[];
 }
 
 /**
@@ -707,14 +749,22 @@ export async function repairChapterPatches(
     draftRepair?: boolean;
     evidenceContext?: string;
     twoStage?: boolean;
+    crossChapterContext?: string;
+    authorDirective?: string;
+    affectedChapters?: number[];
   } = {},
 ): Promise<RepairPatchPlanResult> {
-  if (isMock()) return { patches: [], planText: "", regressionScope: "" };
-  if (!issues.length) return { patches: [], planText: "", regressionScope: "" };
+  if (isMock()) {
+    return { patches: [], planText: "", regressionScope: "", affectedChapters: [] };
+  }
+  if (!issues.length) {
+    return { patches: [], planText: "", regressionScope: "", affectedChapters: [] };
+  }
 
   const llm = new LLMClient();
   let planText = "";
   let regressionScope = "";
+  let affectedChapters = options.affectedChapters ?? [];
   if (options.twoStage !== false) {
     const planData = await llm.json<Record<string, unknown>>(
       chapterRepairPlanMessages(
@@ -733,17 +783,31 @@ export async function repairChapterPatches(
     );
     const plan = normalizeRepairPlan(planData);
     if (plan.needsAuthorDecision) {
-      throw new RepairNeedsAuthorDecisionError(plan.decisionReason);
+      if (options.authorDirective) {
+        throw new RepairPlanRejectedError(
+          "作者已确认修复方向，但方案仍要求再次由作者决定；请按已确认方向重新制定方案",
+        );
+      }
+      throw new RepairNeedsAuthorDecisionError(plan.decisionReason, plan.decisionOptions);
     }
     validateRepairPlan(plan, issues.length, {
       chapterText,
       evidenceContext: options.evidenceContext ?? "",
+      crossChapterText: options.crossChapterContext ?? "",
     });
     planText = formatRepairPlan(plan);
     regressionScope = plan.issuePlans
       .map((item) => item.regressionScope)
       .filter(Boolean)
       .join("；");
+    const plannedChapters = plan.decisionOptions.flatMap(
+      (option) => option.affectedChapters,
+    );
+    if (plannedChapters.length) {
+      affectedChapters = [
+        ...new Set([...affectedChapters, ...plannedChapters]),
+      ];
+    }
   }
 
   const data = await llm.json<Record<string, unknown>>(
@@ -757,7 +821,7 @@ export async function repairChapterPatches(
       nextOpening,
       rewriteInstruction,
       reviewFeedback,
-      { ...options, planText },
+      { ...options, planText, affectedChapters },
     ),
     { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
   );
@@ -765,5 +829,6 @@ export async function repairChapterPatches(
     patches: normalizeRepairPatches(data),
     planText,
     regressionScope,
+    affectedChapters,
   };
 }

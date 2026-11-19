@@ -9,6 +9,7 @@ import {
   RepairPlanRejectedError,
   repairChapter,
   repairChapterPatches,
+  type RepairDecisionOptionPlan,
   writeChapter,
 } from "./agents";
 import { parseAuditReport } from "./audit";
@@ -54,12 +55,19 @@ import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
 import type { IssueComparison } from "./repair-compare";
 import { collectRepairEvidence } from "./repair-context";
 import {
-  applyRepairPatches,
+  createRepairDecision,
+  getRepairDecision,
+  confirmRepairDecision,
+} from "./repair-decision";
+import {
+  applyRepairPatchesAcross,
   describePatchBatch,
   hashText,
   RepairPatchError,
   withIssueIds,
+  type AppliedChapterBatch,
   type AppliedPatchBatch,
+  type PatchChapter,
 } from "./repair-patch";
 import { reviewSuspicions } from "./review";
 import {
@@ -949,6 +957,11 @@ interface VerifyDraftChapterInput extends VerifyChapterInput {
   seedIssues?: ContinuityIssue[];
   seedReview?: ReviewResult;
   maxRepairs?: number;
+  // 作者确认的跨章修复方向与允许修改的此前章节原文。
+  authorDirective?: string;
+  crossChapters?: Record<number, string>;
+  crossAnchors?: Record<number, string[]>;
+  crossChapterContext?: string;
 }
 
 type DraftStopReason =
@@ -976,6 +989,10 @@ interface VerifyDraftChapterResult extends VerifyChapterResult {
   finalCriticalCount: number;
   // 修复方案要求扩大回归审校时，汇总后的范围说明。
   regressionScope: string;
+  // 跨章修复后各此前章节的最新文本（仅在通过验收时使用）。
+  crossTexts: Record<number, string>;
+  decisionReason?: string;
+  decisionOptions?: RepairDecisionOptionPlan[];
 }
 
 // 草稿修复是独立流程：先修再验，最多两轮；正常写作的 verifyChapter 不变。
@@ -1032,6 +1049,9 @@ async function verifyDraftChapter(
   let extractionFailed = false;
   let needsAuthorDecision = false;
   let regressionScope = "";
+  let crossTexts: Record<number, string> = { ...(input.crossChapters ?? {}) };
+  let decisionReason: string | undefined;
+  let decisionOptions: RepairDecisionOptionPlan[] | undefined;
   let stopReason: DraftStopReason = "max-repairs";
   let initialIssues: ContinuityIssue[] = seedIssues;
   let initialCriticalCount = countCritical(seedIssues);
@@ -1064,6 +1084,9 @@ async function verifyDraftChapter(
       initialCriticalCount,
       finalCriticalCount: critical,
       regressionScope,
+      crossTexts: { ...(input.crossChapters ?? {}) },
+      decisionReason,
+      decisionOptions,
     };
   };
 
@@ -1082,6 +1105,9 @@ async function verifyDraftChapter(
           initialCriticalCount,
           finalCriticalCount,
           regressionScope,
+          crossTexts: { ...crossTexts },
+          decisionReason,
+          decisionOptions,
         }
       : fallback();
 
@@ -1143,6 +1169,7 @@ async function verifyDraftChapter(
     }
     try {
       const stagedIssues = withIssueIds(blocking);
+      const crossIndexes = Object.keys(crossTexts).map(Number);
       const plan = await repairChapterPatches(
         input.meta,
         input.chapter,
@@ -1153,15 +1180,36 @@ async function verifyDraftChapter(
         input.nextOpening,
         input.rewriteInstruction,
         "",
-        { draftRepair: true, evidenceContext },
+        {
+          draftRepair: true,
+          evidenceContext,
+          authorDirective: input.authorDirective,
+          crossChapterContext: input.crossChapterContext,
+          affectedChapters: [input.chapter.index, ...crossIndexes],
+        },
       );
-      const batch = applyRepairPatches({
-        originalText: currentText,
+      const patchChapters: PatchChapter[] = [
+        { index: input.chapter.index, text: currentText },
+        ...crossIndexes.map((index) => ({
+          index,
+          text: crossTexts[index],
+          extraAuthorizedAnchors: input.crossAnchors?.[index],
+        })),
+      ];
+      const batches = applyRepairPatchesAcross({
+        chapters: patchChapters,
+        targetIndex: input.chapter.index,
         patches: plan.patches,
         issues: stagedIssues,
       });
-      logPatchBatch(input.job, input.chapter.index, batch);
-      currentText = batch.text;
+      for (const batch of batches) {
+        logPatchBatch(input.job, batch.chapterIndex, batch);
+        if (batch.chapterIndex === input.chapter.index) {
+          currentText = batch.text;
+        } else {
+          crossTexts = { ...crossTexts, [batch.chapterIndex]: batch.text };
+        }
+      }
       if (plan.regressionScope) regressionScope = plan.regressionScope;
       repairCalls = nextRound;
       throwIfCancelled(input.job);
@@ -1170,6 +1218,8 @@ async function verifyDraftChapter(
       if (error instanceof JobCancelledError) throw error;
       if (error instanceof RepairNeedsAuthorDecisionError) {
         needsAuthorDecision = true;
+        decisionReason = error.message;
+        decisionOptions = error.options.length ? error.options : undefined;
         stopReason = "needs-author-decision";
         logJob(
           input.job,
@@ -1902,6 +1952,9 @@ async function runRepair(
   let repairedCount = 0;
   let rejectedCount = 0;
   let paused = false;
+  const decision = job.params.decisionId
+    ? await getRepairDecision(job.slug, job.params.decisionId)
+    : undefined;
 
   for (const target of targets) {
     throwIfCancelled(job);
@@ -2080,11 +2133,125 @@ async function runRepair(
       continue;
     }
 
+    const decisionOption =
+      decision &&
+      decision.chapterIndex === target.index &&
+      decision.chosenIndex !== undefined
+        ? decision.options[decision.chosenIndex]
+        : undefined;
+    if (decisionOption) {
+      logJob(
+        job,
+        `第 ${target.index} 章按作者确认方案「${decisionOption.label}」执行跨章修复。`,
+      );
+    }
+    // 只有作者已确认的方案才允许真正修改此前章节；未确认时跨章上下文只用于制定方案。
+    const crossCandidates = new Set<number>(decisionOption?.affectedChapters ?? []);
+    const crossChapters: Record<number, string> = {};
+    const crossAnchors: Record<number, string[]> = {};
+    const crossHashes = new Map<number, string>();
+    const crossBaselines = new Map<number, ContinuityIssue[]>();
+    for (const index of crossCandidates) {
+      if (index === target.index) continue;
+      const chapter = detail.chapters.find(
+        (item) => item.index === index && item.written && item.content.trim(),
+      );
+      if (!chapter) continue;
+      crossChapters[index] = chapter.content;
+      crossAnchors[index] = decisionOption?.anchors ?? [];
+      crossHashes.set(index, hashText(chapter.content));
+    }
+    if (Object.keys(crossChapters).length) {
+      logJob(
+        job,
+        `第 ${target.index} 章跨章方案涉及第 ${Object.keys(crossChapters)
+          .map(Number)
+          .join("、")} 章，先做基线审校…`,
+      );
+      let baselineFailed = false;
+      for (const index of Object.keys(crossChapters).map(Number)) {
+        const sourceChapter = detail.chapters.find((item) => item.index === index);
+        if (!sourceChapter) continue;
+        const baseline = await verifyChapter({
+          job,
+          project: detail,
+          meta: detail.meta,
+          bible: detail.bible,
+          characters: detail.characters,
+          chapter:
+            detail.plan.chapters.find((item) => item.index === index) ?? {
+              index,
+              title: sourceChapter.title,
+              summary: "",
+              keyBeats: [],
+            },
+          text: sourceChapter.content,
+          canon,
+          memory,
+          story,
+          previousEnding: "",
+          previousSummaries: [],
+          nextOpening: "",
+          nextSummary: "",
+          mode: "rewrite",
+          rewriteInstruction: "跨章修复前的基线审校。",
+          reviewFeedback: "",
+          maxRepairs: 0,
+        });
+        if (baseline.auditFailed || baseline.review.extractionOk === false) {
+          paused = true;
+          job.result = `已暂停：第 ${index} 章基线审校未完成`;
+          logJob(
+            job,
+            `第 ${index} 章跨章修复基线审校失败（不是正文问题），原正文未改动；已暂停。`,
+          );
+          baselineFailed = true;
+          break;
+        }
+        crossBaselines.set(
+          index,
+          baseline.review.issues.filter((issue) => issue.severity !== "ignore"),
+        );
+      }
+      if (baselineFailed) break;
+    }
+    // 未确认方案时也提供问题引用的此前章节原文，帮助方案阶段判断是否需要跨章修复。
+    const contextSources: Record<number, string> = { ...crossChapters };
+    if (!decisionOption) {
+      for (const issue of issues) {
+        const issueText = `${issue.evidence}\n${issue.detail}\n${issue.sourceEvidence ?? ""}`;
+        for (const match of issueText.matchAll(/第\s*(\d+)\s*章/gu)) {
+          const ref = Number.parseInt(match[1], 10);
+          if (
+            !Number.isInteger(ref) ||
+            ref <= 0 ||
+            ref >= target.index ||
+            contextSources[ref]
+          ) {
+            continue;
+          }
+          const chapter = detail.chapters.find(
+            (item) => item.index === ref && item.written && item.content.trim(),
+          );
+          if (chapter) contextSources[ref] = chapter.content.slice(0, 6000);
+        }
+      }
+    }
+    const crossChapterContext = Object.entries(contextSources)
+      .map(([index, text]) => `第 ${index} 章：\n${text.slice(0, 6000)}`)
+      .join("\n\n");
+    const authorDirective = decisionOption
+      ? `方案：${decisionOption.label}\n${decisionOption.description}\n涉及章节：第 ${decisionOption.affectedChapters.join("、")} 章\n必须保留/修改的原文锚点：\n${decisionOption.anchors
+          .map((anchor) => `- ${anchor}`)
+          .join("\n")}`
+      : undefined;
+
     // 写回前用于检测正文是否被用户在修复期间修改。
     const baselineHash = hashText(target.content);
 
     let text: string;
     let regressionScope = "";
+    let changedChapters: AppliedChapterBatch[] = [];
     try {
       const plan = await repairChapterPatches(
         detail.meta,
@@ -2096,18 +2263,65 @@ async function runRepair(
         nextOpening,
         `根据${sourceLabel}做定点修复：只修改与这些问题直接相关的段落，其余原文尽量保持不动。`,
         "",
-        { evidenceContext: evidence.text },
+        {
+          evidenceContext: evidence.text,
+          authorDirective,
+          crossChapterContext,
+          affectedChapters: [target.index, ...Object.keys(crossChapters).map(Number)],
+        },
       );
-      const batch = applyRepairPatches({
-        originalText: target.content,
+      const patchChapters: PatchChapter[] = [
+        { index: target.index, text: target.content },
+        ...Object.keys(crossChapters).map((key) => {
+          const index = Number(key);
+          return {
+            index,
+            text: crossChapters[index],
+            extraAuthorizedAnchors: crossAnchors[index],
+          };
+        }),
+      ];
+      changedChapters = applyRepairPatchesAcross({
+        chapters: patchChapters,
+        targetIndex: target.index,
         patches: plan.patches,
         issues,
       });
-      text = batch.text;
+      const targetBatch = changedChapters.find(
+        (batch) => batch.chapterIndex === target.index,
+      );
+      if (!targetBatch) {
+        throw new RepairPatchError(
+          "UNCOVERED_ISSUE",
+          "补丁没有修改目标章节，无法解决当前章节问题",
+        );
+      }
+      for (const batch of changedChapters) {
+        logPatchBatch(job, batch.chapterIndex, batch);
+      }
+      text = targetBatch.text;
       regressionScope = plan.regressionScope;
-      logPatchBatch(job, target.index, batch);
     } catch (error) {
       if (error instanceof RepairNeedsAuthorDecisionError) {
+        if (!decisionOption && error.options.length) {
+          const created = await createRepairDecision({
+            slug: job.slug,
+            chapterIndex: target.index,
+            source,
+            params: { indices: [target.index], source },
+            jobId: job.id,
+            reason: error.message,
+            issues,
+            options: error.options,
+          });
+          paused = true;
+          job.result = `第 ${target.index} 章需要作者确认修复方向`;
+          logJob(
+            job,
+            `第 ${target.index} 章冲突涉及更早章节，已生成 ${created.options.length} 个互斥修复方案等待作者确认（决策 ${created.id}）；原正文未改动。`,
+          );
+          break;
+        }
         rejectedCount += 1;
         logJob(
           job,
@@ -2221,6 +2435,99 @@ async function runRepair(
       continue;
     }
 
+    // 跨章方案修改的此前章节也必须独立审校并通过验收。
+    const changedCross = changedChapters.filter(
+      (batch) => batch.chapterIndex !== target.index,
+    );
+    const crossResults = new Map<number, VerifyChapterResult>();
+    let crossRejected = false;
+    for (const batch of changedCross) {
+      const sourceChapter = detail.chapters.find(
+        (item) => item.index === batch.chapterIndex,
+      );
+      if (!sourceChapter) continue;
+      const crossPlan =
+        detail.plan.chapters.find((item) => item.index === batch.chapterIndex) ?? {
+          index: batch.chapterIndex,
+          title: sourceChapter.title,
+          summary: "",
+          keyBeats: [],
+        };
+      logJob(
+        job,
+        `第 ${target.index} 章按方案修改了第 ${batch.chapterIndex} 章，开始独立审校…`,
+      );
+      const audited = await verifyChapter({
+        job,
+        project: detail,
+        meta: detail.meta,
+        bible: detail.bible,
+        characters: detail.characters,
+        chapter: crossPlan,
+        text: batch.text,
+        canon,
+        memory,
+        story,
+        previousEnding: "",
+        previousSummaries: [],
+        nextOpening: "",
+        nextSummary: "",
+        mode: "rewrite",
+        rewriteInstruction: "跨章根因修复后的独立审校。",
+        reviewFeedback: "",
+        maxRepairs: 0,
+        evidenceContext: evidence.text,
+      });
+      throwIfCancelled(job);
+      if (audited.auditFailed || audited.review.extractionOk === false) {
+        const draft = await saveRejectedDraft(job.slug, {
+          index: target.index,
+          content: candidateText,
+          mode: "rewrite",
+          reason: `跨章修改第 ${batch.chapterIndex} 章时审校或事实抽取失败，未采用任何修改`,
+          review: result.review,
+        });
+        paused = true;
+        job.result = `已暂停：第 ${batch.chapterIndex} 章跨章审校未完成`;
+        logJob(
+          job,
+          `第 ${batch.chapterIndex} 章跨章修改后的审校或抽取失败（不是正文问题），所有正文未改动；候选稿保存在 ${draft.path}，已暂停。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      const crossAcceptance = evaluateRepair({
+        before: crossBaselines.get(batch.chapterIndex) ?? [],
+        after: audited.review.issues,
+        characters: detail.characters,
+        extractionOk: true,
+        auditFailed: false,
+        factConflicts: audited.factConflicts,
+        allowNoBaseline: true,
+      });
+      if (!crossAcceptance.accepted) {
+        const draft = await saveRejectedDraft(job.slug, {
+          index: target.index,
+          content: candidateText,
+          mode: "rewrite",
+          reason: `跨章修改第 ${batch.chapterIndex} 章未通过验收（${crossAcceptance.status}）：${describeAcceptance(crossAcceptance)}`,
+          review: { ...result.review, issues: [...result.review.issues, ...audited.review.issues] },
+        });
+        rejectedCount += 1;
+        logJob(
+          job,
+          `第 ${batch.chapterIndex} 章跨章修改未通过验收（${crossAcceptance.status}）：${describeAcceptance(crossAcceptance)}；所有正文未改动，候选稿保存在 ${draft.path}。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      crossResults.set(batch.chapterIndex, audited);
+    }
+    if (crossRejected) {
+      if (paused) break;
+      continue;
+    }
+
     // 5) 修复后回归审校：来源章节因果、相邻章节、人物时间线和伏笔生命周期。
     logJob(job, `第 ${target.index} 章通过问题验收，执行修复后回归审校…`);
     let regression: ReviewResult;
@@ -2322,8 +2629,74 @@ async function runRepair(
       );
       continue;
     }
+    let crossHashConflict = false;
+    for (const batch of changedCross) {
+      const live = latest.chapters.find(
+        (chapter) => chapter.index === batch.chapterIndex,
+      );
+      if (hashText(live?.content ?? "") !== (crossHashes.get(batch.chapterIndex) ?? "")) {
+        const draft = await saveRejectedDraft(job.slug, {
+          index: target.index,
+          content: candidateText,
+          mode: "rewrite",
+          reason: `修复期间第 ${batch.chapterIndex} 章正文已被修改（哈希不一致），未采用跨章修改`,
+          review: result.review,
+        });
+        rejectedCount += 1;
+        crossHashConflict = true;
+        logJob(
+          job,
+          `第 ${batch.chapterIndex} 章在跨章修复期间已被修改，哈希不一致；所有正文未改动，候选稿保存在 ${draft.path}。`,
+        );
+        break;
+      }
+    }
+    if (crossHashConflict) continue;
 
     // 7) 只有通过统一验收、回归审校和哈希校验才备份并写回正式正文。
+    for (const batch of changedCross) {
+      const sourceChapter = detail.chapters.find(
+        (item) => item.index === batch.chapterIndex,
+      );
+      const audited = crossResults.get(batch.chapterIndex);
+      if (!sourceChapter || !audited) continue;
+      const crossPlan =
+        detail.plan.chapters.find((item) => item.index === batch.chapterIndex) ?? {
+          index: batch.chapterIndex,
+          title: sourceChapter.title,
+          summary: "",
+          keyBeats: [],
+        };
+      const crossBackup = await saveRepairBackup(
+        job.slug,
+        batch.chapterIndex,
+        sourceChapter.content,
+      );
+      await writeChapterFile(job.slug, batch.chapterIndex, batch.text, {
+        source: "ai-repair",
+        title: crossPlan.title,
+        summary: audited.review.summary,
+        note: "跨章根因修复（作者确认方案）",
+      });
+      repaired.set(batch.chapterIndex, batch.text);
+      await markChapterWritten(
+        job.slug,
+        batch.chapterIndex,
+        audited.review.summary,
+        audited.review,
+      );
+      await markChapterRepaired(job.slug, batch.chapterIndex);
+      markDetailChapterWritten(
+        detail,
+        batch.chapterIndex,
+        batch.text,
+        audited.review.summary,
+      );
+      logJob(
+        job,
+        `第 ${batch.chapterIndex} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${crossBackup}。`,
+      );
+    }
     const backupPath = await saveRepairBackup(job.slug, target.index, target.content);
 
     await writeChapterFile(job.slug, target.index, candidateText, {
@@ -2337,7 +2710,16 @@ async function runRepair(
     await markChapterRepaired(job.slug, target.index);
     markDetailChapterWritten(detail, target.index, candidateText, result.review.summary);
 
-    const reconciled = reconcileCanonWithChapters(result.canon, [
+    let candidateCanon = result.canon;
+    for (const batch of changedCross) {
+      const audited = crossResults.get(batch.chapterIndex);
+      if (audited) candidateCanon = audited.canon;
+    }
+    const reconciled = reconcileCanonWithChapters(candidateCanon, [
+      ...changedCross.map((batch) => ({
+        index: batch.chapterIndex,
+        content: batch.text,
+      })),
       { index: target.index, content: candidateText },
     ]);
     canon = reconciled.canon;
@@ -2348,6 +2730,19 @@ async function runRepair(
       );
     }
     await saveCanon(job.slug, canon);
+    for (const batch of changedCross) {
+      const audited = crossResults.get(batch.chapterIndex);
+      if (!audited) continue;
+      memory = await persistChapterMemory(job, detail, memory, audited.memory);
+      story = await persistChapterStory(
+        job,
+        detail,
+        memory,
+        story,
+        audited.memory,
+        audited.story,
+      );
+    }
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
     remainingCritical += countCritical(result.review.issues);
@@ -2507,6 +2902,90 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       );
     }
 
+    const decision = job.params.decisionId
+      ? await getRepairDecision(job.slug, job.params.decisionId)
+      : undefined;
+    const decisionOption =
+      decision &&
+      decision.chapterIndex === requestedDraft.index &&
+      decision.chosenIndex !== undefined
+        ? decision.options[decision.chosenIndex]
+        : undefined;
+    const crossChapters: Record<number, string> = {};
+    const crossAnchors: Record<number, string[]> = {};
+    const crossBaselines = new Map<number, ContinuityIssue[]>();
+    const crossHashes = new Map<number, string>();
+    let crossBaselineFailed = false;
+    if (decisionOption) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章按作者确认方案「${decisionOption.label}」执行跨章修复。`,
+      );
+      for (const index of decisionOption.affectedChapters) {
+        if (index === requestedDraft.index) continue;
+        const sourceChapter = detail.chapters.find(
+          (item) => item.index === index && item.written && item.content.trim(),
+        );
+        if (!sourceChapter) continue;
+        crossChapters[index] = sourceChapter.content;
+        crossAnchors[index] = decisionOption.anchors;
+        crossHashes.set(index, hashText(sourceChapter.content));
+        logJob(
+          job,
+          `第 ${requestedDraft.index} 章跨章修复前，先对第 ${index} 章做基线审校…`,
+        );
+        const baseline = await verifyChapter({
+          job,
+          project: detail,
+          meta: detail.meta,
+          bible: detail.bible,
+          characters: detail.characters,
+          chapter:
+            detail.plan.chapters.find((item) => item.index === index) ?? {
+              index,
+              title: sourceChapter.title,
+              summary: "",
+              keyBeats: [],
+            },
+          text: sourceChapter.content,
+          canon,
+          memory,
+          story,
+          previousEnding: "",
+          previousSummaries: [],
+          nextOpening: "",
+          nextSummary: "",
+          mode: "rewrite",
+          rewriteInstruction: "跨章修复前的基线审校。",
+          reviewFeedback: "",
+          maxRepairs: 0,
+        });
+        if (baseline.auditFailed || baseline.review.extractionOk === false) {
+          crossBaselineFailed = true;
+          paused = true;
+          job.result = `已暂停：第 ${index} 章基线审校未完成`;
+          logJob(
+            job,
+            `第 ${index} 章跨章修复基线审校失败（不是正文问题），原正文与草稿均未改动；已暂停。`,
+          );
+          break;
+        }
+        crossBaselines.set(
+          index,
+          baseline.review.issues.filter((issue) => issue.severity !== "ignore"),
+        );
+      }
+    }
+    if (crossBaselineFailed) break;
+    const crossChapterContext = Object.entries(crossChapters)
+      .map(([index, text]) => `第 ${index} 章：\n${text.slice(0, 6000)}`)
+      .join("\n\n");
+    const authorDirective = decisionOption
+      ? `方案：${decisionOption.label}\n${decisionOption.description}\n涉及章节：第 ${decisionOption.affectedChapters.join("、")} 章\n必须保留/修改的原文锚点：\n${decisionOption.anchors
+          .map((anchor) => `- ${anchor}`)
+          .join("\n")}`
+      : undefined;
+
     logJob(
       job,
       `开始修复第 ${requestedDraft.index} 章《${chapterPlan.title}》未采用草稿…`,
@@ -2532,6 +3011,10 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       seedIssues: canSeed ? seedFilter.active : [],
       seedReview: draft.review,
       maxRepairs: 2,
+      authorDirective,
+      crossChapters,
+      crossAnchors,
+      crossChapterContext,
     });
     throwIfCancelled(job);
     if (!result.text.trim()) {
@@ -2544,6 +3027,39 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       logJob(
         job,
         `第 ${requestedDraft.index} 章草稿修复已暂停，后续模型调用未执行；草稿与正文均未改动。`,
+      );
+      break;
+    }
+
+    // 冲突根源在更早章节时，模型给出互斥方案：保存决策并暂停，等作者确认后带 decisionId 重跑。
+    if (
+      result.needsAuthorDecision &&
+      !decisionOption &&
+      result.decisionOptions?.length
+    ) {
+      const created = await createRepairDecision({
+        slug: job.slug,
+        chapterIndex: requestedDraft.index,
+        source: "draft",
+        params: { indices: [requestedDraft.index], source: "draft" },
+        jobId: job.id,
+        reason: result.decisionReason ?? "冲突根源在更早章节，需要作者确认修复方向",
+        issues: result.initialIssues,
+        options: result.decisionOptions,
+      });
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: `需要作者确认修复方向：${created.reason}`,
+        review: result.review,
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      paused = true;
+      job.result = `第 ${requestedDraft.index} 章需要作者确认修复方向`;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章冲突涉及更早章节，已生成 ${created.options.length} 个互斥修复方案等待作者确认（决策 ${created.id}）；草稿未写入正文。`,
       );
       break;
     }
@@ -2685,6 +3201,100 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       continue;
     }
 
+    // 作者确认的跨章方案会同时修改此前章节：每个被改章节都要独立审校并通过验收。
+    const changedCross = Object.keys(crossChapters)
+      .map(Number)
+      .filter((index) => result.crossTexts[index] !== crossChapters[index]);
+    const crossResults = new Map<number, VerifyChapterResult>();
+    let crossRejected = false;
+    for (const index of changedCross) {
+      const candidateText = result.crossTexts[index];
+      const sourceChapter = detail.chapters.find((item) => item.index === index);
+      if (!sourceChapter) continue;
+      const crossPlan =
+        detail.plan.chapters.find((item) => item.index === index) ?? {
+          index,
+          title: sourceChapter.title,
+          summary: "",
+          keyBeats: [],
+        };
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章按方案修改了第 ${index} 章，开始独立审校…`,
+      );
+      const audited = await verifyChapter({
+        job,
+        project: detail,
+        meta: detail.meta,
+        bible: detail.bible,
+        characters: detail.characters,
+        chapter: crossPlan,
+        text: candidateText,
+        canon,
+        memory,
+        story,
+        previousEnding: "",
+        previousSummaries: [],
+        nextOpening: "",
+        nextSummary: "",
+        mode: "rewrite",
+        rewriteInstruction: "跨章根因修复后的独立审校。",
+        reviewFeedback: "",
+        maxRepairs: 0,
+        evidenceContext: regressionEvidence.text,
+      });
+      throwIfCancelled(job);
+      if (audited.auditFailed || audited.review.extractionOk === false) {
+        paused = true;
+        const updated = await saveRejectedDraft(job.slug, {
+          index: requestedDraft.index,
+          content: result.text,
+          mode: draft.mode,
+          reason: `跨章修改第 ${index} 章时审校或事实抽取失败，未采用任何修改`,
+          review: result.review,
+        });
+        detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+        job.result = `已暂停：第 ${index} 章跨章审校未完成`;
+        logJob(
+          job,
+          `第 ${index} 章跨章修改后的审校或抽取失败（不是正文问题），草稿与所有正文均未改动；已暂停。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      const crossAcceptance = evaluateRepair({
+        before: crossBaselines.get(index) ?? [],
+        after: audited.review.issues,
+        characters: detail.characters,
+        extractionOk: true,
+        auditFailed: false,
+        factConflicts: audited.factConflicts,
+        allowNoBaseline: true,
+      });
+      if (!crossAcceptance.accepted) {
+        const updated = await saveRejectedDraft(job.slug, {
+          index: requestedDraft.index,
+          content: result.text,
+          mode: draft.mode,
+          reason: `跨章修改第 ${index} 章未通过验收（${crossAcceptance.status}）：${describeAcceptance(crossAcceptance)}`,
+          review: { ...result.review, issues: [...result.review.issues, ...audited.review.issues] },
+        });
+        detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+        failed += 1;
+        logJob(
+          job,
+          `第 ${index} 章跨章修改未通过验收（${crossAcceptance.status}）：${describeAcceptance(crossAcceptance)}；所有正文均未改动，草稿保存在 ${updated.path}。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      crossResults.set(index, audited);
+    }
+    if (crossRejected) {
+      if (paused) break;
+      continue;
+    }
+
     // 采用前重新读取正式正文，确认修复期间没有被用户修改。
     const latest = await getProjectDetail(job.slug);
     const latestChapter = latest.chapters.find(
@@ -2706,6 +3316,56 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         `第 ${requestedDraft.index} 章修复期间正式正文已被修改，哈希不一致；未采用草稿，原正文未改动，草稿保存在 ${updated.path}。`,
       );
       continue;
+    }
+    let crossHashConflict = false;
+    for (const index of changedCross) {
+      const live = latest.chapters.find((chapter) => chapter.index === index);
+      if (hashText(live?.content ?? "") !== (crossHashes.get(index) ?? "")) {
+        const updated = await saveRejectedDraft(job.slug, {
+          index: requestedDraft.index,
+          content: result.text,
+          mode: draft.mode,
+          reason: `修复期间第 ${index} 章正文已被修改（哈希不一致），未采用跨章修改`,
+          review: result.review,
+        });
+        detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+        failed += 1;
+        crossHashConflict = true;
+        logJob(
+          job,
+          `第 ${index} 章在跨章修复期间已被修改，哈希不一致；所有正文未改动，草稿保存在 ${updated.path}。`,
+        );
+        break;
+      }
+    }
+    if (crossHashConflict) continue;
+
+    // 跨章修改先写回根因章节，再写回目标章节。
+    for (const index of changedCross) {
+      const sourceChapter = detail.chapters.find((item) => item.index === index);
+      const audited = crossResults.get(index);
+      if (!sourceChapter || !audited) continue;
+      const crossPlan =
+        detail.plan.chapters.find((item) => item.index === index) ?? {
+          index,
+          title: sourceChapter.title,
+          summary: "",
+          keyBeats: [],
+        };
+      const crossBackup = await saveRepairBackup(job.slug, index, sourceChapter.content);
+      await writeChapterFile(job.slug, index, result.crossTexts[index], {
+        source: "ai-repair",
+        title: crossPlan.title,
+        summary: audited.review.summary,
+        note: "跨章根因修复（作者确认方案）",
+      });
+      await markChapterWritten(job.slug, index, audited.review.summary, audited.review);
+      await markChapterRepaired(job.slug, index);
+      markDetailChapterWritten(detail, index, result.crossTexts[index], audited.review.summary);
+      logJob(
+        job,
+        `第 ${index} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${crossBackup}。`,
+      );
     }
 
     const wasWritten = Boolean(existing?.written && existing.content.trim());
@@ -2732,21 +3392,40 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
     );
     delete detail.state.rejectedDrafts[String(requestedDraft.index)];
 
-    if (wasWritten) {
-      const reconciled = reconcileCanonWithChapters(result.canon, [
-        { index: requestedDraft.index, content: result.text },
-      ]);
-      canon = reconciled.canon;
-      if (reconciled.changes.length) {
-        logJob(
-          job,
-          `第 ${requestedDraft.index} 章草稿采用后对账：${reconciled.changes.join("；")}`,
-        );
-      }
-    } else {
-      canon = result.canon;
+    let candidateCanon = result.canon;
+    for (const index of changedCross) {
+      const audited = crossResults.get(index);
+      if (audited) candidateCanon = audited.canon;
+    }
+    const changedContents = [
+      ...changedCross.map((index) => ({
+        index,
+        content: result.crossTexts[index],
+      })),
+      { index: requestedDraft.index, content: result.text },
+    ];
+    const reconciled = reconcileCanonWithChapters(candidateCanon, changedContents);
+    canon = reconciled.canon;
+    if (reconciled.changes.length) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章草稿采用后对账：${reconciled.changes.join("；")}`,
+      );
     }
     await saveCanon(job.slug, canon);
+    for (const index of changedCross) {
+      const audited = crossResults.get(index);
+      if (!audited) continue;
+      memory = await persistChapterMemory(job, detail, memory, audited.memory);
+      story = await persistChapterStory(
+        job,
+        detail,
+        memory,
+        story,
+        audited.memory,
+        audited.story,
+      );
+    }
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(
       job,

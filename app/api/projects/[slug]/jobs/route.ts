@@ -58,6 +58,7 @@ export async function POST(request: Request, context: RouteContext) {
       useReview?: unknown;
       source?: unknown;
       confirmPublish?: unknown;
+      decisionId?: unknown;
     }>(request);
     if (typeof body.type !== "string" || !ALLOWED.includes(body.type as Job["type"])) {
       return NextResponse.json({ error: "未知任务类型" }, { status: 400 });
@@ -106,6 +107,9 @@ export async function POST(request: Request, context: RouteContext) {
             ? "review"
             : "audit",
       ...(body.type === "fanqie-publish" ? { confirmPublish: true } : {}),
+      ...(body.type === "repair" && typeof body.decisionId === "string" && body.decisionId.trim()
+        ? { decisionId: body.decisionId.trim() }
+        : {}),
     });
     return NextResponse.json(job, { status: 202 });
   } catch (error) {

@@ -5,6 +5,8 @@ export interface RepairEdit {
   originalText: string;
   replacement: string;
   reason: string;
+  // 缺省表示目标章节；跨章修复时必须与授权章节一致。
+  chapterIndex?: number;
 }
 
 export interface RepairPatch {
@@ -14,6 +16,7 @@ export interface RepairPatch {
 
 export interface EditRecord {
   issueId: string;
+  chapterIndex: number;
   start: number;
   end: number;
   paragraph: number;
@@ -31,9 +34,20 @@ export interface AppliedPatchBatch {
   paragraphs: number[];
 }
 
+export interface AppliedChapterBatch extends AppliedPatchBatch {
+  chapterIndex: number;
+}
+
+export interface PatchChapter {
+  index: number;
+  text: string;
+  extraAuthorizedAnchors?: string[];
+}
+
 export type RepairPatchErrorCode =
   | "EMPTY_BATCH"
   | "UNKNOWN_ISSUE"
+  | "UNKNOWN_CHAPTER"
   | "UNCOVERED_ISSUE"
   | "EMPTY_EDIT"
   | "MISSING_REASON"
@@ -64,6 +78,11 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function chapterNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export function normalizeRepairPatches(input: unknown): RepairPatch[] {
   const record = (input ?? {}) as Record<string, unknown>;
   const raw = Array.isArray(record.patches) ? record.patches : [];
@@ -78,6 +97,9 @@ export function normalizeRepairPatches(input: unknown): RepairPatch[] {
           originalText: str(value.originalText ?? value.original_text),
           replacement: str(value.replacement),
           reason: str(value.reason).trim(),
+          chapterIndex: chapterNumber(
+            value.chapterIndex ?? value.chapter_index,
+          ),
         };
       }),
     };
@@ -138,7 +160,6 @@ function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
   const trimmed = anchor.trim();
   if (trimmed.length < 2) return false;
   if (paragraph.includes(trimmed)) return true;
-  // 模型引用长句时偶尔会漏掉空白或截断，退一步用紧凑文本前缀核对。
   const compactAnchor = compact(trimmed);
   if (compactAnchor.length < 4) return false;
   const compactParagraph = compact(paragraph);
@@ -147,11 +168,22 @@ function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
   return head.length >= 4 && compactParagraph.includes(head);
 }
 
+// 审校证据常用“……”把不同段落的原文拼在一起，整条证据无法在正文中命中。
+function evidenceFragments(anchor: string): string[] {
+  return anchor
+    .split(/…+|\.{3,}|⋯+/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2);
+}
+
 function authorizedParagraphs(text: string, anchors: string[]): Set<number> {
   const paragraphs = paragraphsOf(text);
+  const fragments = anchors
+    .filter(Boolean)
+    .flatMap((anchor) => [anchor, ...evidenceFragments(anchor)]);
   const allowed = new Set<number>();
   for (const paragraph of paragraphs) {
-    if (anchors.some((anchor) => anchorMatchesParagraph(anchor, paragraph.text))) {
+    if (fragments.some((fragment) => anchorMatchesParagraph(fragment, paragraph.text))) {
       allowed.add(paragraph.index);
     }
   }
@@ -171,28 +203,33 @@ function countOccurrences(text: string, needle: string): number {
 
 interface LocatedEdit {
   issueId: string;
+  chapterIndex: number;
   start: number;
   end: number;
   edit: RepairEdit;
 }
 
 /**
- * 校验并应用补丁批次。任何一项校验失败都会抛错，整个批次不应用。
- * 修改范围按“包含问题证据/原始证据的段落”授权，未授权段落一律拒绝。
+ * 校验并应用补丁批次。任何一项校验失败都会抛错，所有章节的补丁都不应用。
+ * 目标章节按“问题证据”授权段落；跨章章节只能按额外授权的锚点（作者确认的方案）修改。
  */
-export function applyRepairPatches(input: {
-  originalText: string;
+export function applyRepairPatchesAcross(input: {
+  chapters: PatchChapter[];
+  targetIndex: number;
   patches: RepairPatch[];
   issues: ContinuityIssue[];
-  extraAuthorizedAnchors?: string[];
-}): AppliedPatchBatch {
-  const { originalText, issues } = input;
+}): AppliedChapterBatch[] {
+  const chapterMap = new Map(input.chapters.map((chapter) => [chapter.index, chapter]));
+  const target = chapterMap.get(input.targetIndex);
+  if (!target) {
+    throw new RepairPatchError("UNKNOWN_CHAPTER", "目标章节正文不存在，无法应用补丁");
+  }
   if (!input.patches.length) {
     throw new RepairPatchError("EMPTY_BATCH", "修复补丁为空，已拒绝修改正文");
   }
 
   const issueById = new Map<string, ContinuityIssue>();
-  for (const issue of issues) {
+  for (const issue of input.issues) {
     const id = issue.id?.trim();
     if (!id) continue;
     issueById.set(id, issue);
@@ -200,7 +237,6 @@ export function applyRepairPatches(input: {
 
   const editedIssues = new Set<string>();
   const located: LocatedEdit[] = [];
-  const errors: string[] = [];
 
   for (const patch of input.patches) {
     const issueId = patch.issueId.trim();
@@ -211,46 +247,43 @@ export function applyRepairPatches(input: {
       );
     }
     if (!patch.edits.length) {
-      throw new RepairPatchError(
-        "EMPTY_EDIT",
-        `问题 ${issueId} 的补丁没有任何修改`,
-      );
+      throw new RepairPatchError("EMPTY_EDIT", `问题 ${issueId} 的补丁没有任何修改`);
     }
     for (const edit of patch.edits) {
-      if (!edit.originalText.trim()) {
+      const chapterIndex = edit.chapterIndex ?? input.targetIndex;
+      const chapter = chapterMap.get(chapterIndex);
+      if (!chapter) {
         throw new RepairPatchError(
-          "EMPTY_EDIT",
-          `问题 ${issueId} 的补丁缺少原文锚点`,
+          "UNKNOWN_CHAPTER",
+          `问题 ${issueId} 的补丁指向未授权章节：第 ${chapterIndex} 章`,
         );
+      }
+      if (!edit.originalText.trim()) {
+        throw new RepairPatchError("EMPTY_EDIT", `问题 ${issueId} 的补丁缺少原文锚点`);
       }
       if (!edit.reason.trim()) {
-        throw new RepairPatchError(
-          "MISSING_REASON",
-          `问题 ${issueId} 的补丁缺少修改理由`,
-        );
+        throw new RepairPatchError("MISSING_REASON", `问题 ${issueId} 的补丁缺少修改理由`);
       }
       if (edit.replacement === edit.originalText) {
-        throw new RepairPatchError(
-          "UNCHANGED_EDIT",
-          `问题 ${issueId} 的补丁没有实际修改内容`,
-        );
+        throw new RepairPatchError("UNCHANGED_EDIT", `问题 ${issueId} 的补丁没有实际修改内容`);
       }
-      const occurrences = countOccurrences(originalText, edit.originalText);
+      const occurrences = countOccurrences(chapter.text, edit.originalText);
       if (!occurrences) {
         throw new RepairPatchError(
           "ANCHOR_NOT_FOUND",
-          `问题 ${issueId} 的原文锚点在当前正文中不存在：${edit.originalText.slice(0, 40)}`,
+          `问题 ${issueId} 的原文锚点在第 ${chapterIndex} 章中不存在：${edit.originalText.slice(0, 40)}`,
         );
       }
       if (occurrences > 1) {
         throw new RepairPatchError(
           "ANCHOR_NOT_UNIQUE",
-          `问题 ${issueId} 的原文锚点在当前正文中出现 ${occurrences} 次，无法唯一匹配`,
+          `问题 ${issueId} 的原文锚点在第 ${chapterIndex} 章中出现 ${occurrences} 次，无法唯一匹配`,
         );
       }
-      const start = originalText.indexOf(edit.originalText);
+      const start = chapter.text.indexOf(edit.originalText);
       located.push({
         issueId,
+        chapterIndex,
         start,
         end: start + edit.originalText.length,
         edit,
@@ -259,54 +292,56 @@ export function applyRepairPatches(input: {
     }
   }
 
-  for (const [id] of issueById) {
-    if (!editedIssues.has(id)) {
-      errors.push(id);
-    }
-  }
-  if (errors.length) {
+  const uncovered = [...issueById.keys()].filter((id) => !editedIssues.has(id));
+  if (uncovered.length) {
     throw new RepairPatchError(
       "UNCOVERED_ISSUE",
-      `修复补丁没有覆盖全部待修问题：${errors.join("、")}`,
+      `修复补丁没有覆盖全部待修问题：${uncovered.join("、")}`,
     );
   }
 
-  const anchors = [
-    ...issues.flatMap((issue) => [
-      issue.evidence,
-      issue.sourceEvidence ?? "",
-    ]),
-    ...(input.extraAuthorizedAnchors ?? []),
-  ].filter(Boolean);
-  const allowed = authorizedParagraphs(originalText, anchors);
-  if (!allowed.size) {
-    throw new RepairPatchError(
-      "NO_AUTHORIZED_PARAGRAPH",
-      "无法从问题证据中确定授权修改区域，需要作者确认后才能修复",
-    );
+  const targetAnchors = input.issues.flatMap((issue) => [
+    issue.evidence,
+    issue.sourceEvidence ?? "",
+  ]);
+  const authorization = new Map<number, Set<number>>();
+  for (const chapter of input.chapters) {
+    const anchors =
+      chapter.index === input.targetIndex
+        ? [...targetAnchors, ...(chapter.extraAuthorizedAnchors ?? [])]
+        : [...(chapter.extraAuthorizedAnchors ?? [])];
+    authorization.set(chapter.index, authorizedParagraphs(chapter.text, anchors.filter(Boolean)));
   }
 
-  const paragraphs = paragraphsOf(originalText);
-  const paragraphOf = (position: number): Paragraph | undefined =>
-    paragraphs.find(
+  const paragraphsByChapter = new Map(
+    input.chapters.map((chapter) => [chapter.index, paragraphsOf(chapter.text)]),
+  );
+  const paragraphOf = (chapterIndex: number, position: number): Paragraph | undefined =>
+    paragraphsByChapter.get(chapterIndex)?.find(
       (paragraph) => position >= paragraph.start && position <= paragraph.end,
     );
 
   for (const item of located) {
-    const paragraph = paragraphOf(item.start);
+    const allowed = authorization.get(item.chapterIndex) ?? new Set<number>();
+    if (!allowed.size) {
+      throw new RepairPatchError(
+        "NO_AUTHORIZED_PARAGRAPH",
+        `第 ${item.chapterIndex} 章无法确定授权修改区域，需要作者确认后才能修复`,
+      );
+    }
+    const paragraph = paragraphOf(item.chapterIndex, item.start);
     if (!paragraph || !allowed.has(paragraph.index)) {
       throw new RepairPatchError(
         "UNAUTHORIZED_SCOPE",
-        `问题 ${item.issueId} 的修改落在未授权段落：${item.edit.originalText.slice(0, 40)}`,
+        `问题 ${item.issueId} 的修改落在第 ${item.chapterIndex} 章未授权段落：${item.edit.originalText.slice(0, 40)}`,
       );
     }
     if (item.end > paragraph.end) {
       throw new RepairPatchError(
         "UNAUTHORIZED_SCOPE",
-        `问题 ${item.issueId} 的修改跨越了多个段落，超出授权范围`,
+        `问题 ${item.issueId} 的修改跨越了第 ${item.chapterIndex} 章多个段落，超出授权范围`,
       );
     }
-    // 明显扩张式改写不是“最小修改”：保留一个很宽的兜底阈值，防止整段被扩写成新剧情。
     if (
       item.edit.replacement.length >
       Math.max(item.edit.originalText.length * 4, 1200)
@@ -318,47 +353,81 @@ export function applyRepairPatches(input: {
     }
   }
 
-  const sorted = [...located].sort((left, right) => left.start - right.start);
-  for (let index = 1; index < sorted.length; index += 1) {
-    if (sorted[index].start < sorted[index - 1].end) {
-      throw new RepairPatchError(
-        "OVERLAP",
-        `问题 ${sorted[index - 1].issueId} 与 ${sorted[index].issueId} 的修改区域重叠`,
-      );
+  const results: AppliedChapterBatch[] = [];
+  for (const chapter of input.chapters) {
+    const edits = located
+      .filter((item) => item.chapterIndex === chapter.index)
+      .sort((left, right) => left.start - right.start);
+    if (!edits.length) continue;
+    for (let index = 1; index < edits.length; index += 1) {
+      if (edits[index].start < edits[index - 1].end) {
+        throw new RepairPatchError(
+          "OVERLAP",
+          `第 ${chapter.index} 章中问题 ${edits[index - 1].issueId} 与 ${edits[index].issueId} 的修改区域重叠`,
+        );
+      }
     }
-  }
-
-  const records: EditRecord[] = [];
-  let text = originalText;
-  for (const item of [...sorted].sort((left, right) => right.start - left.start)) {
-    text =
-      text.slice(0, item.start) +
-      item.edit.replacement +
-      text.slice(item.end);
-    const paragraph = paragraphOf(item.start);
-    records.push({
-      issueId: item.issueId,
-      start: item.start,
-      end: item.end,
-      paragraph: paragraph?.index ?? -1,
-      originalLength: item.edit.originalText.length,
-      replacementLength: item.edit.replacement.length,
-      removed: item.edit.originalText,
-      added: item.edit.replacement,
-      reason: item.edit.reason,
+    let text = chapter.text;
+    const records: EditRecord[] = [];
+    for (const item of [...edits].sort((left, right) => right.start - left.start)) {
+      text = text.slice(0, item.start) + item.edit.replacement + text.slice(item.end);
+      const paragraph = paragraphOf(item.chapterIndex, item.start);
+      records.push({
+        issueId: item.issueId,
+        chapterIndex: item.chapterIndex,
+        start: item.start,
+        end: item.end,
+        paragraph: paragraph?.index ?? -1,
+        originalLength: item.edit.originalText.length,
+        replacementLength: item.edit.replacement.length,
+        removed: item.edit.originalText,
+        added: item.edit.replacement,
+        reason: item.edit.reason,
+      });
+    }
+    results.push({
+      chapterIndex: chapter.index,
+      text,
+      records: records.sort((left, right) => left.start - right.start),
+      changedChars: records.reduce(
+        (total, record) =>
+          total + Math.max(record.originalLength, record.replacementLength),
+        0,
+      ),
+      paragraphs: [...new Set(records.map((record) => record.paragraph))].sort(
+        (left, right) => left - right,
+      ),
     });
   }
 
+  return results;
+}
+
+export function applyRepairPatches(input: {
+  originalText: string;
+  patches: RepairPatch[];
+  issues: ContinuityIssue[];
+  extraAuthorizedAnchors?: string[];
+  chapterIndex?: number;
+}): AppliedPatchBatch {
+  const targetIndex = input.chapterIndex ?? 1;
+  const [batch] = applyRepairPatchesAcross({
+    chapters: [
+      {
+        index: targetIndex,
+        text: input.originalText,
+        extraAuthorizedAnchors: input.extraAuthorizedAnchors,
+      },
+    ],
+    targetIndex,
+    patches: input.patches,
+    issues: input.issues,
+  });
   return {
-    text,
-    records: records.sort((left, right) => left.start - right.start),
-    changedChars: records.reduce(
-      (total, record) => total + Math.max(record.originalLength, record.replacementLength),
-      0,
-    ),
-    paragraphs: [...new Set(records.map((record) => record.paragraph))].sort(
-      (left, right) => left - right,
-    ),
+    text: batch?.text ?? input.originalText,
+    records: batch?.records ?? [],
+    changedChars: batch?.changedChars ?? 0,
+    paragraphs: batch?.paragraphs ?? [],
   };
 }
 
@@ -372,7 +441,7 @@ export function formatEditRecords(records: EditRecord[]): string {
   return records
     .map(
       (record, index) =>
-        `${index + 1}. [${record.issueId}] 第 ${record.paragraph + 1} 段，${record.originalLength}→${record.replacementLength} 字：${record.reason}`,
+        `${index + 1}. [${record.issueId}] 第 ${record.chapterIndex} 章第 ${record.paragraph + 1} 段，${record.originalLength}→${record.replacementLength} 字：${record.reason}`,
     )
     .join("\n");
 }

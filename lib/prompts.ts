@@ -706,12 +706,17 @@ export function chapterRepairPlanMessages(
   nextOpening: string,
   rewriteInstruction: string,
   reviewFeedback: string,
-  options: { draftRepair?: boolean; evidenceContext?: string } = {},
+  options: {
+    draftRepair?: boolean;
+    evidenceContext?: string;
+    crossChapterContext?: string;
+    authorDirective?: string;
+  } = {},
 ): ChatMessage[] {
   return [
     {
       role: "system",
-      content: `你是中文小说修订策划编辑。当前阶段只分析问题并制定定点修复方案，不修改正文。必须依据原文证据和事实台账；证据不足时明确要求作者决定，不得编造剧情解释。${JSON_ONLY}`,
+      content: `你是中文小说修订策划编辑。当前阶段只分析问题并制定定点修复方案，不修改正文。必须依据原文证据和事实台账；证据不足时明确要求作者决定，不得编造剧情解释。若冲突根源在更早章节，不得只在当前章硬圆，应给出需要作者选择的跨章方案。${JSON_ONLY}`,
     },
     {
       role: "user",
@@ -723,7 +728,7 @@ ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考）】\n${cl
 【不可违背的事实台账】
 ${formatCanonForPrompt(canon)}
 
-${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}【上一章结尾】
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.crossChapterContext ? `【问题涉及的此前章节原文（只读参考，用于判断是否需要跨章修复）】\n${clip(options.crossChapterContext, 8000)}\n\n` : ""}${options.authorDirective ? `【作者已确认的修复方向（必须严格遵守，不得再要求作者决定）】\n${clip(options.authorDirective, 2000)}\n\n` : ""}【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
 
 ${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次修复要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文】
@@ -744,11 +749,21 @@ ${clip(chapterText, 12000)}
     }
   ],
   "needsAuthorDecision": false,
-  "decisionReason": "需要作者决定时说明缺什么证据或需要作者确认什么"
+  "decisionReason": "需要作者决定时说明缺什么证据或需要作者确认什么",
+  "decisionOptions": [
+    {
+      "label": "方案 A：一句话标题",
+      "description": "选择该方案后具体要改哪些章节、哪些事实，以及保留什么",
+      "affectedChapters": [4, 5],
+      "anchors": ["方案依赖的原文短句，必须逐字来自对应章节正文"]
+    }
+  ]
 }
 
 约束：
 - issueIndex 必须对应【需要解决的问题】的序号从 1 开始。
+- 如果冲突根源在更早章节、只改当前章必然制造新矛盾，必须把 needsAuthorDecision 设为 true，并给出 2-4 个互斥的 decisionOptions；每个方案必须写清 affectedChapters 和真实存在的 anchors。
+- 如果【作者已确认的修复方向】已给出，必须按该方向制定方案，不得再要求作者决定；affectedChapters 只能包含当前章和该方向涉及的此前章节。
 - 每个问题都必须有可执行的 strategy；没有足够证据时把 needsAuthorDecision 设为 true，不要编造。
 - evidence 必须是当前正文或给定原文证据中真实存在的短句，不能用事实台账、摘要或你的推断冒充原文。
 - locations 必须是当前正文中真实存在的段首短句或位置；找不到可定位的原文时不要臆造。
@@ -771,12 +786,22 @@ export function chapterRepairPatchMessages(
   nextOpening: string,
   rewriteInstruction: string,
   reviewFeedback: string,
-  options: { draftRepair?: boolean; evidenceContext?: string; planText?: string } = {},
+  options: {
+    draftRepair?: boolean;
+    evidenceContext?: string;
+    planText?: string;
+    crossChapterContext?: string;
+    authorDirective?: string;
+    affectedChapters?: number[];
+  } = {},
 ): ChatMessage[] {
+  const crossChapters = (options.affectedChapters ?? []).filter(
+    (index) => index !== chapter.index,
+  );
   return [
     {
       role: "system",
-      content: `你是中文小说局部修订编辑。你不能重写整章，只能针对每个已确认问题输出最小修改补丁。补丁必须锚定当前正文中真实存在且唯一的原文片段，程序会逐条校验后应用；任何一项校验失败，整批补丁都不会被采用。${JSON_ONLY}`,
+      content: `你是中文小说局部修订编辑。你不能重写整章，只能针对每个已确认问题输出最小修改补丁。补丁必须锚定对应章节中真实存在且唯一的原文片段，程序会逐条校验后应用；任何一项校验失败，整批补丁都不会被采用。${JSON_ONLY}`,
     },
     {
       role: "user",
@@ -788,7 +813,7 @@ ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问
 【不可违背的事实台账（不是原文，不得当作补丁锚点）】
 ${formatCanonForPrompt(canon)}
 
-${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}【上一章结尾】
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}${options.authorDirective ? `【作者已确认的修复方向（必须严格遵守）】\n${clip(options.authorDirective, 2000)}\n\n` : ""}${options.crossChapterContext ? `【允许修改的此前章节原文（只读锚点来源）】\n${clip(options.crossChapterContext, 8000)}\n\n` : ""}${crossChapters.length ? `【跨章修改许可】允许修改的章节：当前第 ${chapter.index} 章，以及第 ${crossChapters.join("、")} 章。其他章节一律禁止修改。\n\n` : ""}【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
 
 ${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次修复要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文（补丁锚点必须逐字来自这里）】
@@ -801,7 +826,8 @@ ${clip(chapterText, 16000)}
       "issueId": "对应的问题 ID",
       "edits": [
         {
-          "originalText": "必须逐字复制当前正文中的一个完整短句或段落，且在正文中只出现一次",
+          "chapterIndex": 5,
+          "originalText": "必须逐字复制对应章节正文中的一个完整短句或段落，且在该章中只出现一次",
           "replacement": "替换后的文本，保留原句其余部分，只改必要内容",
           "reason": "这处修改如何解决对应问题"
         }
@@ -812,7 +838,8 @@ ${clip(chapterText, 16000)}
 
 约束：
 - 每个待修问题都必须至少有一个 edit；没有把握安全修改时不要编造锚点。
-- originalText 必须逐字存在于【当前章节正文】且只出现一次；不能用台账、摘要、上一版或推断文本作为锚点。
+- chapterIndex 默认当前章 ${chapter.index}${crossChapters.length ? `；只有本次允许的第 ${crossChapters.join("、")} 章可以例外` : "；本次不允许修改其他章节"}。
+- originalText 必须逐字存在于对应 chapterIndex 的章节正文且只出现一次；不能用台账、摘要、上一版或推断文本作为锚点。
 - 只允许修改包含问题证据或方案位置的段落；不得修改未授权段落，不得顺带润色无关内容。
 - 不同 edit 的原文锚点不得重叠；同一段落内多处修改请分别给出互不重叠的锚点。
 - replacement 必须保留原段落中与问题无关的内容，不得删除关键证据来规避矛盾。

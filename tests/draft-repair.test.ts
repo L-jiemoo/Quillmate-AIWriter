@@ -20,6 +20,9 @@ const agentState = vi.hoisted(() => ({
   repairFeedback: [] as string[],
   onAudit: null as (() => void | Promise<void>) | null,
   onRepair: null as (() => void | Promise<void>) | null,
+  crossEdit: null as
+    | { chapterIndex: number; originalText: string; replacement: string }
+    | null,
 }));
 
 vi.mock("../lib/agents", async (importOriginal) => {
@@ -83,15 +86,24 @@ vi.mock("../lib/agents", async (importOriginal) => {
       return {
         patches: issues.map((issue, index) => {
           const anchor = anchorOf(issue.evidence);
+          const edits: {
+            originalText: string;
+            replacement: string;
+            reason: string;
+            chapterIndex?: number;
+          }[] = [
+            {
+              originalText: anchor,
+              replacement: `${anchor}【修复${agentState.repairCalls}】`,
+              reason: "测试修复",
+            },
+          ];
+          if (index === 0 && agentState.crossEdit) {
+            edits.push({ ...agentState.crossEdit, reason: "跨章根因修复" });
+          }
           return {
             issueId: issue.id ?? `issue-${index + 1}`,
-            edits: [
-              {
-                originalText: anchor,
-                replacement: `${anchor}【修复${agentState.repairCalls}】`,
-                reason: "测试修复",
-              },
-            ],
+            edits,
           };
         }),
         planText: "",
@@ -120,6 +132,7 @@ beforeEach(async () => {
   agentState.repairFeedback = [];
   agentState.onAudit = null;
   agentState.onRepair = null;
+  agentState.crossEdit = null;
   vi.resetModules();
   store = await import("@/lib/store");
   pipeline = await import("@/lib/pipeline");
@@ -682,6 +695,79 @@ describe("未采用草稿修复", () => {
     expect(finished.status, finished.error).toBe("paused");
     expect(agentState.auditCalls).toBe(2);
     expect(agentState.repairCalls).toBe(1);
+  });
+
+  it("作者确认跨章方案后同时修复第 4 章和第 5 章草稿", async () => {
+    const created = await store.createProject({ title: "跨章决策", targetChapters: 5 });
+    const slug = created.meta.slug;
+    const planJob = await pipeline.startJob(slug, "plan");
+    expect((await waitForJob(planJob.id)).status).toBe("done");
+
+    const ch4text = "第4章：陈玉华在省城超市收银台旁接电话，背景有收银机声音。";
+    const detail0 = await store.getProjectDetail(slug);
+    const ch4plan = detail0.plan.chapters.find((item) => item.index === 4);
+    expect(ch4plan).toBeTruthy();
+    await store.writeChapterFile(slug, 4, ch4text, {
+      source: "user",
+      title: ch4plan!.title,
+      summary: "第4章摘要",
+    });
+    await store.markChapterWritten(slug, 4, "第4章摘要", reviewWith([]));
+
+    const draftText = "第5章草稿：沈长庚说陈玉华上午已被带到阴巷。";
+    const issue = criticalIssue(
+      "时间线",
+      "沈长庚说陈玉华上午已被带到阴巷。",
+      "与第 4 章下午电话冲突。",
+    );
+    await saveDraft(slug, "write", draftText, {
+      index: 5,
+      review: reviewWith([issue]),
+    });
+
+    const decisions = await import("@/lib/repair-decision");
+    const decision = await decisions.createRepairDecision({
+      slug,
+      chapterIndex: 5,
+      source: "draft",
+      params: { indices: [5], source: "draft" },
+      jobId: "test",
+      reason: "电话真相存在互斥路径",
+      issues: [issue],
+      options: [
+        {
+          label: "B 保留上午被擒，改第 4 章电话为伪造录音",
+          description: "修改第 4 章电话来源，保留第 5 章时间线",
+          affectedChapters: [4, 5],
+          anchors: [ch4text],
+        },
+      ],
+    });
+    await decisions.confirmRepairDecision(slug, decision.id, 0);
+
+    setAuditScript([{ critical: [] }, { critical: [] }, { critical: [] }]);
+    agentState.crossEdit = {
+      chapterIndex: 4,
+      originalText: ch4text,
+      replacement: "第4章：所谓电话其实是长夜教伪造的录音。",
+    };
+
+    const job = await pipeline.startJob(slug, "repair", {
+      indices: [5],
+      source: "draft",
+      decisionId: decision.id,
+    });
+    const finished = await waitForJob(job.id);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 4)?.content).toContain(
+      "伪造的录音",
+    );
+    const chapter5 = detail.chapters.find((item) => item.index === 5);
+    expect(chapter5?.written).toBe(true);
+    expect(chapter5?.content).toContain("【修复1】");
+    expect(detail.state.rejectedDrafts["5"]).toBeUndefined();
   });
 
   it("取消任务后不再执行后续模型调用", async () => {

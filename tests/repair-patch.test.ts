@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyRepairPatches,
+  applyRepairPatchesAcross,
   hashText,
   normalizeRepairPatches,
   RepairPatchError,
@@ -129,6 +130,31 @@ describe("修复补丁应用", () => {
     ).toBe("UNAUTHORIZED_SCOPE");
   });
 
+  it("证据用省略号跨段引用时，被引用的每个段落都可修改", () => {
+    const text = [
+      "开头无关段落。",
+      "“你姑比你早到半天。”沈长庚往旁边让了让。",
+      "中间无关段落。",
+      "“你姑今天一早出门进货，我的人在批发市场后巷把她带走了。”",
+      "结尾无关段落。",
+    ].join("\n");
+    const evidence =
+      "“你姑比你早到半天。”……“你姑今天一早出门进货，我的人在批发市场后巷把她带走了。”";
+    const batch = applyRepairPatches({
+      originalText: text,
+      issues: [issue(evidence)],
+      patches: [
+        patch(
+          "issue-1",
+          "“你姑比你早到半天。”沈长庚往旁边让了让。",
+          "“你姑比你早到两个钟头。”沈长庚往旁边让了让。",
+        ),
+      ],
+    });
+    expect(batch.text).toContain("早到两个钟头");
+    expect(batch.paragraphs).toEqual([1]);
+  });
+
   it("问题证据完全不在正文时无法授权修改", () => {
     expect(
       errorCode(() =>
@@ -237,6 +263,103 @@ describe("修复补丁应用", () => {
       expect(error).toBeInstanceOf(RepairPatchError);
     }
     expect(applied).toBe("");
+  });
+});
+
+describe("跨章补丁应用", () => {
+  const targetText = "第5章：陈玉华上午已被带到阴巷。";
+  const sourceText = "第4章：陈玉华在省城超市收银台旁接电话。";
+  const crossIssue = issue("陈玉华上午已被带到阴巷。");
+
+  it("作者确认的根因章节可以同时修改，仍逐章校验差异", () => {
+    const batches = applyRepairPatchesAcross({
+      chapters: [
+        { index: 5, text: targetText },
+        { index: 4, text: sourceText, extraAuthorizedAnchors: [sourceText] },
+      ],
+      targetIndex: 5,
+      issues: [crossIssue],
+      patches: [
+        {
+          issueId: "issue-1",
+          edits: [
+            {
+              originalText: "陈玉华上午已被带到阴巷。",
+              replacement: "陈玉华下午被带到阴巷。",
+              reason: "保留第 4 章电话真实性",
+            },
+            {
+              chapterIndex: 4,
+              originalText: sourceText,
+              replacement: "第4章：电话是长夜教伪造的录音。",
+              reason: "保留第 5 章时间线",
+            },
+          ],
+        },
+      ],
+    });
+    const byChapter = new Map(batches.map((batch) => [batch.chapterIndex, batch]));
+    expect(byChapter.get(5)?.text).toContain("下午被带到阴巷");
+    expect(byChapter.get(4)?.text).toContain("伪造的录音");
+    expect(byChapter.get(4)?.records).toHaveLength(1);
+  });
+
+  it("未列入授权章节的跨章修改直接拒绝", () => {
+    expect(
+      errorCode(() =>
+        applyRepairPatchesAcross({
+          chapters: [{ index: 5, text: targetText }],
+          targetIndex: 5,
+          issues: [crossIssue],
+          patches: [
+            {
+              issueId: "issue-1",
+              edits: [
+                {
+                  chapterIndex: 4,
+                  originalText: sourceText,
+                  replacement: "新正文。",
+                  reason: "越权",
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toBe("UNKNOWN_CHAPTER");
+  });
+
+  it("根因章节没有授权锚点时不能修改", () => {
+    expect(
+      errorCode(() =>
+        applyRepairPatchesAcross({
+          chapters: [
+            { index: 5, text: targetText },
+            { index: 4, text: sourceText },
+          ],
+          targetIndex: 5,
+          issues: [crossIssue],
+          patches: [
+            {
+              issueId: "issue-1",
+              edits: [
+                {
+                  originalText: "陈玉华上午已被带到阴巷。",
+                  replacement: "陈玉华下午被带到阴巷。",
+                  reason: "目标章修复",
+                },
+                {
+                  chapterIndex: 4,
+                  originalText: sourceText,
+                  replacement: "新正文。",
+                  reason: "越权",
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toBe("NO_AUTHORIZED_PARAGRAPH");
   });
 });
 

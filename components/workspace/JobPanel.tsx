@@ -15,6 +15,18 @@ const STATUS_LABEL: Record<Job["status"], string> = {
 
 const RETRYABLE: Job["status"][] = ["error", "cancelled", "interrupted", "paused"];
 
+interface RepairDecisionView {
+  id: string;
+  chapterIndex: number;
+  reason: string;
+  params: { indices?: number[]; source?: string };
+  options: {
+    label: string;
+    description: string;
+    affectedChapters: number[];
+  }[];
+}
+
 const TYPE_LABEL: Record<Job["type"], string> = {
   plan: "生成架构",
   extend: "补充大纲",
@@ -68,7 +80,68 @@ export function JobPanel({
   const [rewriteInstruction, setRewriteInstruction] = useState("");
   const [useReview, setUseReview] = useState(false);
   const [rewriteError, setRewriteError] = useState("");
+  const [decision, setDecision] = useState<RepairDecisionView | null>(null);
+  const [decisionChoice, setDecisionChoice] = useState(0);
+  const [decisionError, setDecisionError] = useState("");
+  const [decisionDismissed, setDecisionDismissed] = useState(false);
+  const decisionIdRef = useRef<string | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
+  const slug = detail.meta.slug;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/projects/${slug}/repair-decisions`);
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          decision?: RepairDecisionView | null;
+        };
+        if (!cancelled) {
+          const next = data.decision ?? null;
+          if (next?.id !== decisionIdRef.current) {
+            decisionIdRef.current = next?.id ?? null;
+            setDecisionDismissed(false);
+            setDecisionChoice(0);
+          }
+          setDecision(next);
+        }
+      } catch {
+        // 决策接口失败不影响正常任务操作。
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, job?.status]);
+
+  async function confirmDecision() {
+    if (!decision) return;
+    setDecisionError("");
+    try {
+      const response = await fetch(`/api/projects/${slug}/repair-decisions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: decision.id, optionIndex: decisionChoice }),
+      });
+      const data = (await response.json()) as {
+        decision?: RepairDecisionView;
+        error?: string;
+      };
+      if (!response.ok || !data.decision) {
+        throw new Error(data.error ?? "确认修复方向失败");
+      }
+      setDecision(null);
+      await onStartJob("repair", {
+        indices: data.decision.params.indices ?? [data.decision.chapterIndex],
+        source: data.decision.params.source,
+        decisionId: data.decision.id,
+      });
+    } catch (error) {
+      setDecisionError(error instanceof Error ? error.message : "确认修复方向失败");
+    }
+  }
+
   const running = Boolean(job && (job.status === "queued" || job.status === "running"));
   const pending = detail.chapters.filter((chapter) => !chapter.written).length;
   const writtenIndexes = new Set(
@@ -193,6 +266,14 @@ export function JobPanel({
         </span>
       </div>
       <div className="panel-body">
+        {decision && decisionDismissed ? (
+          <button
+            className="btn btn-block"
+            onClick={() => setDecisionDismissed(false)}
+          >
+            有待确认的修复方向（第 {decision.chapterIndex} 章），点此查看
+          </button>
+        ) : null}
         <div className="job-actions">
           {running && job?.type === "repair" ? (
             <button
@@ -353,6 +434,63 @@ export function JobPanel({
         </div>
         {job?.error ? <p className="form-error">{job.error}</p> : null}
       </div>
+
+      {decision && !decisionDismissed ? (
+        <div className="repair-decision-mask" role="presentation">
+          <div
+            className="repair-decision-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="repair-decision-title"
+          >
+            <h3 id="repair-decision-title">
+              第 {decision.chapterIndex} 章需要你确认修复方向
+            </h3>
+            <p className="repair-decision-reason">{decision.reason}</p>
+            {decision.options.map((option, index) => (
+              <label
+                key={`${decision.id}-${index}`}
+                className={`repair-decision-option ${
+                  decisionChoice === index ? "selected" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="repair-decision"
+                  checked={decisionChoice === index}
+                  onChange={() => setDecisionChoice(index)}
+                  disabled={running}
+                />{" "}
+                <strong>{option.label}</strong>
+                <span>{option.description}</span>
+                {option.affectedChapters.length ? (
+                  <span className="repair-decision-chapters">
+                    涉及修改：第 {option.affectedChapters.join("、")} 章
+                  </span>
+                ) : null}
+              </label>
+            ))}
+            {decisionError ? (
+              <p className="repair-decision-error">{decisionError}</p>
+            ) : null}
+            <div className="repair-decision-actions">
+              <button
+                className="btn"
+                onClick={() => setDecisionDismissed(true)}
+              >
+                稍后处理
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => void confirmDecision()}
+                disabled={running}
+              >
+                确认并继续修复
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

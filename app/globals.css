@@ -1997,6 +1997,85 @@ select {
   background: var(--line);
 }
 
+/* 修复方向确认：用独立弹窗，避免挤在侧栏小字号提示里看不清。 */
+.repair-decision-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(20, 18, 15, 0.55);
+}
+
+.repair-decision-dialog {
+  width: min(620px, 100%);
+  max-height: 82vh;
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 10px);
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.repair-decision-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.repair-decision-reason {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--cinnabar);
+  background: rgba(207, 114, 87, 0.08);
+  font-size: 13.5px;
+}
+
+.repair-decision-option {
+  display: block;
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.repair-decision-option.selected {
+  border-color: var(--cinnabar);
+  background: rgba(207, 114, 87, 0.07);
+}
+
+.repair-decision-option strong {
+  font-size: 14px;
+}
+
+.repair-decision-chapters {
+  display: block;
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+.repair-decision-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.repair-decision-error {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

@@ -36,7 +36,12 @@ function planIssue(overrides: Partial<RepairPlanIssue> = {}): RepairPlanIssue {
 }
 
 function plan(...issues: RepairPlanIssue[]): RepairPlan {
-  return { issuePlans: issues, needsAuthorDecision: false, decisionReason: "" };
+  return {
+    issuePlans: issues,
+    needsAuthorDecision: false,
+    decisionReason: "",
+    decisionOptions: [],
+  };
 }
 
 function rejectionMessage(fn: () => void): string {
@@ -75,7 +80,7 @@ describe("修复方案证据校验", () => {
         { chapterText, evidenceContext },
       ),
     );
-    expect(message).toContain("不在当前正文和原文证据中");
+    expect(message).toContain("不在当前正文");
   });
 
   it("证据来自检索到的原文证据时通过", () => {

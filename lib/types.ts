@@ -608,6 +608,8 @@ export interface JobParams {
   source?: "audit" | "review" | "draft";
   // 番茄发布是有外部副作用的操作，必须由发起端显式确认。
   confirmPublish?: boolean;
+  // 作者已确认的修复方向；带该 ID 重跑才允许跨章修改根因章节。
+  decisionId?: string;
 }
 
 export type JobStatus =
