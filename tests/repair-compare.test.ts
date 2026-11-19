@@ -462,12 +462,13 @@ describe("全严重度严格验收", () => {
     expect(result.status).toBe("REJECTED_NEW_WARNING");
   });
 
-  it("严格模式下新增表达建议类 warning 也拒绝自动写回", () => {
+  it("严格模式下表达建议类 warning 只记录，不阻断写回", () => {
     const result = evaluateRepair({
       before: [issue("时间线", "陈玉华上午被绑走。")],
       after: [warningIssue("表达建议", "这句话可以更简洁。")],
     });
-    expect(result.status).toBe("REJECTED_NEW_WARNING");
+    expect(result.status).toBe("ACCEPTED");
+    expect(result.leftovers.join("")).toContain("表达建议");
   });
 
   it("标准模式只拒绝新增事实类 warning，并记录表达建议", () => {

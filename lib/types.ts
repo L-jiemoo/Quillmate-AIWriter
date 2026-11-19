@@ -407,6 +407,10 @@ export interface ContinuityIssue {
     | "foreshadow"
     | "causality"
     | "other";
+  // 审校模型对问题性质的判断：明确矛盾 / 规则拓展 / 解释不足。
+  classification?: "established-contradiction" | "rule-extension" | "clarity-gap";
+  // 涉及世界观规则时，该规则的可信级别；人物自己的判断不等于客观规则。
+  ruleLevel?: "hard" | "soft" | "unknown" | "character-belief";
   fingerprint?: string;
 }
 

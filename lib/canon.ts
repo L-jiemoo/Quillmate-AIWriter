@@ -510,6 +510,45 @@ function isConflictCategory(
   return CONFLICT_CATEGORIES.has(value);
 }
 
+const ISSUE_CLASSIFICATIONS: Record<
+  string,
+  NonNullable<ContinuityIssue["classification"]>
+> = {
+  establishedcontradiction: "established-contradiction",
+  contradiction: "established-contradiction",
+  ruleextension: "rule-extension",
+  extension: "rule-extension",
+  claritygap: "clarity-gap",
+  clarity: "clarity-gap",
+};
+
+const RULE_LEVELS: Record<string, NonNullable<ContinuityIssue["ruleLevel"]>> = {
+  hard: "hard",
+  hardrule: "hard",
+  soft: "soft",
+  softrule: "soft",
+  unknown: "unknown",
+  unknownrule: "unknown",
+  characterbelief: "character-belief",
+  belief: "character-belief",
+};
+
+function normalizeKey(value: unknown): string {
+  return str(value).trim().toLowerCase().replace(/[^a-z]/gu, "");
+}
+
+export function normalizeIssueClassification(
+  value: unknown,
+): ContinuityIssue["classification"] | undefined {
+  return ISSUE_CLASSIFICATIONS[normalizeKey(value)];
+}
+
+export function normalizeRuleLevel(
+  value: unknown,
+): ContinuityIssue["ruleLevel"] | undefined {
+  return RULE_LEVELS[normalizeKey(value)];
+}
+
 function parseOptionalChapter(value: unknown): number | undefined {
   const parsed =
     typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
@@ -578,12 +617,29 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
         const conflictCategory = isConflictCategory(rawCategory)
           ? rawCategory
           : undefined;
+        const classification = normalizeIssueClassification(
+          record.classification ?? record.issueClass ?? record.issue_class,
+        );
+        const ruleLevel = normalizeRuleLevel(
+          record.ruleLevel ?? record.rule_level,
+        );
         if (id) issue.id = id;
         if (fingerprint) issue.fingerprint = fingerprint;
         if (sourceEvidence) issue.sourceEvidence = sourceEvidence;
         if (sourceChapter !== undefined) issue.sourceChapter = sourceChapter;
         if (affectedCharacters.length) issue.affectedCharacters = affectedCharacters;
         if (conflictCategory) issue.conflictCategory = conflictCategory;
+        if (classification) {
+          issue.classification = classification;
+          // 规则拓展和解释不足默认不能判 critical；旧数据没有分类，维持原判定。
+          if (
+            classification !== "established-contradiction" &&
+            issue.severity === "critical"
+          ) {
+            issue.severity = "warning";
+          }
+        }
+        if (ruleLevel) issue.ruleLevel = ruleLevel;
       }
     }
     if (!issue || isDiscardableIssue(issue)) continue;

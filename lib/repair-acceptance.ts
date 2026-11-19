@@ -79,6 +79,17 @@ function isFactIssue(issue: ContinuityIssue): boolean {
   return classifyIssue(issue) === "fact";
 }
 
+// 规则拓展、解释不足和表达建议只记录，不作为剧情矛盾阻断写回。
+function isRecordOnlyWarning(issue: ContinuityIssue): boolean {
+  if (
+    issue.classification === "rule-extension" ||
+    issue.classification === "clarity-gap"
+  ) {
+    return true;
+  }
+  return classifyIssue(issue) === "expression";
+}
+
 /**
  * 统一修复验收：只有原有严重问题全部解决、没有新增不允许的问题、没有破坏既定事实，
  * 且事实抽取和审校都成功时，才允许把候选稿写入正式正文。
@@ -162,9 +173,11 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
     return fail("NEEDS_AUTHOR_DECISION");
   }
   const newWarnings = warningComparison.added;
-  const blockingWarnings = strict
-    ? newWarnings
-    : newWarnings.filter((issue) => classifyIssue(issue) === "fact");
+  const blockingWarnings = newWarnings.filter((issue) =>
+    strict
+      ? !isRecordOnlyWarning(issue)
+      : classifyIssue(issue) === "fact" && !isRecordOnlyWarning(issue),
+  );
   if (blockingWarnings.length) {
     reasons.push(
       `修复引入了 ${blockingWarnings.length} 个新的警告级问题：${blockingWarnings
@@ -176,9 +189,29 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
   const recordedWarnings = newWarnings.filter(
     (issue) => !blockingWarnings.includes(issue),
   );
-  if (recordedWarnings.length) {
+  const ruleExtensions = recordedWarnings.filter(
+    (issue) => issue.classification === "rule-extension",
+  );
+  const clarityGaps = recordedWarnings.filter(
+    (issue) => issue.classification === "clarity-gap",
+  );
+  const expressions = recordedWarnings.filter(
+    (issue) =>
+      !ruleExtensions.includes(issue) && !clarityGaps.includes(issue),
+  );
+  if (ruleExtensions.length) {
     leftovers.push(
-      `新增 ${recordedWarnings.length} 条表达建议类 warning（已记录，不作为剧情矛盾）。`,
+      `新增 ${ruleExtensions.length} 条待确认的世界观规则拓展（已记录，不阻断写回）。`,
+    );
+  }
+  if (clarityGaps.length) {
+    leftovers.push(
+      `新增 ${clarityGaps.length} 条解释不足建议（已记录，不阻断写回）。`,
+    );
+  }
+  if (expressions.length) {
+    leftovers.push(
+      `新增 ${expressions.length} 条表达建议类 warning（已记录，不作为剧情矛盾）。`,
     );
   }
   if (warningComparison.remaining.length) {

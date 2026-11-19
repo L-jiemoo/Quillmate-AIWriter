@@ -6,6 +6,7 @@ import {
   characterMessages,
   extendMessages,
   factExtractorMessages,
+  repairRegressionMessages,
   titleRepairMessages,
   writerMessages,
 } from "@/lib/prompts";
@@ -89,6 +90,57 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("人物做出意外选择");
     expect(text).toContain("不要要求每章都必须有冲突、反转或悬念");
     expect(text).toContain("warning：存在疑点，但仍有合理解释空间");
+  });
+
+  it("审校提示词要求区分明确矛盾、规则拓展与解释不足", () => {
+    const detail = reviewProject();
+    const text = join(
+      auditMessages(
+        detail.meta,
+        detail.canon,
+        detail.characters,
+        detail.plan.chapters[3],
+        "张三进入密室。",
+        "",
+        [],
+        "",
+        "",
+      ),
+    );
+
+    expect(text).toContain("ESTABLISHED_CONTRADICTION");
+    expect(text).toContain("RULE_EXTENSION");
+    expect(text).toContain("CLARITY_GAP");
+    expect(text).toContain("HARD_RULE");
+    expect(text).toContain("SOFT_RULE");
+    expect(text).toContain("UNKNOWN_RULE");
+    expect(text).toContain("CHARACTER_BELIEF");
+    expect(text).toContain("冲突双方的原文证据");
+    expect(text).toContain("以前没有出现过");
+    expect(text).toContain("人物说出的判断不能自动当作客观世界观规则");
+    expect(text).toContain("即使后文解释电话是伪造的");
+    expect(text).toContain("承载物与被收纳对象");
+  });
+
+  it("回归审校提示词沿用分类规则，避免把规则拓展判成严重矛盾", () => {
+    const detail = reviewProject();
+    const text = join(
+      repairRegressionMessages(
+        detail.meta,
+        detail.plan.chapters[3],
+        "张三进入密室。",
+        "张三走进密室，发现旧字。",
+        "",
+        detail.canon,
+        detail.characters,
+        "",
+        "",
+      ),
+    );
+
+    expect(text).toContain("RULE_EXTENSION");
+    expect(text).toContain("CLARITY_GAP");
+    expect(text).toContain("不得为了回归通过而判 critical");
   });
 
   it("修复提示词要求局部修改且不得改台账既定剧情", () => {

@@ -521,7 +521,9 @@ ${clip(chapterText, 16000)}
       "sourceChapter": 4,
       "sourceEvidence": "被冲突的前文原文短句（能定位时填写）",
       "affectedCharacters": ["涉及人物名"],
-      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other"
+      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other",
+      "classification": "ESTABLISHED_CONTRADICTION | RULE_EXTENSION | CLARITY_GAP",
+      "ruleLevel": "涉及世界观规则时填 HARD_RULE | SOFT_RULE | UNKNOWN_RULE | CHARACTER_BELIEF，否则省略"
     }
   ],
   "continuityOk": true
@@ -560,7 +562,23 @@ ${clip(chapterText, 16000)}
 - 不允许为了通过审校而建议修改既定事实、台账或后文设定；如果正文与既定事实冲突，应指出正文需要修改，而不是让台账迁就正文。
 - 自动检查线索只是待核实提示：核对后确认是回忆、尸体、幻象、遗物或他人转述的，不要输出这一条，也不要在 issues 里写“机械检查误报 / 不构成复活 / 不属问题 / 应标为 ignore”这类说明。
 - issues 只保留确实需要作者修改的问题；确认不是问题就直接不输出，不要为了解释误报而保留空问题，也不要为了凑问题把可忽略项标成 warning。
-- continuityOk 只有在没有任何 critical 时才为 true。`,
+- continuityOk 只有在没有任何 critical 时才为 true。
+
+问题分类（每条问题必须标注 classification）：
+- ESTABLISHED_CONTRADICTION：与正文明确建立的事实、人物状态、时间线或不可违反的硬规则冲突，且当前文本没有合理解释。只有这一类可以判 critical。
+- RULE_EXTENSION：出现此前未明确建立的能力、现象或规则，可能拓展规则边界，但尚不能证明直接违反硬规则。默认 warning，不得判 critical；应说明与哪些既有规则存在潜在张力，以及新规则可以如何成立。
+- CLARITY_GAP：剧情逻辑可能成立，但关键过程、术语或机制没有向读者交代。默认 warning 或 ignore，不阻止写回，不得为了消除它强制重写剧情。
+- 没有出现过某种能力，不等于这种能力不可能存在。只有新内容直接否定已有明确规则时，才按矛盾处理。
+- critical 必须写全：冲突双方的原文证据、具体章节、已建立的规则或事实、当前文本违反规则的具体方式、为何无法通过合理解释兼容。只能证明存在疑问时不得判 critical。
+- 禁止仅凭“以前没有出现过”“与常见设定不同”判定严重问题。
+
+世界观规则分级（涉及规则冲突时填写 ruleLevel）：
+- HARD_RULE 明确不可违反；SOFT_RULE 是常见规律、允许例外；UNKNOWN_RULE 尚未明确；CHARACTER_BELIEF 只是人物自身相信的判断。
+- 人物说出的判断不能自动当作客观世界观规则，必须核对规则来源、上下文和可信程度。
+
+针对性判断：
+- 时间线冲突必须核对冲突时刻人物的实际位置与可达性。即使后文解释电话是伪造的，也不能自动消除“人物在异地或已被控制”的时间矛盾。
+- 区分承载物与被收纳对象：既有规则只禁止活人进入某物时，不能直接推断活人的执念/残念不能作为独立对象被收纳；状态词（如“已噬”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。`,
     },
   ];
 }
@@ -671,7 +689,9 @@ ${clip(repairedText, 16000)}
       "detail": "与第几章/哪条事实冲突，为什么修复后反而不成立",
       "sourceChapter": 4,
       "affectedCharacters": ["涉及人物名"],
-      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other"
+      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other",
+      "classification": "ESTABLISHED_CONTRADICTION | RULE_EXTENSION | CLARITY_GAP",
+      "ruleLevel": "涉及世界观规则时填 HARD_RULE | SOFT_RULE | UNKNOWN_RULE | CHARACTER_BELIEF，否则省略"
     }
   ],
   "continuityOk": true
@@ -690,6 +710,7 @@ ${clip(repairedText, 16000)}
 10. 是否通过删除或改写原文证据来规避矛盾。
 11. 是否修改了问题授权范围之外的段落，或顺带润色无关内容。
 12. 是否与上一章结尾、下一章开头或来源章节产生新的冲突。
+问题分类规则与章节审校相同：只有 ESTABLISHED_CONTRADICTION 才能判 critical；RULE_EXTENSION 和 CLARITY_GAP 按 warning 记录，不得为了回归通过而判 critical；“以前没出现”“与常见设定不同”不构成 critical 证据。
 只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。修复范围之外发现的历史问题不要当作本次修复引入的新问题。`,
     },
   ];
