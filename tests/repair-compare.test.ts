@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { evaluateRepair } from "@/lib/repair-acceptance";
 import {
   compareCriticalIssues,
   filterSeedIssues,
@@ -188,17 +189,24 @@ describe("草稿修复问题对比", () => {
     expect(result.added).toHaveLength(1);
   });
 
-  it("只有严重问题严格减少且没有新增时才接受新版本", () => {
+  it("问题数量减少但仍有原问题未解决时只能算改善，不能验收通过", () => {
     const first = issue("时间线", "陈玉华上午被绑走。");
     const second = issue("人物行为", "陈玉华电话里撒谎。");
-    const accepted = compareCriticalIssues([first, second], [first]);
-    expect(accepted.accepted).toBe(true);
+    const improved = compareCriticalIssues([first, second], [first]);
+    expect(improved.improved).toBe(true);
+    expect(improved.accepted).toBe(false);
+    expect(improved.remaining).toHaveLength(1);
+
+    const resolved = compareCriticalIssues([first, second], []);
+    expect(resolved.accepted).toBe(true);
+    expect(resolved.improved).toBe(true);
 
     const sameCount = compareCriticalIssues(
       [first, second],
       [issue("剧情因果", "陈默突然出现在石室。"), issue("世界观规则", "因果可以转嫁。")],
     );
     expect(sameCount.accepted).toBe(false);
+    expect(sameCount.improved).toBe(false);
     expect(sameCount.added).toHaveLength(2);
   });
 
@@ -224,5 +232,168 @@ describe("旧审校问题过期过滤", () => {
     expect(normalizeIssueText("第 4 章：陈玉华，接电话。")).toBe(
       "第4章陈玉华接电话",
     );
+  });
+});
+
+describe("结构化问题字段", () => {
+  it("来源章节不同的问题不能合并", () => {
+    const before = [
+      {
+        ...issue("剧情因果", "电话内容对不上。", "前后电话内容冲突。"),
+        sourceChapter: 4,
+      },
+    ];
+    const after = [
+      {
+        ...issue("剧情因果", "电话内容对不上。", "前后电话内容冲突。"),
+        sourceChapter: 6,
+      },
+    ];
+    const result = compareCriticalIssues(before, after);
+    expect(result.remaining).toHaveLength(0);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("冲突类别不同的问题不能合并", () => {
+    const before = [
+      {
+        ...issue("剧情因果", "同一时间出现在两地。"),
+        conflictCategory: "timeline" as const,
+      },
+    ];
+    const after = [
+      {
+        ...issue("剧情因果", "同一时间出现在两地。"),
+        conflictCategory: "foreshadow" as const,
+      },
+    ];
+    const result = compareCriticalIssues(before, after);
+    expect(result.remaining).toHaveLength(0);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("受影响人物没有交集时不能合并", () => {
+    const before = [
+      {
+        ...issue("人物行为", "身份暴露。"),
+        affectedCharacters: ["陈默"],
+      },
+    ];
+    const after = [
+      {
+        ...issue("人物行为", "身份暴露。"),
+        affectedCharacters: ["陈玉华"],
+      },
+    ];
+    const result = compareCriticalIssues(before, after);
+    expect(result.remaining).toHaveLength(0);
+    expect(result.added).toHaveLength(1);
+  });
+
+  it("相同指纹且类型一致时视为同一问题", () => {
+    const before = [
+      { ...issue("时间线", "前后日期矛盾。"), fingerprint: "timeline-4-chen" },
+    ];
+    const after = [
+      { ...issue("时间线", "日期先后对不上。"), fingerprint: "timeline-4-chen" },
+    ];
+    const result = compareCriticalIssues(before, after);
+    expect(result.remaining).toHaveLength(1);
+    expect(result.added).toHaveLength(0);
+  });
+});
+
+describe("统一修复验收", () => {
+  it("原问题全部解决且没有新增时通过", () => {
+    const before = [issue("时间线", "陈玉华上午被绑走。")];
+    const result = evaluateRepair({ before, after: [] });
+    expect(result.status).toBe("ACCEPTED");
+    expect(result.accepted).toBe(true);
+  });
+
+  it("原问题仍有残留时拒绝", () => {
+    const problem = issue("时间线", "陈玉华上午被绑走。");
+    const result = evaluateRepair({
+      before: [problem, issue("人物行为", "陈玉华电话里撒谎。")],
+      after: [problem],
+    });
+    expect(result.status).toBe("REJECTED_UNRESOLVED");
+    expect(result.comparison.remaining).toHaveLength(1);
+  });
+
+  it("修复引入新严重问题时拒绝", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [
+        issue("时间线", "陈玉华上午被绑走。"),
+        issue("剧情因果", "陈默突然出现在石室。", "与第 8 章冲突。"),
+      ],
+    });
+    expect(result.status).toBe("REJECTED_NEW_CRITICAL");
+    expect(result.comparison.added).toHaveLength(1);
+  });
+
+  it("破坏既定事实时拒绝", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [],
+      factConflicts: [
+        {
+          severity: "critical",
+          type: "死亡状态",
+          evidence: "陈玉华再次出现",
+          detail: "已在第 3 章死亡",
+          conflictCategory: "character-status",
+        },
+      ],
+    });
+    expect(result.status).toBe("REJECTED_FACT_CONFLICT");
+  });
+
+  it("审校或抽取失败时拒绝", () => {
+    const before = [issue("时间线", "陈玉华上午被绑走。")];
+    expect(evaluateRepair({ before, after: [], auditFailed: true }).status).toBe(
+      "VERIFY_FAILED",
+    );
+    expect(
+      evaluateRepair({ before, after: [], extractionOk: false }).status,
+    ).toBe("VERIFY_FAILED");
+  });
+
+  it("证据不足需要作者决定时拒绝自动采用", () => {
+    const result = evaluateRepair({
+      before: [issue("时间线", "陈玉华上午被绑走。")],
+      after: [],
+      needsAuthorDecision: true,
+    });
+    expect(result.status).toBe("NEEDS_AUTHOR_DECISION");
+  });
+
+  it("匹配存在歧义时保守拒绝", () => {
+    const text = "陈玉华在省城超市收银台旁接电话。";
+    const result = evaluateRepair({
+      before: [issue("时间线", text)],
+      after: [issue("时间线", text, "与第 4 章事实冲突。")],
+      characters: [character("陈玉华")],
+    });
+    // 单个精确匹配不构成歧义；但同一问题仍出现在审校结果里，说明未解决。
+    expect(result.comparison.ambiguous).toBe(false);
+    expect(result.status).toBe("REJECTED_UNRESOLVED");
+
+    const ambiguous = evaluateRepair({
+      before: [
+        issue("时间线", "陈玉华在省城超市收银台旁接电话。"),
+        issue("时间线", "陈玉华在省城超市收银台旁边接听电话。"),
+      ],
+      after: [issue("时间线", "陈玉华在省城超市收银台旁接电话。")],
+      characters: [character("陈玉华")],
+    });
+    expect(ambiguous.accepted).toBe(false);
+    expect(ambiguous.status).toBe("REJECTED_UNRESOLVED");
+  });
+
+  it("只有建议类修复目标时允许没有严重问题基线", () => {
+    const result = evaluateRepair({ before: [], after: [], allowNoBaseline: true });
+    expect(result.status).toBe("ACCEPTED");
   });
 });

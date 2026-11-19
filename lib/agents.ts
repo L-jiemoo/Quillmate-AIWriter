@@ -15,6 +15,8 @@ import {
   architectMessages,
   auditMessages,
   chapterRepairMessages,
+  chapterRepairPlanMessages,
+  repairRegressionMessages,
   characterMessages,
   extendMessages,
   factExtractorMessages,
@@ -380,6 +382,7 @@ export async function auditChapter(
   suspicions: ContinuityIssue[],
   nextContext: string,
   storyContext: string,
+  evidenceContext = "",
 ): Promise<ReviewResult> {
   if (isMock()) return mockReview(chapter);
 
@@ -395,10 +398,133 @@ export async function auditChapter(
       suspicions,
       nextContext,
       storyContext,
+      evidenceContext,
     ),
     { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
   return normalizeReviewResult(data, chapter.summary);
+}
+
+export async function auditRepairRegression(
+  meta: ProjectMeta,
+  canon: CanonFacts,
+  characters: Character[],
+  chapter: ChapterPlan,
+  originalText: string,
+  repairedText: string,
+  evidenceContext: string,
+  previousEnding: string,
+  nextOpening: string,
+): Promise<ReviewResult> {
+  if (isMock()) {
+    return {
+      summary: chapter.summary,
+      issues: [],
+      continuityOk: true,
+      extractionOk: true,
+    };
+  }
+  const llm = new LLMClient();
+  const data = await llm.json<Record<string, unknown>>(
+    repairRegressionMessages(
+      meta,
+      chapter,
+      originalText,
+      repairedText,
+      evidenceContext,
+      canon,
+      characters,
+      previousEnding,
+      nextOpening,
+    ),
+    { temperature: 0.1, agent: "auditor", chapter: chapter.index },
+  );
+  return normalizeReviewResult(data, chapter.summary);
+}
+
+export class RepairNeedsAuthorDecisionError extends Error {
+  constructor(reason: string) {
+    super(reason || "修复证据不足，需要作者决定");
+    this.name = "RepairNeedsAuthorDecisionError";
+  }
+}
+
+interface RepairPlanIssue {
+  issueIndex: number;
+  rootCause: string;
+  evidence: string;
+  locations: string[];
+  strategy: string;
+  affectedFacts: string[];
+  sideEffects: string;
+}
+
+interface RepairPlan {
+  issuePlans: RepairPlanIssue[];
+  needsAuthorDecision: boolean;
+  decisionReason: string;
+}
+
+function normalizeRepairPlan(input: unknown): RepairPlan {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const rawPlans = Array.isArray(record.issuePlans) ? record.issuePlans : [];
+  const issuePlans: RepairPlanIssue[] = rawPlans.map((item) => {
+    const plan = (item ?? {}) as Record<string, unknown>;
+    return {
+      issueIndex: Number.parseInt(String(plan.issueIndex ?? plan.issue_index ?? ""), 10),
+      rootCause: str(plan.rootCause ?? plan.root_cause).trim(),
+      evidence: str(plan.evidence).trim(),
+      locations: arr(plan.locations),
+      strategy: str(plan.strategy).trim(),
+      affectedFacts: arr(plan.affectedFacts ?? plan.affected_facts),
+      sideEffects: str(plan.sideEffects ?? plan.side_effects).trim(),
+    };
+  });
+  return {
+    issuePlans,
+    needsAuthorDecision: record.needsAuthorDecision === true || record.needs_author_decision === true,
+    decisionReason: str(record.decisionReason ?? record.decision_reason).trim(),
+  };
+}
+
+function validateRepairPlan(plan: RepairPlan, issueCount: number): void {
+  if (!plan.issuePlans.length) {
+    throw new Error("修复方案没有覆盖任何问题，已拒绝修改正文");
+  }
+  const covered = new Set<number>();
+  for (const item of plan.issuePlans) {
+    if (
+      !Number.isInteger(item.issueIndex) ||
+      item.issueIndex < 1 ||
+      item.issueIndex > issueCount
+    ) {
+      throw new Error(`修复方案引用了不存在的问题编号：${String(item.issueIndex)}`);
+    }
+    if (!item.strategy) {
+      throw new Error(`问题 ${item.issueIndex} 的修复方案缺少可执行策略`);
+    }
+    covered.add(item.issueIndex);
+  }
+  for (let index = 1; index <= issueCount; index += 1) {
+    if (!covered.has(index)) {
+      throw new Error(`修复方案遗漏了问题 ${index}，已拒绝修改正文`);
+    }
+  }
+}
+
+function formatRepairPlan(plan: RepairPlan): string {
+  return plan.issuePlans
+    .map(
+      (item) =>
+        `问题 ${item.issueIndex}：
+- 根本原因：${item.rootCause || "未说明"}
+- 证据：${item.evidence || "未说明"}
+- 计划修改位置：${item.locations.join("；") || "未说明"}
+- 修改策略：${item.strategy}
+- 受影响事实：${item.affectedFacts.join("；") || "未说明"}
+- 潜在副作用：${item.sideEffects || "未说明"}`,
+    )
+    .join("\n\n");
 }
 
 export async function repairChapter(
@@ -411,11 +537,42 @@ export async function repairChapter(
   nextOpening: string,
   rewriteInstruction: string,
   reviewFeedback: string,
-  options: { draftRepair?: boolean } = {},
+  options: {
+    draftRepair?: boolean;
+    evidenceContext?: string;
+    twoStage?: boolean;
+  } = {},
 ): Promise<string> {
   if (isMock()) return chapterText;
+  if (!issues.length) return chapterText;
 
   const llm = new LLMClient();
+  let planText = "";
+  // 两阶段：先出方案并做约束检查，方案通过后才允许改正文。
+  if (options.twoStage !== false) {
+    const planData = await llm.json<Record<string, unknown>>(
+      chapterRepairPlanMessages(
+        meta,
+        chapter,
+        chapterText,
+        issues,
+        canon,
+        previousEnding,
+        nextOpening,
+        rewriteInstruction,
+        reviewFeedback,
+        options,
+      ),
+      { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+    );
+    const plan = normalizeRepairPlan(planData);
+    if (plan.needsAuthorDecision) {
+      throw new RepairNeedsAuthorDecisionError(plan.decisionReason);
+    }
+    validateRepairPlan(plan, issues.length);
+    planText = formatRepairPlan(plan);
+  }
+
   const raw = await llm.chat(
     chapterRepairMessages(
       meta,
@@ -427,7 +584,7 @@ export async function repairChapter(
       nextOpening,
       rewriteInstruction,
       reviewFeedback,
-      options,
+      { ...options, planText },
     ),
     { temperature: 0.2, agent: "repair-editor", chapter: chapter.index },
   );

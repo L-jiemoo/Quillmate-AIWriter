@@ -1,9 +1,11 @@
 import {
   auditChapter,
+  auditRepairRegression,
   extendPlan,
   extractChapterFacts,
   generateCharacters,
   generatePlan,
+  RepairNeedsAuthorDecisionError,
   repairChapter,
   writeChapter,
 } from "./agents";
@@ -45,8 +47,10 @@ import {
 import { promptVersionInfo } from "./prompt-store";
 import { findPublishEntry } from "./publish-ledger";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
+import { describeAcceptance, evaluateRepair } from "./repair-acceptance";
 import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
 import type { IssueComparison } from "./repair-compare";
+import { collectRepairEvidence } from "./repair-context";
 import { reviewSuspicions } from "./review";
 import {
   applyChapterStory,
@@ -579,6 +583,10 @@ interface VerifyChapterInput {
   mode: "write" | "rewrite";
   rewriteInstruction: string;
   reviewFeedback: string;
+  // 定点修复需要“只审校不自动修”的基线检查时设为 0。
+  maxRepairs?: number;
+  // 候选稿审校时复用修复前检索到的原文证据。
+  evidenceContext?: string;
 }
 
 interface VerifyChapterResult {
@@ -590,6 +598,10 @@ interface VerifyChapterResult {
   auditFailed?: boolean;
   memory?: ChapterMemory;
   story?: ExtractedStory;
+  // 本轮审校发现的既定事实冲突（死亡状态、物品归属、时间线、伏笔等）。
+  factConflicts?: ContinuityIssue[];
+  // Repair Agent 证据不足，要求作者决定。
+  needsAuthorDecision?: boolean;
 }
 
 async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterResult> {
@@ -625,8 +637,10 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
 
   let currentText = input.text;
   let best: VerifyChapterResult | null = null;
+  let needsAuthorDecision = false;
+  let evidenceContext = input.evidenceContext ?? "";
   // 严重问题最多修三轮；只有 critical 会触发修复，warning 留给人工参考。
-  const maxRepairs = 3;
+  const maxRepairs = Math.max(0, Math.min(3, input.maxRepairs ?? 3));
 
   // 每一轮都基于“本章写作前的事实台账”重新检查。
   // 不能把本章自己抽取到的事实先并进去，否则“吴副官复活”会被自己的抽取结果掩盖。
@@ -711,6 +725,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         checks.suspicions,
         nextContext,
         storyContext,
+        evidenceContext,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -764,6 +779,9 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
     // 普通自动线索只作为审校提示；数据级严重矛盾（如伏笔先回收后埋设）强制保留。
     const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
+    const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
+      (issue) => issue.severity === "critical",
+    );
     const critical = countCritical(issues);
     const review: ReviewResult = {
       summary: extracted.summary || audit.summary || input.chapter.summary,
@@ -793,6 +811,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         passed: review.continuityOk,
         memory,
         story: extracted.story,
+        factConflicts,
       };
     }
 
@@ -810,6 +829,14 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
       input.job,
       `第 ${input.chapter.index} 章发现 ${critical} 个严重连续性问题，尝试定点修复（第 ${attempt + 1} 轮）…`,
     );
+    evidenceContext = collectRepairEvidence({
+      project: input.project,
+      chapter: input.chapter,
+      issues: blocking,
+      characters: input.characters,
+      canon: auditCanon,
+      story: input.story,
+    }).text;
     try {
       const repaired = await repairChapter(
         input.meta,
@@ -821,37 +848,48 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         input.nextOpening,
         input.rewriteInstruction,
         input.reviewFeedback,
+        { evidenceContext },
       );
       if (!repaired.trim()) throw new Error("修复返回空正文");
       currentText = repaired;
     } catch (error) {
+      if (error instanceof RepairNeedsAuthorDecisionError) {
+        needsAuthorDecision = true;
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章修复证据不足，需要作者决定，未修改正文：${error.message}`,
+        );
+        break;
+      }
       logJob(input.job, `第 ${input.chapter.index} 章定点修复失败：${errorMessage(error)}`);
       break;
     }
   }
 
-  return (
-    best ?? {
-      text: currentText,
-      review: {
-        summary: input.chapter.summary,
-        issues: [
-          {
-            severity: "critical",
-            type: "审校失败",
-            evidence: "",
-            detail: "连续性检查未完成",
-          },
-        ],
-        continuityOk: false,
-        repaired: false,
-        repairAttempts: 0,
-      },
-      canon: input.canon,
-      passed: false,
-      story: undefined,
-    }
-  );
+  if (best) {
+    return needsAuthorDecision ? { ...best, needsAuthorDecision } : best;
+  }
+  return {
+    text: currentText,
+    review: {
+      summary: input.chapter.summary,
+      issues: [
+        {
+          severity: "critical",
+          type: "审校失败",
+          evidence: "",
+          detail: "连续性检查未完成",
+        },
+      ],
+      continuityOk: false,
+      repaired: false,
+      repairAttempts: 0,
+    },
+    canon: input.canon,
+    passed: false,
+    story: undefined,
+    needsAuthorDecision,
+  };
 }
 
 interface VerifyDraftChapterInput extends VerifyChapterInput {
@@ -869,6 +907,7 @@ type DraftStopReason =
   | "repair-failed"
   | "extraction-failed"
   | "audit-failed"
+  | "needs-author-decision"
   | "paused";
 
 interface VerifyDraftChapterResult extends VerifyChapterResult {
@@ -877,6 +916,8 @@ interface VerifyDraftChapterResult extends VerifyChapterResult {
   comparison?: IssueComparison;
   stopReason: DraftStopReason;
   seedStatus: "used" | "fallback";
+  // 修复前的严重问题基线，用于统一验收。
+  initialIssues: ContinuityIssue[];
   initialCriticalCount: number;
   finalCriticalCount: number;
 }
@@ -920,10 +961,22 @@ async function verifyDraftChapter(
   const maxAudits = seedStatus === "used" ? maxRepairs : maxRepairs + 1;
   let currentText = input.text;
   let best: VerifyChapterResult | null = null;
+  let evidenceContext = seedIssues.length
+    ? collectRepairEvidence({
+        project: input.project,
+        chapter: input.chapter,
+        issues: seedIssues,
+        characters: input.characters,
+        canon: auditCanon,
+        story: input.story,
+      }).text
+    : input.evidenceContext ?? "";
   let comparison: IssueComparison | undefined;
   let repairCalls = 0;
   let extractionFailed = false;
+  let needsAuthorDecision = false;
   let stopReason: DraftStopReason = "max-repairs";
+  let initialIssues: ContinuityIssue[] = seedIssues;
   let initialCriticalCount = countCritical(seedIssues);
   let finalCriticalCount = initialCriticalCount;
 
@@ -946,9 +999,11 @@ async function verifyDraftChapter(
       auditFailed: false,
       repairCalls,
       extractionFailed,
+      needsAuthorDecision,
       comparison,
       stopReason,
       seedStatus,
+      initialIssues,
       initialCriticalCount,
       finalCriticalCount: critical,
     };
@@ -961,9 +1016,11 @@ async function verifyDraftChapter(
           auditFailed: false,
           repairCalls,
           extractionFailed,
+          needsAuthorDecision,
           comparison,
           stopReason,
           seedStatus,
+          initialIssues,
           initialCriticalCount,
           finalCriticalCount,
         }
@@ -1000,6 +1057,14 @@ async function verifyDraftChapter(
         `第 ${input.chapter.index} 章基于最新审校问题尝试定点修复（第 ${nextRound} 轮）…`,
       );
     }
+    evidenceContext = collectRepairEvidence({
+      project: input.project,
+      chapter: input.chapter,
+      issues: blocking,
+      characters: input.characters,
+      canon: auditCanon,
+      story: input.story,
+    }).text;
     try {
       const repaired = await repairChapter(
         input.meta,
@@ -1011,7 +1076,7 @@ async function verifyDraftChapter(
         input.nextOpening,
         input.rewriteInstruction,
         "",
-        { draftRepair: true },
+        { draftRepair: true, evidenceContext },
       );
       if (!repaired.trim()) throw new Error("修复返回空正文");
       currentText = repaired;
@@ -1020,6 +1085,15 @@ async function verifyDraftChapter(
       return true;
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
+      if (error instanceof RepairNeedsAuthorDecisionError) {
+        needsAuthorDecision = true;
+        stopReason = "needs-author-decision";
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章修复证据不足，需要作者决定：${error.message}`,
+        );
+        return false;
+      }
       logJob(
         input.job,
         `第 ${input.chapter.index} 章定点修复失败：${errorMessage(error)}`,
@@ -1111,6 +1185,7 @@ async function verifyDraftChapter(
         checks.suspicions,
         nextContext,
         storyContext,
+        evidenceContext,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -1140,6 +1215,9 @@ async function verifyDraftChapter(
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
     const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
+    const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
+      (issue) => issue.severity === "critical",
+    );
     const critical = countCritical(issues);
     const review: ReviewResult = {
       summary: extracted.summary || audit.summary || input.chapter.summary,
@@ -1163,10 +1241,12 @@ async function verifyDraftChapter(
       passed: review.continuityOk,
       memory,
       story: extracted.story,
+      factConflicts,
     };
 
     if (!best && seedStatus === "fallback") {
       best = candidate;
+      initialIssues = issues;
       initialCriticalCount = critical;
       finalCriticalCount = critical;
       if (review.continuityOk) {
@@ -1200,7 +1280,7 @@ async function verifyDraftChapter(
         );
         return finish();
       }
-      if (!comparison.accepted) {
+      if (!comparison.improved) {
         stopReason =
           comparison.afterCount > comparison.beforeCount
             ? "increased"
@@ -1244,7 +1324,7 @@ async function verifyDraftChapter(
       );
       return finish();
     }
-    if (!comparison.accepted) {
+    if (!comparison.improved) {
       stopReason =
         comparison.afterCount > comparison.beforeCount
           ? "increased"
@@ -1368,26 +1448,31 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
       ).length;
       const extractionFailed = result.review.extractionOk === false;
       const auditFailed = result.auditFailed === true;
+      const decisionRequired = result.needsAuthorDecision === true;
       const draft = await saveRejectedDraft(job.slug, {
         index: chapter.index,
         content: text,
         mode: "write",
-        reason: auditFailed
-          ? "连续性审校服务失败，未能确认正文质量"
-          : extractionFailed
-            ? "事实抽取失败，未进入审校"
-            : `连续性检查未通过：${critical} 个严重问题`,
+        reason: decisionRequired
+          ? "自动修复证据不足，需要作者决定"
+          : auditFailed
+            ? "连续性审校服务失败，未能确认正文质量"
+            : extractionFailed
+              ? "事实抽取失败，未进入审校"
+              : `连续性检查未通过：${critical} 个严重问题`,
         review: result.review,
       });
       paused = true;
       job.result = `第 ${chapter.index} 章未写入正文，草稿已保存`;
       logJob(
         job,
-        auditFailed
-          ? `第 ${chapter.index} 章连续性审校服务失败（不是正文问题），未触发修复也未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请检查模型配置后重试。`
-          : extractionFailed
-            ? `第 ${chapter.index} 章事实抽取失败，未写入正文；草稿保存在 ${draft.path}，原有台账未改动。后续自动写作已暂停，请检查模型配置后重试。`
-            : `第 ${chapter.index} 章仍有 ${critical} 个严重连续性问题，未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请人工处理后再继续。`,
+        decisionRequired
+          ? `第 ${chapter.index} 章自动修复证据不足，需要作者决定，未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停。`
+          : auditFailed
+            ? `第 ${chapter.index} 章连续性审校服务失败（不是正文问题），未触发修复也未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请检查模型配置后重试。`
+            : extractionFailed
+              ? `第 ${chapter.index} 章事实抽取失败，未写入正文；草稿保存在 ${draft.path}，原有台账未改动。后续自动写作已暂停，请检查模型配置后重试。`
+              : `第 ${chapter.index} 章仍有 ${critical} 个严重连续性问题，未写入正文；草稿保存在 ${draft.path}。后续自动写作已暂停，请人工处理后再继续。`,
       );
       break;
     }
@@ -1589,26 +1674,31 @@ async function runRewrite(
       ).length;
       const extractionFailed = result.review.extractionOk === false;
       const auditFailed = result.auditFailed === true;
+      const decisionRequired = result.needsAuthorDecision === true;
       const draft = await saveRejectedDraft(job.slug, {
         index: target.index,
         content: text,
         mode: "rewrite",
-        reason: auditFailed
-          ? "连续性审校服务失败，未能确认重写稿质量"
-          : extractionFailed
-            ? "事实抽取失败，未进入审校"
-            : `重写未通过连续性检查：${critical} 个严重问题`,
+        reason: decisionRequired
+          ? "自动修复证据不足，需要作者决定"
+          : auditFailed
+            ? "连续性审校服务失败，未能确认重写稿质量"
+            : extractionFailed
+              ? "事实抽取失败，未进入审校"
+              : `重写未通过连续性检查：${critical} 个严重问题`,
         review: result.review,
       });
       paused = true;
       job.result = `第 ${target.index} 章重写未通过，原稿保留`;
       logJob(
         job,
-        auditFailed
-          ? `第 ${target.index} 章连续性审校服务失败（不是正文问题），未触发修复也未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请检查模型配置后重试。`
-          : extractionFailed
-            ? `第 ${target.index} 章事实抽取失败，未覆盖原稿；草稿保存在 ${draft.path}，原有台账未改动。重写已暂停，请检查模型配置后重试。`
-            : `第 ${target.index} 章重写仍有 ${critical} 个严重连续性问题，未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请人工处理后再继续。`,
+        decisionRequired
+          ? `第 ${target.index} 章自动修复证据不足，需要作者决定，未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停。`
+          : auditFailed
+            ? `第 ${target.index} 章连续性审校服务失败（不是正文问题），未触发修复也未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请检查模型配置后重试。`
+            : extractionFailed
+              ? `第 ${target.index} 章事实抽取失败，未覆盖原稿；草稿保存在 ${draft.path}，原有台账未改动。重写已暂停，请检查模型配置后重试。`
+              : `第 ${target.index} 章重写仍有 ${critical} 个严重连续性问题，未覆盖原稿；草稿保存在 ${draft.path}。重写已暂停，请人工处理后再继续。`,
       );
       break;
     }
@@ -1716,6 +1806,7 @@ async function runRepair(
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let remainingCritical = 0;
   let repairedCount = 0;
+  let rejectedCount = 0;
   let paused = false;
 
   for (const target of targets) {
@@ -1782,8 +1873,64 @@ async function runRepair(
       .map((index) => detail.state.summaries[String(index)])
       .filter((item): item is string => Boolean(item));
 
-    // 一章可能有多条问题；严重优先，最多一次修 20 条，避免提示词过长。
-    const issues = [...fixable]
+    const sourceLabel = source === "audit" ? "总体审校记录" : "章节审校遗留问题";
+
+    // 1) 基线审校：先确认原正文当前真实存在的问题，不能直接相信旧报告。
+    logJob(job, `第 ${target.index} 章先对原正文做基线审校，确认真正需要修复的问题…`);
+    const baseline = await verifyChapter({
+      job,
+      project: detail,
+      meta: detail.meta,
+      bible: detail.bible,
+      characters: detail.characters,
+      chapter: chapterPlan,
+      text: target.content,
+      canon,
+      memory,
+      story,
+      previousEnding,
+      previousSummaries: priorSummaries.slice(-2),
+      nextOpening,
+      nextSummary,
+      mode: "rewrite",
+      rewriteInstruction: `根据${sourceLabel}做定点修复。`,
+      reviewFeedback: "",
+      maxRepairs: 0,
+    });
+    throwIfCancelled(job);
+    if (isPauseRequested(job)) {
+      paused = true;
+      job.result = `已暂停：第 ${target.index} 章未开始修复，原稿未改动`;
+      logJob(
+        job,
+        `第 ${target.index} 章基线审校后任务已暂停，未生成候选稿，原正文保持不变。`,
+      );
+      break;
+    }
+    if (baseline.auditFailed || baseline.review.extractionOk === false) {
+      paused = true;
+      job.result = `第 ${target.index} 章基线审校未完成，原稿未改动`;
+      logJob(
+        job,
+        `第 ${target.index} 章基线审校或事实抽取失败（不是正文问题），无法确认问题是否真实存在；原稿保持不变，已暂停。`,
+      );
+      break;
+    }
+    const beforeCritical = baseline.review.issues.filter(
+      (issue) => issue.severity === "critical",
+    );
+    const hasSourceCritical = fixable.some((issue) => issue.severity === "critical");
+    if (!beforeCritical.length && hasSourceCritical) {
+      logJob(
+        job,
+        `第 ${target.index} 章基线审校未复现来源记录中的严重问题，为避免按过期意见改稿，原稿保持不变，跳过本章。`,
+      );
+      continue;
+    }
+    const allowNoBaseline = beforeCritical.length === 0;
+
+    // 2) 生成候选稿：严重问题优先，最多一次处理 20 条，避免提示词过长。
+    const issues = mergeIssues(beforeCritical, fixable)
       .sort((a, b) =>
         a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1,
       )
@@ -1791,17 +1938,34 @@ async function runRepair(
     const critical = issues.filter((issue) => issue.severity === "critical").length;
     const warnings = issues.length - critical;
     const ignored = sourceIssues.length - fixable.length;
-    const sourceLabel = source === "audit" ? "总体审校记录" : "章节审校遗留问题";
     const ignoredNote = ignored ? `，另有 ${ignored} 条可忽略不处理` : "";
     const cappedNote =
-      fixable.length > issues.length
-        ? `，可修复问题共 ${fixable.length} 条，先处理前 ${issues.length} 条`
+      issues.length < mergeIssues(beforeCritical, fixable).length
+        ? "，问题较多时先处理严重项"
         : "";
 
     logJob(
       job,
       `开始定点修复第 ${target.index} 章《${target.title}》…（${critical} 严重 / ${warnings} 建议${ignoredNote}${cappedNote}）`,
     );
+
+    // 按问题检索相关章节原文，修复与独立审校共用同一份证据。
+    const evidence = collectRepairEvidence({
+      project: detail,
+      chapter: chapterPlan,
+      issues,
+      characters: detail.characters,
+      canon: canonForChapter(canon, target.index),
+      story,
+    });
+    if (evidence.snippets.length) {
+      logJob(
+        job,
+        `第 ${target.index} 章检索到 ${evidence.snippets.length} 段相关原文证据（第 ${evidence.snippets
+          .map((item) => item.chapter)
+          .join("、")} 章）。`,
+      );
+    }
 
     let text: string;
     try {
@@ -1815,13 +1979,23 @@ async function runRepair(
         nextOpening,
         `根据${sourceLabel}做定点修复：只修改与这些问题直接相关的段落，其余原文尽量保持不动。`,
         "",
+        { evidenceContext: evidence.text },
       );
     } catch (error) {
+      if (error instanceof RepairNeedsAuthorDecisionError) {
+        rejectedCount += 1;
+        logJob(
+          job,
+          `第 ${target.index} 章修复证据不足，需要作者决定；未生成候选稿，原正文保持不变：${error.message}`,
+        );
+        continue;
+      }
       throw new Error(`第 ${target.index} 章定点修复调用失败：${errorMessage(error)}`);
     }
     if (!text.trim()) throw new Error(`第 ${target.index} 章定点修复返回空正文`);
 
-    logJob(job, `第 ${target.index} 章修复稿完成，开始重新抽取事实并审校…`);
+    // 3) 独立审校候选稿：只审校，不再自动续修，确保写回的正是被验收的文本。
+    logJob(job, `第 ${target.index} 章候选稿完成，开始独立审校…`);
     const result = await verifyChapter({
       job,
       project: detail,
@@ -1840,45 +2014,173 @@ async function runRepair(
       mode: "rewrite",
       rewriteInstruction: `根据${sourceLabel}做定点修复。`,
       reviewFeedback: "",
+      maxRepairs: 0,
+      evidenceContext: evidence.text,
     });
     throwIfCancelled(job);
-    text = result.text;
+    const candidateText = result.text;
 
-    // 审校服务失败时修复稿未经检查：保存为草稿，不覆盖原正文。
-    if (result.auditFailed) {
+    if (isPauseRequested(job)) {
       const draft = await saveRejectedDraft(job.slug, {
         index: target.index,
-        content: text,
+        content: candidateText,
         mode: "rewrite",
-        reason: "连续性审校服务失败，修复稿未经审校，未覆盖原稿",
+        reason: "候选稿审校完成后任务暂停，未写入正文",
+        review: result.review,
+      });
+      paused = true;
+      job.result = `已暂停：第 ${target.index} 章候选稿保存在草稿`;
+      logJob(
+        job,
+        `第 ${target.index} 章候选稿审校后任务已暂停，候选稿保存在 ${draft.path}，原正文未改动。`,
+      );
+      break;
+    }
+
+    // 审校或抽取失败时无法验收：保存候选稿，原正文保持不变。
+    if (result.auditFailed || result.review.extractionOk === false) {
+      const reason = result.auditFailed
+        ? "连续性审校服务失败，修复稿未经审校，未覆盖原稿"
+        : "事实抽取失败，无法确认修复稿是否破坏既定事实，未覆盖原稿";
+      const draft = await saveRejectedDraft(job.slug, {
+        index: target.index,
+        content: candidateText,
+        mode: "rewrite",
+        reason,
         review: result.review,
       });
       paused = true;
       job.result = `第 ${target.index} 章修复稿未覆盖原稿，草稿已保存`;
       logJob(
         job,
-        `第 ${target.index} 章连续性审校服务失败（不是正文问题），未继续修复也未覆盖原稿；修复稿保存在 ${draft.path}。修复已暂停，请检查模型配置后重试。`,
+        `第 ${target.index} 章${result.auditFailed ? "连续性审校服务失败" : "事实抽取失败"}（不是正文问题），修复稿未通过验收也未覆盖原稿；候选稿保存在 ${draft.path}。修复已暂停，请检查模型配置后重试。`,
       );
       break;
     }
 
-    // 定点修复的目标就是正文本身：先备份原稿，再把修复稿写回章节。
-    // 检查仍有遗留问题时也写回，问题会进入章节审校记录，供继续处理。
+    // 4) 统一验收：原问题全部解决、无新增严重问题、事实未被破坏。
+    const acceptance = evaluateRepair({
+      before: beforeCritical,
+      after: result.review.issues,
+      characters: detail.characters,
+      extractionOk: true,
+      auditFailed: false,
+      factConflicts: result.factConflicts,
+      allowNoBaseline,
+    });
+
+    if (!acceptance.accepted) {
+      const draft = await saveRejectedDraft(job.slug, {
+        index: target.index,
+        content: candidateText,
+        mode: "rewrite",
+        reason: `定点修复未通过验收（${acceptance.status}）：${describeAcceptance(acceptance)}`,
+        review: result.review,
+      });
+      rejectedCount += 1;
+      logJob(
+        job,
+        `第 ${target.index} 章定点修复未通过验收（${acceptance.status}）：${describeAcceptance(acceptance)}；原正文保持不变，候选稿保存在 ${draft.path}。`,
+      );
+      continue;
+    }
+
+    // 5) 修复后回归审校：来源章节因果、相邻章节、人物时间线和伏笔生命周期。
+    logJob(job, `第 ${target.index} 章通过问题验收，执行修复后回归审校…`);
+    let regression: ReviewResult;
+    try {
+      regression = await auditRepairRegression(
+        detail.meta,
+        canonForChapter(canon, target.index),
+        detail.characters,
+        chapterPlan,
+        target.content,
+        candidateText,
+        evidence.text,
+        previousEnding,
+        nextOpening,
+      );
+    } catch (error) {
+      if (error instanceof JobCancelledError) throw error;
+      const draft = await saveRejectedDraft(job.slug, {
+        index: target.index,
+        content: candidateText,
+        mode: "rewrite",
+        reason: "修复后回归审校失败，无法确认是否引入新矛盾，未覆盖原稿",
+        review: result.review,
+      });
+      paused = true;
+      job.result = `第 ${target.index} 章修复稿未覆盖原稿，草稿已保存`;
+      logJob(
+        job,
+        `第 ${target.index} 章修复后回归审校服务失败（不是正文问题），候选稿未覆盖原稿；修复稿保存在 ${draft.path}。修复已暂停，请检查模型配置后重试。`,
+      );
+      break;
+    }
+    throwIfCancelled(job);
+    if (isPauseRequested(job)) {
+      const draft = await saveRejectedDraft(job.slug, {
+        index: target.index,
+        content: candidateText,
+        mode: "rewrite",
+        reason: "修复已通过问题验收，但任务暂停，候选稿未写入正文",
+        review: result.review,
+      });
+      paused = true;
+      job.result = `已暂停：第 ${target.index} 章修复稿保存在草稿`;
+      logJob(
+        job,
+        `第 ${target.index} 章回归审校完成前任务已暂停，候选稿保存在 ${draft.path}，原正文未改动。`,
+      );
+      break;
+    }
+
+    const regressionCritical = regression.issues.filter(
+      (issue) => issue.severity === "critical",
+    );
+    if (regressionCritical.length) {
+      const regressionAcceptance = evaluateRepair({
+        before: beforeCritical,
+        after: [...result.review.issues, ...regression.issues],
+        characters: detail.characters,
+        extractionOk: true,
+        auditFailed: false,
+        factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+        allowNoBaseline,
+      });
+      const draft = await saveRejectedDraft(job.slug, {
+        index: target.index,
+        content: candidateText,
+        mode: "rewrite",
+        reason: `修复后回归审校未通过（${regressionAcceptance.status}）：${describeAcceptance(regressionAcceptance)}`,
+        review: { ...result.review, issues: [...result.review.issues, ...regression.issues] },
+      });
+      rejectedCount += 1;
+      logJob(
+        job,
+        `第 ${target.index} 章修复后回归审校发现 ${regressionCritical.length} 个新的严重问题，未覆盖原稿；${describeAcceptance(
+          regressionAcceptance,
+        )}。候选稿保存在 ${draft.path}。`,
+      );
+      continue;
+    }
+
+    // 6) 只有通过统一验收与回归审校才备份并写回正式正文。
     const backupPath = await saveRepairBackup(job.slug, target.index, target.content);
 
-    await writeChapterFile(job.slug, target.index, text, {
+    await writeChapterFile(job.slug, target.index, candidateText, {
       source: "ai-repair",
       title: chapterPlan.title,
       summary: result.review.summary,
       note: `定点修复（${sourceLabel}）`,
     });
-    repaired.set(target.index, text);
+    repaired.set(target.index, candidateText);
     await markChapterWritten(job.slug, target.index, result.review.summary, result.review);
     await markChapterRepaired(job.slug, target.index);
-    markDetailChapterWritten(detail, target.index, text, result.review.summary);
+    markDetailChapterWritten(detail, target.index, candidateText, result.review.summary);
 
     const reconciled = reconcileCanonWithChapters(result.canon, [
-      { index: target.index, content: text },
+      { index: target.index, content: candidateText },
     ]);
     canon = reconciled.canon;
     if (reconciled.changes.length) {
@@ -1890,44 +2192,33 @@ async function runRepair(
     await saveCanon(job.slug, canon);
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
+    remainingCritical += countCritical(result.review.issues);
     repairedCount += 1;
-
-    if (result.passed) {
-      logJob(
-        job,
-        `第 ${target.index} 章定点修复完成，已写回正文，连续性检查通过；原稿备份在 ${backupPath}。`,
-      );
-    } else {
-      const criticalLeft = result.review.issues.filter(
-        (issue) => issue.severity === "critical",
-      ).length;
-      remainingCritical += criticalLeft;
-      logJob(
-        job,
-        `第 ${target.index} 章定点修复完成，已写回正文；连续性检查仍有 ${criticalLeft} 个严重问题，${
-          source === "audit"
-            ? "已记入章节审校，可在「遗留修复」继续处理或重新运行总体审校"
-            : "已更新到章节审校的遗留修复"
-        }。原稿备份在 ${backupPath}。`,
-      );
-    }
+    logJob(
+      job,
+      `第 ${target.index} 章定点修复通过验收并写回正文：${describeAcceptance(acceptance)}；原稿备份在 ${backupPath}。`,
+    );
   }
 
   if (paused) {
-    job.result = `已暂停：写回 ${repairedCount} 章正文，剩余章节未处理`;
+    job.result = `已暂停：写回 ${repairedCount} 章正文，${rejectedCount} 章未通过验收`;
     logJob(
       job,
-      `已暂停定点修复：共写回 ${repairedCount} 章正文，剩余章节未处理；稍后可再次启动继续修复。`,
+      `已暂停定点修复：共写回 ${repairedCount} 章正文，${rejectedCount} 章未通过验收且原稿未改动；剩余章节未处理，稍后可再次启动继续修复。`,
     );
     return true;
   }
 
-  job.result = remainingCritical
-    ? `已改写 ${repairedCount} 章正文，仍有 ${remainingCritical} 个严重问题`
-    : `已完成 ${repairedCount} 章正文定点修复`;
+  job.result = rejectedCount
+    ? `已改写 ${repairedCount} 章正文，${rejectedCount} 章未通过验收`
+    : remainingCritical
+      ? `已改写 ${repairedCount} 章正文，仍有 ${remainingCritical} 个严重问题`
+      : `已完成 ${repairedCount} 章正文定点修复`;
   logJob(
     job,
-    `定点修复完成，共写回 ${repairedCount} 章正文；${
+    `定点修复完成，共写回 ${repairedCount} 章正文${
+      rejectedCount ? `，${rejectedCount} 章未通过验收、原稿未改动` : ""
+    }；${
       source === "audit"
         ? "总体审校报告是修复前的快照，如需最新全书结论请重新运行总体审校。"
         : "遗留问题已更新到章节审校。"
@@ -2097,20 +2388,35 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       break;
     }
 
-    if (!result.passed) {
+    const extractionFailed =
+      result.extractionFailed || result.review.extractionOk === false;
+    const auditFailed =
+      result.auditFailed === true || result.stopReason === "audit-failed";
+    // 草稿修复也走统一验收；有实际修复轮次时，即使数量减少也不能直接采用。
+    const acceptance = evaluateRepair({
+      before: result.initialIssues,
+      after: result.review.issues,
+      characters: detail.characters,
+      extractionOk: !extractionFailed,
+      auditFailed,
+      factConflicts: result.factConflicts,
+      needsAuthorDecision: result.needsAuthorDecision === true,
+    });
+    const acceptanceRequired = result.repairCalls > 0;
+
+    if (!result.passed || (acceptanceRequired && !acceptance.accepted)) {
       const critical = countCritical(result.review.issues);
-      const extractionFailed =
-        result.extractionFailed || result.review.extractionOk === false;
-      const auditFailed =
-        result.auditFailed === true || result.stopReason === "audit-failed";
+      // 迭代过程的“最后对比”和最终文本的验收对比可能不同，两者都要保留。
       const comparisonText = result.comparison
-        ? `严重问题 ${result.initialCriticalCount}→${result.finalCriticalCount}（最后对比：已解决 ${result.comparison.resolved.length}，仍存在 ${result.comparison.remaining.length}，新增 ${result.comparison.added.length}）`
+        ? `严重问题 ${result.initialCriticalCount}→${result.finalCriticalCount}；最后对比：已解决 ${result.comparison.resolved.length}，仍存在 ${result.comparison.remaining.length}，新增 ${result.comparison.added.length}`
         : `仍有 ${critical} 个严重问题`;
-      const reason = auditFailed
-        ? "自动修复未完成：连续性审校失败，已保留最佳草稿，需要人工处理"
-        : extractionFailed
-          ? "自动修复未完成：修复后事实抽取失败，已保留最佳草稿，需要人工处理"
-          : `自动修复未完成，需要人工处理：${comparisonText}`;
+      const reason = result.needsAuthorDecision
+        ? `自动修复暂停：修复证据不足，需要作者决定（${comparisonText}）`
+        : auditFailed
+          ? "自动修复未完成：连续性审校失败，已保留最佳草稿，需要人工处理"
+          : extractionFailed
+            ? "自动修复未完成：修复后事实抽取失败，已保留最佳草稿，需要人工处理"
+            : `自动修复未通过统一验收（${acceptance.status}），需要人工处理：${comparisonText}${acceptance.reasons.length ? `；${acceptance.reasons.join("")}` : ""}`;
       const updated = await saveRejectedDraft(job.slug, {
         index: requestedDraft.index,
         content: result.text,
@@ -2124,10 +2430,99 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         ? `第 ${requestedDraft.index} 章草稿修复连续性审校失败`
         : extractionFailed
           ? `第 ${requestedDraft.index} 章草稿修复后事实抽取失败`
-          : `第 ${requestedDraft.index} 章草稿修复后仍未通过`;
+          : `第 ${requestedDraft.index} 章草稿修复未通过验收（${acceptance.status}）`;
       logJob(
         job,
-        `${outcome}，未写入正文；repair-editor 调用 ${result.repairCalls} 次，停止原因：${result.stopReason}。新草稿保存在 ${updated.path}，原正文未改动。`,
+        `${outcome}，未写入正文；repair-editor 调用 ${result.repairCalls} 次，停止原因：${result.stopReason}。${comparisonText}。新草稿保存在 ${updated.path}，原正文未改动。`,
+      );
+      continue;
+    }
+
+    // 修复后回归审校：不能只看修改段落，还要核对来源章节因果、相邻章节、时间线与伏笔。
+    logJob(job, `第 ${requestedDraft.index} 章草稿通过问题验收，执行修复后回归审校…`);
+    const regressionEvidence = collectRepairEvidence({
+      project: detail,
+      chapter: chapterPlan,
+      issues: result.initialIssues,
+      characters: detail.characters,
+      canon: canonForChapter(canon, requestedDraft.index),
+      story,
+    });
+    let regression: ReviewResult;
+    try {
+      regression = await auditRepairRegression(
+        detail.meta,
+        canonForChapter(canon, requestedDraft.index),
+        detail.characters,
+        chapterPlan,
+        retrieved.content,
+        result.text,
+        regressionEvidence.text,
+        previousEnding,
+        nextOpening,
+      );
+    } catch (error) {
+      if (error instanceof JobCancelledError) throw error;
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: "修复后回归审校失败，无法确认是否引入新矛盾，未写入正文",
+        review: result.review,
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      failed += 1;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章修复后回归审校服务失败（不是正文问题），未写入正文；草稿保存在 ${updated.path}。`,
+      );
+      continue;
+    }
+    throwIfCancelled(job);
+    if (isPauseRequested(job)) {
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: "修复已通过问题验收，但任务暂停，草稿未写入正文",
+        review: result.review,
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      paused = true;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章回归审校完成前任务已暂停，草稿保存在 ${updated.path}，原正文未改动。`,
+      );
+      break;
+    }
+
+    const regressionCritical = regression.issues.filter(
+      (issue) => issue.severity === "critical",
+    );
+    if (regressionCritical.length) {
+      const mergedIssues = [...result.review.issues, ...regression.issues];
+      const regressionAcceptance = evaluateRepair({
+        before: result.initialIssues,
+        after: mergedIssues,
+        characters: detail.characters,
+        extractionOk: true,
+        auditFailed: false,
+        factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+      });
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: `修复后回归审校未通过（${regressionAcceptance.status}）：${describeAcceptance(regressionAcceptance)}`,
+        review: { ...result.review, issues: mergedIssues },
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      failed += 1;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章修复后回归审校发现 ${regressionCritical.length} 个新的严重问题，未写入正文；${describeAcceptance(
+          regressionAcceptance,
+        )}。草稿保存在 ${updated.path}。`,
       );
       continue;
     }

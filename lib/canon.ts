@@ -495,6 +495,27 @@ export function isDiscardableIssue(issue: ContinuityIssue): boolean {
   );
 }
 
+const CONFLICT_CATEGORIES = new Set([
+  "timeline",
+  "character-status",
+  "fact",
+  "foreshadow",
+  "causality",
+  "other",
+]);
+
+function isConflictCategory(
+  value: string,
+): value is NonNullable<ContinuityIssue["conflictCategory"]> {
+  return CONFLICT_CATEGORIES.has(value);
+}
+
+function parseOptionalChapter(value: unknown): number | undefined {
+  const parsed =
+    typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export function normalizeIssues(input: unknown): ContinuityIssue[] {
   // 兼容旧版 state.json 里的字符串建议，以及新版的 {severity,type,evidence,detail}。
   if (!Array.isArray(input)) return [];
@@ -533,6 +554,36 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
           evidence,
           detail: detail || evidence,
         };
+        const id = str(record.id).trim();
+        const fingerprint = str(record.fingerprint).trim();
+        const sourceEvidence = str(
+          record.sourceEvidence ?? record.source_evidence,
+        ).trim();
+        const sourceChapter = parseOptionalChapter(
+          record.sourceChapter ?? record.source_chapter ?? record.chapter,
+        );
+        const affectedCharacters = Array.isArray(
+          record.affectedCharacters ?? record.affected_characters,
+        )
+          ? ((record.affectedCharacters ?? record.affected_characters) as unknown[])
+              .filter((item): item is string => typeof item === "string")
+              .map((item) => item.trim())
+              .filter(Boolean)
+          : [];
+        const rawCategory = str(
+          record.conflictCategory ?? record.conflict_category,
+        )
+          .trim()
+          .toLowerCase();
+        const conflictCategory = isConflictCategory(rawCategory)
+          ? rawCategory
+          : undefined;
+        if (id) issue.id = id;
+        if (fingerprint) issue.fingerprint = fingerprint;
+        if (sourceEvidence) issue.sourceEvidence = sourceEvidence;
+        if (sourceChapter !== undefined) issue.sourceChapter = sourceChapter;
+        if (affectedCharacters.length) issue.affectedCharacters = affectedCharacters;
+        if (conflictCategory) issue.conflictCategory = conflictCategory;
       }
     }
     if (!issue || isDiscardableIssue(issue)) continue;

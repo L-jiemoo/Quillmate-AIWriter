@@ -473,6 +473,7 @@ export function auditMessages(
   suspicions: ContinuityIssue[],
   nextContext: string,
   storyContext: string,
+  evidenceContext = "",
 ): ChatMessage[] {
   return [
     {
@@ -492,7 +493,7 @@ ${formatCharacterProfiles(characters)}
 【剧情台账（人物状态/关系/事件/伏笔，来自已写章节）】
 ${clip(storyContext || "（未检索到剧情台账）", 4000)}
 
-【前文衔接（上一章结尾与最近摘要）】
+${evidenceContext ? `【相关原文证据（按当前问题检索；原文与台账已分开标注，不要混用）】\n${clip(evidenceContext, 6000)}\n\n` : ""}【前文衔接（上一章结尾与最近摘要）】
 ${clip(previousContext || "（无）", 4000)}
 
 【后文参考（重写时用于衔接下一章）】
@@ -516,7 +517,11 @@ ${clip(chapterText, 16000)}
       "severity": "critical | warning | ignore",
       "type": "人物行为 | 人物性格 | 时间线 | 地点 | 死亡状态 | 物品归属 | 世界观规则 | 剧情因果 | 伏笔连续性 | 章节重复 | 大纲偏离 | 称谓 | 人物关系 | 其他",
       "evidence": "本章正文中的原文短句；不得只写摘要",
-      "detail": "与第几章的哪条台账/规则/细纲冲突，为什么读者会觉得不合理"
+      "detail": "与第几章的哪条台账/规则/细纲冲突，为什么读者会觉得不合理",
+      "sourceChapter": 4,
+      "sourceEvidence": "被冲突的前文原文短句（能定位时填写）",
+      "affectedCharacters": ["涉及人物名"],
+      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other"
     }
   ],
   "continuityOk": true
@@ -570,7 +575,7 @@ export function chapterRepairMessages(
   nextOpening: string,
   rewriteInstruction: string,
   reviewFeedback: string,
-  options: { draftRepair?: boolean } = {},
+  options: { draftRepair?: boolean; evidenceContext?: string; planText?: string } = {},
 ): ChatMessage[] {
   return [
     {
@@ -587,7 +592,7 @@ ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问
 【不可违背的事实台账】
 ${formatCanonForPrompt(canon)}
 
-【上一章结尾（用于保持开头衔接）】
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}【上一章结尾（用于保持开头衔接）】
 ${clip(previousEnding || "（无）", 1500)}
 
 ${nextOpening ? `【下一章开头（用于保持结尾衔接）】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次重写要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文】
@@ -601,6 +606,7 @@ ${clip(chapterText, 16000)}
 - 不得擅自新增人物、事件、设定、物品、能力或伏笔；不得改变已确认的人物动机、关系和世界观。
 - 不得复活已死亡人物，不得改动物品的持有人、形态和来历，不得改变已经确立的时间线和期限。
 - 不得为了让本章通过而修改事实台账、删除既定剧情、改写其他章节或把矛盾解释成“回忆/幻觉”来蒙混；如果问题实际不成立，可以保留原段落。
+- 必须依据【相关原文证据】核对前文事实；不得删除、截断或改写证据原文来规避矛盾，也不得把摘要或推断当成原文事实。
 - 涉及“已死人物仍以活人身份行动”的问题：必须删除或改写所有相关动作、对话和在场描写，只能保留回忆、尸体、幻象、遗物或他人转述；必要时让其他在世角色承担剧情功能。
 - 修正后本章开头仍要承接上一章结尾，结尾仍要能过渡到下一章开头（如果有）。
 - 如果某条问题无法在不破坏其他内容的前提下安全修复，保留原段落，不要强行改写；不得引入新的矛盾。
@@ -611,6 +617,133 @@ ${
 `
     : ""
 }- 直接输出完整的修订后正文，不要输出任何解释。`,
+    },
+  ];
+}
+
+// 修复后回归审校：不只看修改段落，还要核对来源章节因果、相邻章节、人物时间线和伏笔生命周期。
+export function repairRegressionMessages(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  originalText: string,
+  repairedText: string,
+  evidenceContext: string,
+  canon: CanonFacts,
+  characters: Character[],
+  previousEnding: string,
+  nextOpening: string,
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `你是中文小说修复回归审校员。修复稿可能解决了原问题却引入新矛盾，必须同时核对来源章节因果、相邻章节衔接、人物时间线和伏笔生命周期。只报告修复稿中真实存在、且需要作者处理的问题；没有问题就返回空 issues。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `请审校《${meta.title}》第 ${chapter.index} 章《${chapter.title}》的修复稿。
+
+【事实台账】
+${formatCanonForPrompt(canon, { includeChapters: true })}
+
+【核心人物档案】
+${formatCharacterProfiles(characters)}
+
+【修复前检索到的相关原文证据（原文与台账已分开标注）】
+${clip(evidenceContext || "（未检索到原文证据）", 6000)}
+
+【上一章结尾】
+${clip(previousEnding || "（无）", 1200)}
+
+${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}【修复前正文（仅作对比参考）】
+${clip(originalText, 12000)}
+
+【修复后正文（本次审校对象）】
+${clip(repairedText, 16000)}
+
+请只输出 JSON：
+{
+  "issues": [
+    {
+      "severity": "critical | warning | ignore",
+      "type": "时间线 | 人物行为 | 死亡状态 | 物品归属 | 剧情因果 | 伏笔连续性 | 世界观规则 | 人物关系 | 其他",
+      "evidence": "修复后正文中的原文短句",
+      "detail": "与第几章/哪条事实冲突，为什么修复后反而不成立",
+      "sourceChapter": 4,
+      "affectedCharacters": ["涉及人物名"],
+      "conflictCategory": "timeline | character-status | fact | foreshadow | causality | other"
+    }
+  ],
+  "continuityOk": true
+}
+
+回归审校要求（逐项执行，不能只看修改段落）：
+1. 修复是否真正解决了原问题，而不是通过删除证据、改写前文含义或回避关键剧情来掩盖。
+2. 修复是否改变了人物、事件、地点、时间或关键关系，并与来源章节原文产生新的因果矛盾。
+3. 修复后的开头是否仍承接上一章结尾，结尾是否仍能过渡到下一章开头。
+4. 相关人物时间线是否仍然成立（同一时间是否出现在多个地点、生死状态是否被改写）。
+5. 相关伏笔的埋设与回收生命周期是否被破坏（不能未埋先收、提前回收或删掉埋设）。
+6. 只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。`,
+    },
+  ];
+}
+
+// Repair Agent 第一阶段：只出方案，不改正文。方案需通过约束检查后才能进入执行阶段。
+export function chapterRepairPlanMessages(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  chapterText: string,
+  issues: ContinuityIssue[],
+  canon: CanonFacts,
+  previousEnding: string,
+  nextOpening: string,
+  rewriteInstruction: string,
+  reviewFeedback: string,
+  options: { draftRepair?: boolean; evidenceContext?: string } = {},
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `你是中文小说修订策划编辑。当前阶段只分析问题并制定定点修复方案，不修改正文。必须依据原文证据和事实台账；证据不足时明确要求作者决定，不得编造剧情解释。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `请为《${meta.title}》第 ${chapter.index} 章《${chapter.title}》制定修复方案。
+
+【需要解决的问题（按序号对应）】
+${formatIssuesForPrompt(issues)}
+${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
+【不可违背的事实台账】
+${formatCanonForPrompt(canon)}
+
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}【上一章结尾】
+${clip(previousEnding || "（无）", 1200)}
+
+${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次修复要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文】
+${clip(chapterText, 12000)}
+
+请只输出 JSON 修复方案：
+{
+  "issuePlans": [
+    {
+      "issueIndex": 1,
+      "rootCause": "问题的根本原因",
+      "evidence": "支持判断的原文短句（必须来自给定正文或证据）",
+      "locations": ["计划修改的段首短句或章内位置"],
+      "strategy": "最小化修改策略，说明如何在不引入新矛盾的前提下修复",
+      "affectedFacts": ["可能受影响的人物/物品/时间线/伏笔事实"],
+      "sideEffects": "潜在副作用及规避方式"
+    }
+  ],
+  "needsAuthorDecision": false,
+  "decisionReason": "需要作者决定时说明缺什么证据或需要作者确认什么"
+}
+
+约束：
+- issueIndex 必须对应【需要解决的问题】的序号从 1 开始。
+- 每个问题都必须有可执行的 strategy；没有足够证据时把 needsAuthorDecision 设为 true，不要编造。
+- 不允许通过删除关键剧情、改写证据、修改台账或把矛盾解释成回忆/幻觉来修复。
+- 只做必要的最小修改，不重写整章，不新增人物、设定或伏笔。
+- affectedFacts 和 sideEffects 必须如实填写，供后续回归审校使用。`,
     },
   ];
 }

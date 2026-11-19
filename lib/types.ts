@@ -395,6 +395,19 @@ export interface ContinuityIssue {
   type: string;
   evidence: string;
   detail: string;
+  // 以下字段均为可选：旧项目数据只有前四个字段，读取时必须保持兼容。
+  id?: string;
+  sourceChapter?: number;
+  sourceEvidence?: string;
+  affectedCharacters?: string[];
+  conflictCategory?:
+    | "timeline"
+    | "character-status"
+    | "fact"
+    | "foreshadow"
+    | "causality"
+    | "other";
+  fingerprint?: string;
 }
 
 export interface ReviewResult {

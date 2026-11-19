@@ -11,7 +11,12 @@ export interface IssueComparison {
   resolved: ContinuityIssue[];
   remaining: ContinuityIssue[];
   added: ContinuityIssue[];
+  // accepted 表示“可以写回正式正文”：原问题全部解决、没有新增、匹配无歧义。
   accepted: boolean;
+  // improved 只表示“相比上一版有改善”，用于继续迭代，不能当作验收通过。
+  improved: boolean;
+  // 同一问题存在多个接近匹配时视为歧义，验收时必须保守拒绝。
+  ambiguous: boolean;
 }
 
 const PUNCTUATION =
@@ -55,12 +60,17 @@ function numericTokens(text: string): Set<string> {
   return result;
 }
 
-function anchorOverlap(left: string, right: string): boolean {
-  const leftAnchors = new Set([...chapterRefs(left), ...numericTokens(left)]);
-  const rightAnchors = new Set([...chapterRefs(right), ...numericTokens(right)]);
-  if (!leftAnchors.size || !rightAnchors.size) return true;
-  for (const anchor of leftAnchors) {
-    if (rightAnchors.has(anchor)) return true;
+function anchorsOf(issue: ContinuityIssue): Set<string> {
+  const text = normalizeIssueText(`${issue.evidence}${issue.detail}`);
+  const anchors = new Set([...chapterRefs(text), ...numericTokens(text)]);
+  if (issue.sourceChapter) anchors.add(String(issue.sourceChapter));
+  return anchors;
+}
+
+function anchorsOverlap(left: Set<string>, right: Set<string>): boolean {
+  if (!left.size || !right.size) return true;
+  for (const anchor of left) {
+    if (right.has(anchor)) return true;
   }
   return false;
 }
@@ -87,6 +97,16 @@ function entitiesOverlap(left: Set<string>, right: Set<string>): boolean {
   return false;
 }
 
+function entitiesOf(issue: ContinuityIssue, names: string[]): Set<string> {
+  const text = normalizeIssueText(`${issue.evidence}${issue.detail}`);
+  const result = presentEntities(text, names);
+  for (const name of issue.affectedCharacters ?? []) {
+    const normalized = normalizeIssueText(name);
+    if (normalized.length >= 2) result.add(normalized);
+  }
+  return result;
+}
+
 function issueSimilarity(
   left: ContinuityIssue,
   right: ContinuityIssue,
@@ -96,16 +116,31 @@ function issueSimilarity(
   const rightType = normalizeIssueText(right.type);
   if (leftType !== rightType) return 0;
 
-  const leftText = normalizeIssueText(`${left.evidence}${left.detail}`);
-  const rightText = normalizeIssueText(`${right.evidence}${right.detail}`);
-
-  // 证据相同/互相包含不等于同一问题：先校验冲突章节和关键实体，
-  // 否则不同章节、不同人物的问题会被合并，新增严重问题也会被旧问题吸收。
-  if (!anchorOverlap(leftText, rightText)) return 0;
-  if (!entitiesOverlap(presentEntities(leftText, names), presentEntities(rightText, names))) {
+  // 结构化的冲突类别和来源章节优先于文本相似度。
+  if (
+    left.conflictCategory &&
+    right.conflictCategory &&
+    left.conflictCategory !== right.conflictCategory
+  ) {
     return 0;
   }
+  if (
+    !anchorsOverlap(anchorsOf(left), anchorsOf(right)) ||
+    !entitiesOverlap(entitiesOf(left, names), entitiesOf(right, names))
+  ) {
+    return 0;
+  }
+  // 稳定指纹相同才可直接确认；指纹由类型、章节和实体共同生成。
+  if (
+    left.fingerprint &&
+    right.fingerprint &&
+    left.fingerprint.trim().toLowerCase() === right.fingerprint.trim().toLowerCase()
+  ) {
+    return 1;
+  }
 
+  const leftText = normalizeIssueText(`${left.evidence}${left.detail}`);
+  const rightText = normalizeIssueText(`${right.evidence}${right.detail}`);
   const leftEvidence = normalizeIssueText(left.evidence);
   const rightEvidence = normalizeIssueText(right.evidence);
   if (
@@ -271,6 +306,29 @@ export function compareCriticalIssues(
     matchedAfter.add(pair.after);
   }
 
+  // 同一行或同一列存在分数接近的备选时，配对并不唯一：
+  // 保守起见标记歧义，验收不得据此判定原问题已解决。
+  const AMBIGUITY_MARGIN = 0.05;
+  let ambiguous = false;
+  for (const pair of pairs) {
+    const row = scores[pair.before];
+    for (let column = 0; column < row.length; column += 1) {
+      if (column !== pair.after && row[column] > 0 && row[column] >= pair.score - AMBIGUITY_MARGIN) {
+        ambiguous = true;
+        break;
+      }
+    }
+    if (ambiguous) break;
+    for (let rowIndex = 0; rowIndex < scores.length; rowIndex += 1) {
+      const alternative = scores[rowIndex][pair.after];
+      if (rowIndex !== pair.before && alternative > 0 && alternative >= pair.score - AMBIGUITY_MARGIN) {
+        ambiguous = true;
+        break;
+      }
+    }
+    if (ambiguous) break;
+  }
+
   const resolved = beforeCritical.filter((_, index) => !matchedBefore.has(index));
   const remaining = beforeCritical.filter((_, index) => matchedBefore.has(index));
   const added = afterCritical.filter((_, index) => !matchedAfter.has(index));
@@ -281,6 +339,11 @@ export function compareCriticalIssues(
     remaining,
     added,
     accepted:
-      beforeCritical.length > afterCritical.length && added.length === 0,
+      beforeCritical.length > 0 &&
+      remaining.length === 0 &&
+      added.length === 0 &&
+      !ambiguous,
+    improved: beforeCritical.length > afterCritical.length && added.length === 0,
+    ambiguous,
   };
 }
