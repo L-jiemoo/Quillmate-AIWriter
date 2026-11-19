@@ -7,7 +7,16 @@ coverage/
 .env.*
 !.env.example
 *.log
+# 本地创作项目、数据库、发布产物都可能在 data/ 下，禁止入库
 data/
+# 未公开的大纲、改造笔记与剧情草稿
+note/
+# 数据库文件即使被复制到别处也不入库
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-journal
 *.tsbuildinfo
 .DS_Store
 .claude/
