@@ -28,6 +28,14 @@ import {
   normalizeRepairPatches,
   type RepairPatch,
 } from "./repair-patch";
+import {
+  formatCausalBaseline,
+  isCausalBaselineComplete,
+  normalizeCausalBaseline,
+  normalizeCausalChanges,
+  type CausalBaseline,
+  type CausalChange,
+} from "./repair-causal";
 import { normalizeCharacter } from "./store";
 import type {
   CanonFacts,
@@ -410,6 +418,11 @@ export async function auditChapter(
   return normalizeReviewResult(data, chapter.summary);
 }
 
+export interface RegressionAuditResult extends ReviewResult {
+  causalChanges: CausalChange[];
+  causalVerified: boolean;
+}
+
 export async function auditRepairRegression(
   meta: ProjectMeta,
   canon: CanonFacts,
@@ -421,13 +434,16 @@ export async function auditRepairRegression(
   previousEnding: string,
   nextOpening: string,
   regressionScope = "",
-): Promise<ReviewResult> {
+  causalBaselines: CausalBaseline[] = [],
+): Promise<RegressionAuditResult> {
   if (isMock()) {
     return {
       summary: chapter.summary,
       issues: [],
       continuityOk: true,
       extractionOk: true,
+      causalChanges: [],
+      causalVerified: true,
     };
   }
   const llm = new LLMClient();
@@ -443,10 +459,18 @@ export async function auditRepairRegression(
       previousEnding,
       nextOpening,
       regressionScope,
+      causalBaselines,
     ),
     { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
-  return normalizeReviewResult(data, chapter.summary);
+  const causal = normalizeCausalChanges(
+    data.causalChanges ?? data.causal_changes,
+  );
+  return {
+    ...normalizeReviewResult(data, chapter.summary),
+    causalChanges: causal.changes,
+    causalVerified: causal.verified,
+  };
 }
 
 export interface RepairDecisionOptionPlan {
@@ -486,6 +510,7 @@ export interface RepairPlanIssue {
   affectedFacts: string[];
   sideEffects: string;
   regressionScope: string;
+  causalBaseline: CausalBaseline;
 }
 
 export interface RepairPlan {
@@ -513,6 +538,9 @@ export function normalizeRepairPlan(input: unknown): RepairPlan {
       affectedFacts: arr(plan.affectedFacts ?? plan.affected_facts),
       sideEffects: str(plan.sideEffects ?? plan.side_effects).trim(),
       regressionScope: str(plan.regressionScope ?? plan.regression_scope).trim(),
+      causalBaseline: normalizeCausalBaseline(
+        plan.causalBaseline ?? plan.causal_baseline,
+      ),
     };
   });
   const rawOptions = Array.isArray(record.decisionOptions)
@@ -574,6 +602,9 @@ export function validateRepairPlan(
     chapterText?: string;
     evidenceContext?: string;
     crossChapterText?: string;
+    // 方案证据允许回退到问题本身的证据：模型复述证据时常改写措辞，
+    // 只要问题证据能在原文中落地，修改仍需通过 locations 校验。
+    issues?: ContinuityIssue[];
   } = {},
 ): void {
   if (!plan.issuePlans.length) {
@@ -601,16 +632,23 @@ export function validateRepairPlan(
         `问题 ${item.issueIndex} 的修复方案没有说明回归审校范围`,
       );
     }
+    if (!isCausalBaselineComplete(item.causalBaseline)) {
+      throw new RepairPlanRejectedError(
+        `问题 ${item.issueIndex} 的修复方案缺少修复前因果结构（动作执行者/动作/作用对象/处理对象/结果），无法保护剧情因果`,
+      );
+    }
     if (context.chapterText !== undefined) {
       const chapterText = context.chapterText;
       const crossText = context.crossChapterText ?? "";
+      const originalEvidence = originalEvidenceSection(context.evidenceContext ?? "");
+      const grounded = (needle: string): boolean =>
+        containsEvidence(chapterText, needle) ||
+        containsEvidence(crossText, needle) ||
+        containsEvidence(originalEvidence, needle);
+      const issueEvidence = context.issues?.[item.issueIndex - 1]?.evidence ?? "";
       if (!item.evidence) {
         details.push(`问题 ${item.issueIndex} 没有引用任何原文证据`);
-      } else if (
-        !containsEvidence(chapterText, item.evidence) &&
-        !containsEvidence(crossText, item.evidence) &&
-        !containsEvidence(originalEvidenceSection(context.evidenceContext ?? ""), item.evidence)
-      ) {
+      } else if (!grounded(item.evidence) && !(issueEvidence && grounded(issueEvidence))) {
         details.push(
           `问题 ${item.issueIndex} 引用的证据只来自台账、摘要或推断，不在当前正文、此前章节原文或原文证据中`,
         );
@@ -652,7 +690,9 @@ function formatRepairPlan(plan: RepairPlan): string {
 - 修改策略：${item.strategy}
 - 受影响事实：${item.affectedFacts.join("；") || "未说明"}
 - 潜在副作用：${item.sideEffects || "未说明"}
-- 回归审校范围：${item.regressionScope || "未说明"}`,
+- 回归审校范围：${item.regressionScope || "未说明"}
+- 修复前因果结构：
+${formatCausalBaseline(item.causalBaseline)}`,
     )
     .join("\n\n");
 }
@@ -729,6 +769,7 @@ export interface RepairPatchPlanResult {
   planText: string;
   regressionScope: string;
   affectedChapters: number[];
+  causalBaselines: CausalBaseline[];
 }
 
 /**
@@ -755,15 +796,28 @@ export async function repairChapterPatches(
   } = {},
 ): Promise<RepairPatchPlanResult> {
   if (isMock()) {
-    return { patches: [], planText: "", regressionScope: "", affectedChapters: [] };
+    return {
+      patches: [],
+      planText: "",
+      regressionScope: "",
+      affectedChapters: [],
+      causalBaselines: [],
+    };
   }
   if (!issues.length) {
-    return { patches: [], planText: "", regressionScope: "", affectedChapters: [] };
+    return {
+      patches: [],
+      planText: "",
+      regressionScope: "",
+      affectedChapters: [],
+      causalBaselines: [],
+    };
   }
 
   const llm = new LLMClient();
   let planText = "";
   let regressionScope = "";
+  let causalBaselines: CausalBaseline[] = [];
   let affectedChapters = options.affectedChapters ?? [];
   if (options.twoStage !== false) {
     const planData = await llm.json<Record<string, unknown>>(
@@ -794,12 +848,14 @@ export async function repairChapterPatches(
       chapterText,
       evidenceContext: options.evidenceContext ?? "",
       crossChapterText: options.crossChapterContext ?? "",
+      issues,
     });
     planText = formatRepairPlan(plan);
     regressionScope = plan.issuePlans
       .map((item) => item.regressionScope)
       .filter(Boolean)
       .join("；");
+    causalBaselines = plan.issuePlans.map((item) => item.causalBaseline);
     const plannedChapters = plan.decisionOptions.flatMap(
       (option) => option.affectedChapters,
     );
@@ -830,5 +886,6 @@ export async function repairChapterPatches(
     planText,
     regressionScope,
     affectedChapters,
+    causalBaselines,
   };
 }

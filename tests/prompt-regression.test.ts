@@ -3,6 +3,7 @@ import {
   architectMessages,
   auditMessages,
   chapterRepairMessages,
+  chapterRepairPlanMessages,
   characterMessages,
   extendMessages,
   factExtractorMessages,
@@ -118,7 +119,9 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("冲突双方的原文证据");
     expect(text).toContain("以前没有出现过");
     expect(text).toContain("人物说出的判断不能自动当作客观世界观规则");
-    expect(text).toContain("即使后文解释电话是伪造的");
+    expect(text).toContain("唯一证据就是被后文解释为伪造");
+    expect(text).toContain("人物台词、转述和角色推断不是客观事实");
+    expect(text).toContain("早到半天");
     expect(text).toContain("承载物与被收纳对象");
   });
 
@@ -141,6 +144,44 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("RULE_EXTENSION");
     expect(text).toContain("CLARITY_GAP");
     expect(text).toContain("不得为了回归通过而判 critical");
+    expect(text).toContain("SAFE_REPHRASE");
+    expect(text).toContain("CAUSAL_EXPANSION");
+    expect(text).toContain("CAUSAL_CHANGE");
+    expect(text).toContain("CAUSAL_CONTRADICTION");
+    expect(text).toContain("causalChanges");
+    expect(text).toContain("周坤页");
+    expect(text).toContain("新增了原文没有建立因果关系的中间对象");
+  });
+
+  it("修复方案提示词要求先提取修复前因果结构", () => {
+    const detail = reviewProject();
+    const text = join(
+      chapterRepairPlanMessages(
+        detail.meta,
+        detail.plan.chapters[3],
+        "陈默念出沈长庚的罪行，记录之书自动生成沈长庚页。",
+        [
+          {
+            severity: "critical",
+            type: "剧情因果",
+            evidence: "陈默念出沈长庚的罪行。",
+            detail: "与第 4 章冲突。",
+          },
+        ],
+        detail.canon,
+        "",
+        "",
+        "",
+        "",
+      ),
+    );
+
+    expect(text).toContain("causalBaseline");
+    expect(text).toContain("修复前原文");
+    expect(text).toContain("动作直接作用对象");
+    expect(text).toContain("被记录/改变/处理的对象");
+    expect(text).toContain("不能写成计划中的新剧情");
+    expect(text).toContain("中间对象");
   });
 
   it("修复提示词要求局部修改且不得改台账既定剧情", () => {

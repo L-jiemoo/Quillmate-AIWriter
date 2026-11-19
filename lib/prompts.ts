@@ -1,4 +1,5 @@
 import { formatCanonForPrompt, formatIssuesForPrompt } from "./canon";
+import { formatCausalBaseline, type CausalBaseline } from "./repair-causal";
 
 import type { ChatMessage } from "./llm";
 import type {
@@ -577,7 +578,9 @@ ${clip(chapterText, 16000)}
 - 人物说出的判断不能自动当作客观世界观规则，必须核对规则来源、上下文和可信程度。
 
 针对性判断：
-- 时间线冲突必须核对冲突时刻人物的实际位置与可达性。即使后文解释电话是伪造的，也不能自动消除“人物在异地或已被控制”的时间矛盾。
+- 时间线冲突必须核对冲突时刻人物的实际位置与可达性。若“人物当时在异地”的唯一证据就是被后文解释为伪造/冒充的那通电话（声音、背景音、通话内容），该证据随之失效，不得再用它反推人物时间线；只有存在独立于该电话场景的正文旁白或既定事实时，才可保留时间线矛盾。
+- 人物台词、转述和角色推断不是客观事实。像“早到半天”这类人物说法属于 CHARACTER_BELIEF，不能当作精确时刻；除非它与独立旁白直接冲突，否则不能据此判 critical。
+- 作者已经在正文中明确写出解释（如“电话是伪造的”）时，不要因为缺少进一步铺垫、途中细节或读者可能追问就判 critical；确实无法理解事件如何发生时才标 CLARITY_GAP，且只记录不阻断。
 - 区分承载物与被收纳对象：既有规则只禁止活人进入某物时，不能直接推断活人的执念/残念不能作为独立对象被收纳；状态词（如“已噬”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。`,
     },
   ];
@@ -651,6 +654,7 @@ export function repairRegressionMessages(
   previousEnding: string,
   nextOpening: string,
   regressionScope = "",
+  causalBaselines: CausalBaseline[] = [],
 ): ChatMessage[] {
   return [
     {
@@ -673,7 +677,7 @@ ${clip(evidenceContext || "（未检索到原文证据）", 6000)}
 【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
 
-${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${regressionScope.trim() ? `【本次回归审校扩大范围】\n${clip(regressionScope.trim(), 1200)}\n\n` : ""}【修复前正文（仅作对比参考）】
+${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${regressionScope.trim() ? `【本次回归审校扩大范围】\n${clip(regressionScope.trim(), 1200)}\n\n` : ""}${causalBaselines.length ? `【修复前因果结构（必须保持；不得改变执行者、动作、作用对象、处理对象和事件顺序）】\n${clip(causalBaselines.map(formatCausalBaseline).join("\n\n"), 4000)}\n\n` : ""}【修复前正文（仅作对比参考）】
 ${clip(originalText, 12000)}
 
 【修复后正文（本次审校对象）】
@@ -694,6 +698,15 @@ ${clip(repairedText, 16000)}
       "ruleLevel": "涉及世界观规则时填 HARD_RULE | SOFT_RULE | UNKNOWN_RULE | CHARACTER_BELIEF，否则省略"
     }
   ],
+  "causalChanges": [
+    {
+      "issueIndex": 1,
+      "classification": "SAFE_REPHRASE | CAUSAL_EXPANSION | CAUSAL_CHANGE | CAUSAL_CONTRADICTION",
+      "before": "修复前的动作/对象/结果",
+      "after": "修复后的动作/对象/结果",
+      "explanation": "为什么属于该分类"
+    }
+  ],
   "continuityOk": true
 }
 
@@ -711,6 +724,23 @@ ${clip(repairedText, 16000)}
 11. 是否修改了问题授权范围之外的段落，或顺带润色无关内容。
 12. 是否与上一章结尾、下一章开头或来源章节产生新的冲突。
 问题分类规则与章节审校相同：只有 ESTABLISHED_CONTRADICTION 才能判 critical；RULE_EXTENSION 和 CLARITY_GAP 按 warning 记录，不得为了回归通过而判 critical；“以前没出现”“与常见设定不同”不构成 critical 证据。
+
+因果结构对比（必须逐项执行，并始终返回 causalChanges 数组；没有变化时返回空数组）：
+1. 动作的执行者是否被替换或拆分？
+2. 动作的直接作用对象是否改变？
+3. 被记录/改变/处理的对象与最终结果是否仍然对应？例如书中记录对象与记录页面的归属是否错位？
+4. 是否新增了原文没有建立因果关系的中间对象、媒介或动作落点？
+5. 事件先后顺序是否改变？
+6. 结果是否指向了另一个人物或物体？
+7. 是否新增了需要额外解释的新规则，或删除了原文必要的因果环节？
+分类标准：
+- SAFE_REPHRASE：只改变措辞，因果结构不变。
+- CAUSAL_EXPANSION：增加合理的动作、过渡或细节，但不改变原有因果链；仍要检查是否引入新规则。
+- CAUSAL_CHANGE：改变动作对象、作用对象、事件顺序、结果指向或因果链，或新增无依据的中间对象。
+- CAUSAL_CONTRADICTION：修复后与原文既定事实或世界观规则直接冲突。
+同一场景中出现的对象不能互相替换；不能因为两个对象都在场，就认为记录对象、作用对象可以互换。
+示例：原文是“陈默念出沈长庚的罪行，记录之书自动生成沈长庚页”。修复稿若变成“陈默把手指按在周坤页空白处，念出沈长庚罪行，书在周坤页之后翻出沈长庚页”，却没有解释周坤页与沈长庚记录的关联，必须判为 CAUSAL_CHANGE，不能只因为句子更生动就放过。
+
 只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。修复范围之外发现的历史问题不要当作本次修复引入的新问题。`,
     },
   ];
@@ -766,7 +796,18 @@ ${clip(chapterText, 12000)}
       "strategy": "最小化修改策略，说明如何在不引入新矛盾的前提下修复",
       "affectedFacts": ["可能受影响的人物/物品/时间线/伏笔事实"],
       "sideEffects": "潜在副作用及规避方式",
-      "regressionScope": "需要扩大回归审校的范围，例如涉及的来源章节、人物、事件、地点"
+      "regressionScope": "需要扩大回归审校的范围，例如涉及的来源章节、人物、事件、地点",
+      "causalBaseline": {
+        "actor": "动作执行者（必须是修复前原文中的）",
+        "action": "动作",
+        "target": "动作直接作用的对象",
+        "object": "被记录/改变/处理的对象",
+        "location": "动作发生位置",
+        "sequence": "事件先后顺序",
+        "cause": "事件触发原因",
+        "effect": "事件结果",
+        "rule": "涉及的世界观规则；没有则写“无”"
+      }
     }
   ],
   "needsAuthorDecision": false,
@@ -791,7 +832,10 @@ ${clip(chapterText, 12000)}
 - regressionScope 必须写明需要扩大到哪些来源章节、人物、事件或地点，供回归审校使用。
 - 不允许通过删除关键剧情、改写证据、修改台账或把矛盾解释成回忆/幻觉来修复。
 - 只做必要的最小修改，不重写整章，不新增人物、设定或伏笔。
-- affectedFacts 和 sideEffects 必须如实填写，供后续回归审校使用。`,
+- affectedFacts 和 sideEffects 必须如实填写，供后续回归审校使用。
+- causalBaseline 必须描述**修复前原文**的真实因果结构，不能写成计划中的新剧情；actor/action/target/object/effect 不得留空。仅做表达调整时，各字段写“仅表达调整”，但 actor/action/effect 仍要给出。
+- 必须区分动作发生位置、动作直接作用对象、最终产生结果的对象；不能因为它们在同一个场景出现就当作可以互换。
+- 修复时必须保持 causalBaseline 中的执行者、动作、作用对象、处理对象和事件顺序；不得新增原文没有的中间对象或动作落点来连接因果。`,
     },
   ];
 }
@@ -865,6 +909,9 @@ ${clip(chapterText, 16000)}
 - 不同 edit 的原文锚点不得重叠；同一段落内多处修改请分别给出互不重叠的锚点。
 - replacement 必须保留原段落中与问题无关的内容，不得删除关键证据来规避矛盾。
 - 不得新增人物、事件、设定、物品、能力或伏笔；不得改变已确认的事实、时间线和伏笔生命周期。
+- 必须保持方案中的因果结构：动作执行者、动作、直接作用对象、被记录/改变对象、事件顺序和结果都不能改变。
+- 不得为了增强画面感新增原文没有的中间对象、动作落点或媒介；不得让结果指向另一个人物或物体。
+- 如果按原因果结构无法修复，保留原段落，不要自行设计新的因果机制。
 - 直接输出 JSON，不要输出解释或修改记录。`,
     },
   ];

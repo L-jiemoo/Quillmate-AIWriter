@@ -6,6 +6,7 @@ import {
   type RepairPlan,
   type RepairPlanIssue,
 } from "@/lib/agents";
+import type { ContinuityIssue } from "@/lib/types";
 
 const chapterText = [
   "第一段：陈默在阴巷等待。",
@@ -31,6 +32,17 @@ function planIssue(overrides: Partial<RepairPlanIssue> = {}): RepairPlanIssue {
     affectedFacts: ["第 4 章电话事件"],
     sideEffects: "可能影响后续伏笔",
     regressionScope: "第 4 章与相邻章节",
+    causalBaseline: {
+      actor: "陈默",
+      action: "拨打陈玉华的电话",
+      target: "电话",
+      object: "陈玉华",
+      location: "阴巷附近",
+      sequence: "先通话，后前往阴巷",
+      cause: "确认陈玉华的情况",
+      effect: "陈玉华透露阴巷内幕",
+      rule: "无",
+    },
     ...overrides,
   };
 }
@@ -83,6 +95,51 @@ describe("修复方案证据校验", () => {
     expect(message).toContain("不在当前正文");
   });
 
+  it("方案复述证据失真但问题原证据在正文中时通过", () => {
+    const neutralText = "第一段：甲在车站等车。\n第二段：乙在办公室里接电话。";
+    const issue: ContinuityIssue = {
+      severity: "critical",
+      type: "时间线",
+      evidence: "乙在办公室里接电话。",
+      detail: "与上一章冲突。",
+    };
+    expect(() =>
+      validateRepairPlan(
+        plan(
+          planIssue({
+            evidence: "电话里乙在办公室里说话",
+            locations: ["乙在办公室里接电话。"],
+          }),
+        ),
+        1,
+        { chapterText: neutralText, issues: [issue] },
+      ),
+    ).not.toThrow();
+  });
+
+  it("问题原证据也不在正文中时仍然拒绝", () => {
+    const neutralText = "第一段：甲在车站等车。";
+    const issue: ContinuityIssue = {
+      severity: "critical",
+      type: "时间线",
+      evidence: "推断：乙可能提前离开办公室。",
+      detail: "只来自推断。",
+    };
+    const message = rejectionMessage(() =>
+      validateRepairPlan(
+        plan(
+          planIssue({
+            evidence: "乙可能提前离开办公室",
+            locations: ["甲在车站等车。"],
+          }),
+        ),
+        1,
+        { chapterText: neutralText, issues: [issue] },
+      ),
+    );
+    expect(message).toContain("不在当前正文");
+  });
+
   it("证据来自检索到的原文证据时通过", () => {
     const remoteEvidence = "陈玉华警告陈默今晚不要去阴巷。";
     expect(() =>
@@ -117,6 +174,22 @@ describe("修复方案证据校验", () => {
       ),
     );
     expect(message).toContain("回归审校范围");
+  });
+
+  it("方案缺少修复前因果结构时拒绝", () => {
+    const baseline = planIssue().causalBaseline;
+    const message = rejectionMessage(() =>
+      validateRepairPlan(
+        plan(
+          planIssue({
+            causalBaseline: { ...baseline, actor: "", effect: "" },
+          }),
+        ),
+        1,
+        { chapterText, evidenceContext },
+      ),
+    );
+    expect(message).toContain("因果结构");
   });
 
   it("方案遗漏问题时拒绝", () => {

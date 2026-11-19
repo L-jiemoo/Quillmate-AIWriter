@@ -9,6 +9,7 @@ import {
   RepairPlanRejectedError,
   repairChapter,
   repairChapterPatches,
+  type RegressionAuditResult,
   type RepairDecisionOptionPlan,
   writeChapter,
 } from "./agents";
@@ -51,6 +52,7 @@ import { promptVersionInfo } from "./prompt-store";
 import { findPublishEntry } from "./publish-ledger";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
 import { describeAcceptance, evaluateRepair } from "./repair-acceptance";
+import type { CausalBaseline } from "./repair-causal";
 import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
 import type { IssueComparison } from "./repair-compare";
 import { collectRepairEvidence } from "./repair-context";
@@ -989,6 +991,8 @@ interface VerifyDraftChapterResult extends VerifyChapterResult {
   finalCriticalCount: number;
   // 修复方案要求扩大回归审校时，汇总后的范围说明。
   regressionScope: string;
+  // 第一轮修复前提取的因果结构，供修复后回归审校对比。
+  causalBaselines: CausalBaseline[];
   // 跨章修复后各此前章节的最新文本（仅在通过验收时使用）。
   crossTexts: Record<number, string>;
   decisionReason?: string;
@@ -1049,6 +1053,7 @@ async function verifyDraftChapter(
   let extractionFailed = false;
   let needsAuthorDecision = false;
   let regressionScope = "";
+  let causalBaselines: CausalBaseline[] = [];
   let crossTexts: Record<number, string> = { ...(input.crossChapters ?? {}) };
   let decisionReason: string | undefined;
   let decisionOptions: RepairDecisionOptionPlan[] | undefined;
@@ -1084,6 +1089,7 @@ async function verifyDraftChapter(
       initialCriticalCount,
       finalCriticalCount: critical,
       regressionScope,
+      causalBaselines,
       crossTexts: { ...(input.crossChapters ?? {}) },
       decisionReason,
       decisionOptions,
@@ -1105,6 +1111,7 @@ async function verifyDraftChapter(
           initialCriticalCount,
           finalCriticalCount,
           regressionScope,
+          causalBaselines,
           crossTexts: { ...crossTexts },
           decisionReason,
           decisionOptions,
@@ -1211,6 +1218,8 @@ async function verifyDraftChapter(
         }
       }
       if (plan.regressionScope) regressionScope = plan.regressionScope;
+      // 多轮修复时只保留第一轮的原始结构，后续轮次是在已修改稿上继续修。
+      if (!causalBaselines.length) causalBaselines = plan.causalBaselines ?? [];
       repairCalls = nextRound;
       throwIfCancelled(input.job);
       return true;
@@ -1424,22 +1433,27 @@ async function verifyDraftChapter(
         );
         return finish();
       }
-      if (!comparison.improved) {
-        stopReason =
-          comparison.afterCount > comparison.beforeCount
-            ? "increased"
-            : comparison.added.length
-              ? "new-critical"
-              : "no-improvement";
+      // 第一轮只要求“不增加严重问题”即可保留候选稿继续修；
+      // 换词后同一问题被重新计数时，严格减少条件会让任务永远卡在 1→1。
+      const notWorse = comparison.afterCount <= comparison.beforeCount;
+      if (!comparison.improved && !notWorse) {
+        stopReason = "increased";
         logStop();
         return fallback();
       }
       best = candidate;
       finalCriticalCount = critical;
-      logJob(
-        input.job,
-        `第 ${input.chapter.index} 章草稿修复第 1 轮有改善：严重问题 ${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}。`,
-      );
+      if (comparison.improved) {
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章草稿修复第 1 轮有改善：严重问题 ${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}。`,
+        );
+      } else {
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章草稿修复第 1 轮没有增加严重问题：${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}；保留候选稿继续修复。`,
+        );
+      }
       if (repairCalls >= maxRepairs) {
         stopReason = "max-repairs";
         break;
@@ -2251,6 +2265,7 @@ async function runRepair(
 
     let text: string;
     let regressionScope = "";
+    let causalBaselines: CausalBaseline[] = [];
     let changedChapters: AppliedChapterBatch[] = [];
     try {
       const plan = await repairChapterPatches(
@@ -2301,6 +2316,7 @@ async function runRepair(
       }
       text = targetBatch.text;
       regressionScope = plan.regressionScope;
+      causalBaselines = plan.causalBaselines ?? [];
     } catch (error) {
       if (error instanceof RepairNeedsAuthorDecisionError) {
         if (!decisionOption && error.options.length) {
@@ -2530,7 +2546,7 @@ async function runRepair(
 
     // 5) 修复后回归审校：来源章节因果、相邻章节、人物时间线和伏笔生命周期。
     logJob(job, `第 ${target.index} 章通过问题验收，执行修复后回归审校…`);
-    let regression: ReviewResult;
+    let regression: RegressionAuditResult;
     try {
       regression = await auditRepairRegression(
         detail.meta,
@@ -2543,6 +2559,7 @@ async function runRepair(
         previousEnding,
         nextOpening,
         regressionScope,
+        causalBaselines,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -2579,16 +2596,19 @@ async function runRepair(
       break;
     }
 
-    if (regression.issues.length) {
-      const regressionAcceptance = evaluateRepair({
-        before: issues,
-        after: [...result.review.issues, ...regression.issues],
-        characters: detail.characters,
-        extractionOk: true,
-        auditFailed: false,
-        factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
-        allowNoBaseline,
-      });
+    const regressionAcceptance = evaluateRepair({
+      before: issues,
+      after: [...result.review.issues, ...regression.issues],
+      characters: detail.characters,
+      extractionOk: true,
+      auditFailed: false,
+      factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+      // 基线是否为空已由问题验收阶段判定；回归阶段只检查新增问题和因果变化。
+      allowNoBaseline: true,
+      causalChanges: regression.causalChanges,
+      causalVerified: regression.causalVerified,
+    });
+    if (regression.issues.length || !regressionAcceptance.accepted) {
       const draft = await saveRejectedDraft(job.slug, {
         index: target.index,
         content: candidateText,
@@ -2599,11 +2619,7 @@ async function runRepair(
       rejectedCount += 1;
       logJob(
         job,
-        `第 ${target.index} 章修复后回归审校发现 ${regression.issues.length} 个新问题（${
-          regression.issues.every((issue) => issue.severity !== "critical")
-            ? "均为警告级"
-            : "含严重问题"
-        }），未覆盖原稿；${describeAcceptance(regressionAcceptance)}。候选稿保存在 ${draft.path}。`,
+        `第 ${target.index} 章修复后回归审校未通过（${regressionAcceptance.status}）：${describeAcceptance(regressionAcceptance)}；未覆盖原稿，候选稿保存在 ${draft.path}。`,
       );
       continue;
     }
@@ -3124,7 +3140,7 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       canon: canonForChapter(canon, requestedDraft.index),
       story,
     });
-    let regression: ReviewResult;
+    let regression: RegressionAuditResult;
     try {
       regression = await auditRepairRegression(
         detail.meta,
@@ -3137,6 +3153,7 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         previousEnding,
         nextOpening,
         result.regressionScope,
+        result.causalBaselines,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -3173,16 +3190,19 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       break;
     }
 
-    if (regression.issues.length) {
-      const mergedIssues = [...result.review.issues, ...regression.issues];
-      const regressionAcceptance = evaluateRepair({
-        before: result.initialIssues,
-        after: mergedIssues,
-        characters: detail.characters,
-        extractionOk: true,
-        auditFailed: false,
-        factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
-      });
+    const mergedIssues = [...result.review.issues, ...regression.issues];
+    const regressionAcceptance = evaluateRepair({
+      before: result.initialIssues,
+      after: mergedIssues,
+      characters: detail.characters,
+      extractionOk: true,
+      auditFailed: false,
+      factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+      allowNoBaseline: true,
+      causalChanges: regression.causalChanges,
+      causalVerified: regression.causalVerified,
+    });
+    if (regression.issues.length || !regressionAcceptance.accepted) {
       const updated = await saveRejectedDraft(job.slug, {
         index: requestedDraft.index,
         content: result.text,
@@ -3194,9 +3214,9 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       failed += 1;
       logJob(
         job,
-        `第 ${requestedDraft.index} 章修复后回归审校发现 ${regression.issues.length} 个新问题，未写入正文；${describeAcceptance(
+        `第 ${requestedDraft.index} 章修复后回归审校未通过（${regressionAcceptance.status}）：${describeAcceptance(
           regressionAcceptance,
-        )}。草稿保存在 ${updated.path}。`,
+        )}；未写入正文，草稿保存在 ${updated.path}。`,
       );
       continue;
     }

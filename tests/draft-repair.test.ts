@@ -108,6 +108,7 @@ vi.mock("../lib/agents", async (importOriginal) => {
         }),
         planText: "",
         regressionScope: "",
+        causalBaselines: [],
       };
     },
   };
@@ -285,21 +286,27 @@ describe("未采用草稿修复", () => {
     ).toBe(true);
   });
 
-  it("严重问题没有严格减少时立即停止并保留原草稿", async () => {
-    const slug = await projectWithPlan("无改善停止");
-    const content = "陈玉华在省城超市收银台旁接电话，随后关机。";
+  it("严重问题没有减少但也没有增加时保留候选稿继续修复", async () => {
+    const slug = await projectWithPlan("同数继续修复");
+    const content = "甲在车站等车，随后上车。";
     const issue = criticalIssue("时间线", content);
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
-    setAuditScript([{ critical: [{ type: issue.type, evidence: issue.evidence }] }]);
+    setAuditScript([
+      { critical: [{ type: issue.type, evidence: issue.evidence }] },
+      { critical: [{ type: issue.type, evidence: issue.evidence }] },
+    ]);
 
     const finished = await runDraftRepair(slug);
     expect(finished.status, finished.error).toBe("done");
-    expect(agentState.repairCalls).toBe(1);
-    expect(agentState.auditCalls).toBe(1);
+    expect(agentState.repairCalls).toBe(2);
+    expect(agentState.auditCalls).toBe(2);
+    expect(
+      finished.logs.some((line) => line.message.includes("没有增加严重问题")),
+    ).toBe(true);
 
     const saved = await store.getRejectedDraftContent(slug, 1);
-    expect(saved?.content.trim()).toBe(content);
-    expect(saved?.content).not.toContain("【修复");
+    expect(saved?.content).toContain("【修复1】");
+    expect(saved?.content).not.toContain("【修复2】");
     expect(saved?.draft.reason).toContain("需要人工处理");
     const detail = await store.getProjectDetail(slug);
     expect(detail.chapters.find((item) => item.index === 1)?.written).toBeFalsy();
@@ -329,32 +336,34 @@ describe("未采用草稿修复", () => {
     expect(saved?.draft.reason).toContain("需要人工处理");
   });
 
-  it("严重问题数量相同但换成新问题时拒绝新版本", async () => {
-    const slug = await projectWithPlan("同数新问题");
-    const content =
-      "陈玉华在省城超市收银台旁接电话，随后关机。陈默三点到达阴巷口。";
-    const first = criticalIssue("时间线", "陈玉华在省城超市收银台旁接电话。");
-    const second = criticalIssue("人物行为", "陈默三点到达阴巷口。");
+  it("严重问题数量没有减少时继续修复，下一轮解决后采用", async () => {
+    const slug = await projectWithPlan("同数新问题继续");
+    const content = "甲在车站等车，随后上车。乙在办公室里接电话。";
+    const first = criticalIssue("时间线", "甲在车站等车。");
+    const second = criticalIssue("人物行为", "乙在办公室里接电话。");
     await saveDraft(slug, "write", content, {
       review: reviewWith([first, second]),
     });
     setAuditScript([
       {
         critical: [
-          { type: "剧情因果", evidence: "陈默突然出现在石室。" },
-          { type: "世界观规则", evidence: "因果可以转嫁给别人。" },
+          { type: "剧情因果", evidence: "随后上车。" },
+          { type: "世界观规则", evidence: "乙在办公室里接电话。" },
         ],
       },
+      { critical: [] },
     ]);
 
     const finished = await runDraftRepair(slug);
     expect(finished.status, finished.error).toBe("done");
-    expect(agentState.repairCalls).toBe(1);
+    expect(agentState.repairCalls).toBe(2);
+    expect(agentState.auditCalls).toBe(2);
 
-    const saved = await store.getRejectedDraftContent(slug, 1);
-    expect(saved?.content.trim()).toBe(content);
-    expect(saved?.draft.reason).toContain("新增 2");
-    expect(saved?.draft.reason).toContain("需要人工处理");
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.written).toBe(true);
+    expect(chapter?.content).toContain("【修复2】");
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
   });
 
   it("严重问题严格减少且没有新增时采用修复稿", async () => {
@@ -510,6 +519,7 @@ describe("未采用草稿修复", () => {
     });
     setAuditScript([
       { critical: [{ type: "时间线", evidence: textA }] },
+      { critical: [{ type: "时间线", evidence: textA }] },
       { critical: [] },
     ]);
 
@@ -519,7 +529,7 @@ describe("未采用草稿修复", () => {
     });
     const finished = await waitForJob(job.id);
     expect(finished.status, finished.error).toBe("done");
-    expect(agentState.repairCalls).toBe(2);
+    expect(agentState.repairCalls).toBe(3);
 
     const detail = await store.getProjectDetail(slug);
     expect(detail.chapters.find((item) => item.index === 1)?.written).toBeFalsy();
@@ -536,7 +546,10 @@ describe("未采用草稿修复", () => {
     await saveDraft(slug, "write", content, { review: reviewWith([issue]) });
     const before = await store.getRejectedDraftContent(slug, 1);
     expect(before).toBeTruthy();
-    setAuditScript([{ critical: [{ type: issue.type, evidence: issue.evidence }] }]);
+    setAuditScript([
+      { critical: [{ type: issue.type, evidence: issue.evidence }] },
+      { critical: [{ type: issue.type, evidence: issue.evidence }] },
+    ]);
 
     const finished = await runDraftRepair(slug);
     expect(finished.status, finished.error).toBe("done");

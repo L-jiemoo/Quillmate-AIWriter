@@ -3,6 +3,10 @@ import {
   compareWarningIssues,
   type IssueComparison,
 } from "./repair-compare";
+import {
+  evaluateCausalChanges,
+  type CausalChange,
+} from "./repair-causal";
 import type { Character, ContinuityIssue } from "./types";
 
 export type RepairAcceptanceStatus =
@@ -12,6 +16,8 @@ export type RepairAcceptanceStatus =
   | "REJECTED_NEW_WARNING"
   | "REJECTED_FACT_CONFLICT"
   | "REJECTED_SCOPE_VIOLATION"
+  | "REJECTED_CAUSAL_CHANGE"
+  | "REJECTED_CAUSAL_CONTRADICTION"
   | "NEEDS_AUTHOR_DECISION"
   | "VERIFY_FAILED";
 
@@ -34,6 +40,9 @@ export interface RepairAcceptanceInput {
   allowNoBaseline?: boolean;
   // 默认严格模式：新增 warning 也不允许自动写回。
   mode?: RepairAcceptanceMode;
+  // 修复前后因果结构对比；causalVerified=false 表示审校没有返回可用的对比结果。
+  causalChanges?: CausalChange[];
+  causalVerified?: boolean;
 }
 
 export interface RepairAcceptanceResult {
@@ -137,6 +146,16 @@ export function evaluateRepair(input: RepairAcceptanceInput): RepairAcceptanceRe
     reasons.push("修复修改超出问题授权范围，候选稿不能被自动采用。");
     return fail("REJECTED_SCOPE_VIOLATION");
   }
+  if (input.causalVerified === false) {
+    reasons.push("回归审校没有返回因果结构对比，无法确认修复是否改变剧情因果。");
+    return fail("VERIFY_FAILED");
+  }
+  const causal = evaluateCausalChanges(input.causalChanges ?? []);
+  if (causal.status !== "ACCEPTED") {
+    reasons.push(...causal.reasons);
+    return fail(causal.status);
+  }
+  if (causal.reasons.length) leftovers.push(...causal.reasons);
 
   const newFactConflicts = (input.factConflicts ?? []).filter(
     (issue) => issue.severity === "critical" && isFactIssue(issue),

@@ -2,10 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CausalChange } from "@/lib/repair-causal";
 import type { ContinuityIssue, Job, ReviewResult } from "@/lib/types";
 
 interface AuditStep {
   critical: { type: string; evidence: string; detail?: string }[];
+  causal?: CausalChange[];
+  causalVerified?: boolean;
 }
 
 const agentState = vi.hoisted(() => ({
@@ -80,6 +83,7 @@ vi.mock("../lib/agents", async (importOriginal) => {
         })),
         planText: "",
         regressionScope: "",
+        causalBaselines: [],
       };
     },
     auditRepairRegression: async (
@@ -102,6 +106,8 @@ vi.mock("../lib/agents", async (importOriginal) => {
         })),
         continuityOk: step.critical.length === 0,
         extractionOk: true,
+        causalChanges: step.causal ?? [],
+        causalVerified: step.causalVerified ?? true,
       };
     },
   };
@@ -380,6 +386,96 @@ describe("正文定点修复验收", () => {
     expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
     const draft = await store.getRejectedDraftContent(slug, 1);
     expect(draft?.draft.reason).toContain("REJECTED_FACT_CONFLICT");
+  });
+
+  it("修复改写剧情因果结构时拒绝写回", async () => {
+    const original = "陈默念出沈长庚的罪行，记录之书自动生成沈长庚页。";
+    const problem = criticalIssue("剧情因果", original);
+    const slug = await projectWithWrittenChapter("回归因果改写", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [
+      {
+        critical: [],
+        causal: [
+          {
+            classification: "CAUSAL_CHANGE",
+            before: "陈默念罪行，书自动生成沈长庚页",
+            after: "陈默按住周坤页念罪行，书在周坤页后生成沈长庚页",
+            explanation: "新增周坤页作为中间媒介，记录对象与页面归属错位",
+          },
+        ],
+      },
+    ];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("REJECTED_CAUSAL_CHANGE");
+    expect(draft?.draft.reason).toContain("因果");
+  });
+
+  it("修复后因果与原文直接冲突时阻断写回", async () => {
+    const original = "陈玉华在省城超市收银台旁接电话。";
+    const problem = criticalIssue("剧情因果", original);
+    const slug = await projectWithWrittenChapter("回归因果冲突", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [
+      {
+        critical: [],
+        causal: [
+          {
+            classification: "CAUSAL_CONTRADICTION",
+            before: "陈默念罪行，记录对象是沈长庚",
+            after: "记录对象变成陈玉华",
+            explanation: "结果指向另一个人物",
+          },
+        ],
+      },
+    ];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("REJECTED_CAUSAL_CONTRADICTION");
+  });
+
+  it("回归审校没有返回因果对比时不能写回", async () => {
+    const original = "陈玉华在省城超市收银台旁接电话。";
+    const problem = criticalIssue("剧情因果", original);
+    const slug = await projectWithWrittenChapter("回归因果缺失", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [{ critical: [], causalVerified: false }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("VERIFY_FAILED");
+    expect(draft?.draft.reason).toContain("因果结构对比");
   });
 
   it("回归审校服务失败时不覆盖原文并暂停", async () => {
