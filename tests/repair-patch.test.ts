@@ -117,6 +117,24 @@ describe("修复补丁应用", () => {
     ).toBe("UNAUTHORIZED_SCOPE");
   });
 
+  it("方案位置显式授权的其他段落可以修改", () => {
+    const text = [
+      "第一段无关内容。",
+      "乙在办公室里接电话。",
+      "甲忽然想起电话里的背景音。",
+    ].join("\n");
+    const batch = applyRepairPatches({
+      originalText: text,
+      issues: [issue("乙在办公室里接电话。")],
+      extraAuthorizedAnchors: ["甲忽然想起电话里的背景音。"],
+      patches: [
+        patch("issue-1", "甲忽然想起电话里的背景音。", "甲忽然想起电话里的录音。"),
+      ],
+    });
+    expect(batch.text).toContain("电话里的录音");
+    expect(batch.paragraphs).toEqual([2]);
+  });
+
   it("修改范围明显过大时拒绝，而不是强行局部改写", () => {
     const text = "陈玉华接电话。";
     expect(

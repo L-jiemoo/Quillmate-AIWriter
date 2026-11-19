@@ -17,6 +17,7 @@ import {
   chapterRepairMessages,
   chapterRepairPatchMessages,
   chapterRepairPlanMessages,
+  repairRegressionConfirmMessages,
   repairRegressionMessages,
   characterMessages,
   extendMessages,
@@ -36,6 +37,12 @@ import {
   type CausalBaseline,
   type CausalChange,
 } from "./repair-causal";
+import {
+  classifyRegressionByEvidence,
+  normalizeRegressionVerdict,
+  type RegressionConfirmation,
+  type RepairBaseline,
+} from "./repair-iteration";
 import { normalizeCharacter } from "./store";
 import type {
   CanonFacts,
@@ -473,6 +480,71 @@ export async function auditRepairRegression(
   };
 }
 
+// 独立确认候选稿新增的严重问题：不改正文，也不复用修复方案调用，
+// 避免同一次生成既改稿又判定自己是否改坏。
+export async function confirmRepairRegressions(input: {
+  meta: ProjectMeta;
+  chapter: ChapterPlan;
+  originalText: string;
+  candidateText: string;
+  baseline: RepairBaseline;
+  newIssues: ContinuityIssue[];
+  evidenceContext?: string;
+}): Promise<RegressionConfirmation[]> {
+  const issues = input.newIssues.filter((issue) => issue.severity === "critical");
+  if (!issues.length) return [];
+  const fallback = (): RegressionConfirmation[] =>
+    issues.map((issue) =>
+      classifyRegressionByEvidence(issue, input.baseline, input.candidateText),
+    );
+  if (isMock()) return fallback();
+
+  try {
+    const data = await new LLMClient().json<Record<string, unknown>>(
+      repairRegressionConfirmMessages(
+        input.meta,
+        input.chapter,
+        input.originalText,
+        input.candidateText,
+        input.baseline.issues,
+        issues,
+        input.evidenceContext ?? "",
+      ),
+      { temperature: 0.1, agent: "auditor", chapter: input.chapter.index },
+    );
+    const raw = Array.isArray(data.confirmations) ? data.confirmations : [];
+    const parsed = new Map<
+      number,
+      { verdict: ReturnType<typeof normalizeRegressionVerdict>; explanation: string; schemeLevelFailure: boolean }
+    >();
+    raw.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const record = item as Record<string, unknown>;
+      const index = Number.parseInt(String(record.index ?? record.issueIndex ?? ""), 10);
+      if (!Number.isInteger(index) || index < 1 || index > issues.length) return;
+      parsed.set(index, {
+        verdict: normalizeRegressionVerdict(record.verdict ?? record.classification),
+        explanation: str(record.explanation ?? record.reason),
+        schemeLevelFailure: record.schemeLevelFailure === true,
+      });
+    });
+    return issues.map((issue, offset) => {
+      const item = parsed.get(offset + 1);
+      return item
+        ? { issue, ...item }
+        : classifyRegressionByEvidence(issue, input.baseline, input.candidateText);
+    });
+  } catch (error) {
+    // 确认失败不能用“新增问题成立”来兜底，否则会误伤；交给作者确认。
+    return issues.map((issue) => ({
+      issue,
+      verdict: "uncertain" as const,
+      explanation: `独立确认调用失败，无法判断是否由本次修复引入：${String(error)}`,
+      schemeLevelFailure: false,
+    }));
+  }
+}
+
 export interface RepairDecisionOptionPlan {
   label: string;
   description: string;
@@ -770,6 +842,8 @@ export interface RepairPatchPlanResult {
   regressionScope: string;
   affectedChapters: number[];
   causalBaselines: CausalBaseline[];
+  // 方案已通过正文校验的修改位置；补丁授权段落必须包含问题证据或这些位置。
+  authorizedAnchors: string[];
 }
 
 /**
@@ -802,6 +876,7 @@ export async function repairChapterPatches(
       regressionScope: "",
       affectedChapters: [],
       causalBaselines: [],
+      authorizedAnchors: [],
     };
   }
   if (!issues.length) {
@@ -811,6 +886,7 @@ export async function repairChapterPatches(
       regressionScope: "",
       affectedChapters: [],
       causalBaselines: [],
+      authorizedAnchors: [],
     };
   }
 
@@ -818,6 +894,7 @@ export async function repairChapterPatches(
   let planText = "";
   let regressionScope = "";
   let causalBaselines: CausalBaseline[] = [];
+  let authorizedAnchors: string[] = [];
   let affectedChapters = options.affectedChapters ?? [];
   if (options.twoStage !== false) {
     const planData = await llm.json<Record<string, unknown>>(
@@ -856,6 +933,12 @@ export async function repairChapterPatches(
       .filter(Boolean)
       .join("；");
     causalBaselines = plan.issuePlans.map((item) => item.causalBaseline);
+    // locations 已在 validateRepairPlan 中核对确实存在于正文，
+    // 补丁阶段用它们授权方案明确要改的段落，而不是只认问题证据原文。
+    authorizedAnchors = plan.issuePlans
+      .flatMap((item) => item.locations)
+      .map((location) => location.trim())
+      .filter(Boolean);
     const plannedChapters = plan.decisionOptions.flatMap(
       (option) => option.affectedChapters,
     );
@@ -887,5 +970,6 @@ export async function repairChapterPatches(
     regressionScope,
     affectedChapters,
     causalBaselines,
+    authorizedAnchors,
   };
 }

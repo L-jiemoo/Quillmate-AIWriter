@@ -7,8 +7,26 @@ import type { ContinuityIssue, Job, ReviewResult } from "@/lib/types";
 
 interface AuditStep {
   critical: { type: string; evidence: string; detail?: string }[];
+  warnings?: { type: string; evidence: string; detail?: string }[];
   causal?: CausalChange[];
   causalVerified?: boolean;
+}
+
+function issuesFromStep(step: AuditStep): ReviewResult["issues"] {
+  return [
+    ...step.critical.map((item) => ({
+      severity: "critical" as const,
+      type: item.type,
+      evidence: item.evidence,
+      detail: item.detail ?? "测试问题。",
+    })),
+    ...(step.warnings ?? []).map((item) => ({
+      severity: "warning" as const,
+      type: item.type,
+      evidence: item.evidence,
+      detail: item.detail ?? "测试建议。",
+    })),
+  ];
 }
 
 const agentState = vi.hoisted(() => ({
@@ -24,6 +42,12 @@ const agentState = vi.hoisted(() => ({
   regressionSteps: [] as AuditStep[],
   regressionCalls: 0,
   onAudit: null as (() => void | Promise<void>) | null,
+  confirmCalls: 0,
+  confirmSteps: [] as {
+    verdict: string;
+    explanation?: string;
+    schemeLevelFailure?: boolean;
+  }[],
 }));
 
 vi.mock("../lib/agents", async (importOriginal) => {
@@ -55,12 +79,7 @@ vi.mock("../lib/agents", async (importOriginal) => {
       const chapter = args[3];
       return {
         summary: chapter.summary,
-        issues: step.critical.map((item) => ({
-          severity: "critical" as const,
-          type: item.type,
-          evidence: item.evidence,
-          detail: item.detail ?? "与第 4 章事实台账冲突。",
-        })),
+        issues: issuesFromStep(step),
         continuityOk: step.critical.length === 0,
       };
     },
@@ -86,6 +105,21 @@ vi.mock("../lib/agents", async (importOriginal) => {
         causalBaselines: [],
       };
     },
+    confirmRepairRegressions: async (
+      ...args: Parameters<typeof actual.confirmRepairRegressions>
+    ) => {
+      agentState.confirmCalls += 1;
+      if (!agentState.confirmSteps.length) {
+        return actual.confirmRepairRegressions(...args);
+      }
+      const step = agentState.confirmSteps.shift()!;
+      return args[0].newIssues.map((issue) => ({
+        issue,
+        verdict: step.verdict as never,
+        explanation: step.explanation ?? "测试确认",
+        schemeLevelFailure: step.schemeLevelFailure ?? false,
+      }));
+    },
     auditRepairRegression: async (
       ...args: Parameters<typeof actual.auditRepairRegression>
     ) => {
@@ -98,12 +132,7 @@ vi.mock("../lib/agents", async (importOriginal) => {
       const chapter = args[3];
       return {
         summary: chapter.summary,
-        issues: step.critical.map((item) => ({
-          severity: "critical" as const,
-          type: item.type,
-          evidence: item.evidence,
-          detail: item.detail ?? "修复后新增矛盾。",
-        })),
+        issues: issuesFromStep(step),
         continuityOk: step.critical.length === 0,
         extractionOk: true,
         causalChanges: step.causal ?? [],
@@ -133,6 +162,8 @@ beforeEach(async () => {
   agentState.regressionSteps = [];
   agentState.regressionCalls = 0;
   agentState.onAudit = null;
+  agentState.confirmCalls = 0;
+  agentState.confirmSteps = [];
   vi.resetModules();
   store = await import("@/lib/store");
   pipeline = await import("@/lib/pipeline");
@@ -235,7 +266,7 @@ describe("正文定点修复验收", () => {
     expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
   });
 
-  it("修复引入新的严重问题时拒绝写回，原文字节级不变", async () => {
+  it("无法确认是否新增的严重问题时暂停，原文字节级不变", async () => {
     const original = "陈玉华在省城超市收银台旁接电话。";
     const problem = criticalIssue("时间线", original);
     const slug = await projectWithWrittenChapter("正文修复新问题", original, [problem]);
@@ -252,18 +283,163 @@ describe("正文定点修复验收", () => {
     ];
 
     const finished = await runBodyRepair(slug);
-    expect(finished.status, finished.error).toBe("done");
+    expect(finished.status, finished.error).toBe("paused");
     expect(agentState.repairCalls).toBe(1);
 
     const detail = await store.getProjectDetail(slug);
     const chapter = detail.chapters.find((item) => item.index === 1);
     expect(chapter?.content).toBe(stored);
     const draft = await store.getRejectedDraftContent(slug, 1);
-    expect(draft?.draft.reason).toContain("未通过验收");
+    expect(draft?.draft.reason).toContain("无法独立确认");
+    expect(
+      finished.logs.some((line) => line.message.includes("停止自动修复")),
+    ).toBe(true);
+  });
+
+  it("确认的新增严重问题进入第二轮，解决后写回", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("两轮修复通过", original, [problem]);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [{ type: "剧情因果", evidence: "【修复1】" }] },
+      { critical: [] },
+    ];
+    agentState.confirmSteps = [{ verdict: "confirmed_new" }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.auditCalls).toBe(3);
+    expect(agentState.repairCalls).toBe(2);
+    expect(agentState.confirmCalls).toBe(1);
+
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.content).toContain("【修复1】【修复2】");
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+    expect(
+      finished.logs.some((line) => line.message.includes("不进行第三轮")),
+    ).toBe(true);
+  });
+
+  it("第二轮重新引入原始问题时拒绝写回", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("两轮重新引入", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [{ type: "剧情因果", evidence: "【修复1】" }] },
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+    ];
+    agentState.confirmSteps = [{ verdict: "confirmed_new" }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(2);
+    expect(agentState.auditCalls).toBe(3);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("第二轮修复仍未通过验收");
+  });
+
+  it("第二轮产生新的严重问题时停止，不进第三轮", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("两轮第三问题", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [{ type: "剧情因果", evidence: "【修复1】" }] },
+      { critical: [{ type: "剧情因果", evidence: "【修复1】【修复2】后又起波澜。" }] },
+    ];
+    agentState.confirmSteps = [{ verdict: "confirmed_new" }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(2);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
     expect(draft?.draft.reason).toContain("新增 1");
-    expect(finished.logs.some((line) => line.message.includes("原正文保持不变"))).toBe(
-      true,
-    );
+  });
+
+  it("误报的新增问题不阻断验收", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("误报不阻断", original, [problem]);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [{ type: "剧情因果", evidence: "文里没有这句证据。" }] },
+    ];
+    agentState.confirmSteps = [{ verdict: "false_positive" }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(1);
+    expect(agentState.confirmCalls).toBe(1);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toContain("【修复1】");
+  });
+
+  it("方案级失败时停止，不在错误方案上继续打补丁", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("方案级失败", original, [problem]);
+    const stored = await chapterContent(slug);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [{ type: "世界观规则", evidence: "【修复1】" }] },
+    ];
+    agentState.confirmSteps = [{ verdict: "confirmed_new", schemeLevelFailure: true }];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(1);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toBe(stored);
+    const draft = await store.getRejectedDraftContent(slug, 1);
+    expect(draft?.draft.reason).toContain("方案本身不成立");
+  });
+
+  it("回归审校只有 warning 时不阻断写回", async () => {
+    const original = "乙在办公室里接电话。";
+    const problem = criticalIssue("时间线", original);
+    const slug = await projectWithWrittenChapter("回归仅警告", original, [problem]);
+    agentState.scripted = true;
+    agentState.auditSteps = [
+      { critical: [{ type: problem.type, evidence: problem.evidence }] },
+      { critical: [] },
+    ];
+    agentState.scriptedRegression = true;
+    agentState.regressionSteps = [
+      {
+        critical: [],
+        warnings: [
+          { type: "剧情因果", evidence: "建议补充过渡。", detail: "表达建议。" },
+        ],
+      },
+    ];
+
+    const finished = await runBodyRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.regressionCalls).toBe(1);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.chapters.find((item) => item.index === 1)?.content).toContain("【修复1】");
+    expect(
+      finished.logs.some((line) => line.message.includes("不阻断写回")),
+    ).toBe(true);
   });
 
   it("原问题没有全部解决时拒绝写回", async () => {

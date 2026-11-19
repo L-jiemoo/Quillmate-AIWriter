@@ -1,6 +1,7 @@
 import {
   auditChapter,
   auditRepairRegression,
+  confirmRepairRegressions,
   extendPlan,
   extractChapterFacts,
   generateCharacters,
@@ -56,6 +57,12 @@ import type { CausalBaseline } from "./repair-causal";
 import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
 import type { IssueComparison } from "./repair-compare";
 import { collectRepairEvidence } from "./repair-context";
+import {
+  buildRepairBaseline,
+  compareToBaseline,
+  groupIssuesByRootCause,
+  summarizeConfirmations,
+} from "./repair-iteration";
 import {
   createRepairDecision,
   getRepairDecision,
@@ -1196,7 +1203,11 @@ async function verifyDraftChapter(
         },
       );
       const patchChapters: PatchChapter[] = [
-        { index: input.chapter.index, text: currentText },
+        {
+          index: input.chapter.index,
+          text: currentText,
+          extraAuthorizedAnchors: plan.authorizedAnchors,
+        },
         ...crossIndexes.map((index) => ({
           index,
           text: crossTexts[index],
@@ -2101,21 +2112,25 @@ async function runRepair(
     }
     const allowNoBaseline = beforeCritical.length === 0;
 
-    // 2) 生成候选补丁：严重问题优先，最多一次处理 20 条，避免提示词过长。
+    // 2) 生成候选补丁：按根因分组，每组最多 3 个问题，避免一次性改动过多。
     const sortedIssues = [...baselineIssues].sort((a, b) =>
       a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1,
     );
-    const issues = withIssueIds(sortedIssues.slice(0, 20));
+    const issues = withIssueIds(sortedIssues);
     const critical = issues.filter((issue) => issue.severity === "critical").length;
     const warnings = issues.length - critical;
     const ignored = sourceIssues.length - fixable.length;
     const ignoredNote = ignored ? `，另有 ${ignored} 条可忽略不处理` : "";
-    const cappedNote =
-      issues.length < baselineIssues.length ? "，问题较多时先处理严重项" : "";
+    const repairBaseline = buildRepairBaseline({
+      jobId: job.id,
+      chapterIndex: target.index,
+      text: target.content,
+      issues,
+    });
 
     logJob(
       job,
-      `开始定点修复第 ${target.index} 章《${target.title}》…（${critical} 严重 / ${warnings} 建议${ignoredNote}${cappedNote}）`,
+      `开始定点修复第 ${target.index} 章《${target.title}》…（${critical} 严重 / ${warnings} 建议${ignoredNote}；基线 ${repairBaseline.chapterVersion}）`,
     );
 
     // 按问题检索相关章节原文，修复与独立审校共用同一份证据。
@@ -2267,56 +2282,83 @@ async function runRepair(
     let regressionScope = "";
     let causalBaselines: CausalBaseline[] = [];
     let changedChapters: AppliedChapterBatch[] = [];
+    // 跨章方案必须一次性完成授权章节的补丁；单章修复才按根因分组累积 V1。
+    const allowsGroupedRepair = Object.keys(crossChapters).length === 0;
+    const repairGroups = allowsGroupedRepair
+      ? groupIssuesByRootCause(issues)
+      : [{ key: "all", issues }];
     try {
-      const plan = await repairChapterPatches(
-        detail.meta,
-        chapterPlan,
-        target.content,
-        issues,
-        canonForChapter(canon, target.index),
-        previousEnding,
-        nextOpening,
-        `根据${sourceLabel}做定点修复：只修改与这些问题直接相关的段落，其余原文尽量保持不动。`,
-        "",
-        {
-          evidenceContext: evidence.text,
-          authorDirective,
-          crossChapterContext,
-          affectedChapters: [target.index, ...Object.keys(crossChapters).map(Number)],
-        },
-      );
-      const patchChapters: PatchChapter[] = [
-        { index: target.index, text: target.content },
-        ...Object.keys(crossChapters).map((key) => {
-          const index = Number(key);
-          return {
-            index,
-            text: crossChapters[index],
-            extraAuthorizedAnchors: crossAnchors[index],
-          };
-        }),
-      ];
-      changedChapters = applyRepairPatchesAcross({
-        chapters: patchChapters,
-        targetIndex: target.index,
-        patches: plan.patches,
-        issues,
-      });
-      const targetBatch = changedChapters.find(
-        (batch) => batch.chapterIndex === target.index,
-      );
-      if (!targetBatch) {
-        throw new RepairPatchError(
-          "UNCOVERED_ISSUE",
-          "补丁没有修改目标章节，无法解决当前章节问题",
+      let candidateText = target.content;
+      for (const [groupIndex, group] of repairGroups.entries()) {
+        if (repairGroups.length > 1) {
+          logJob(
+            job,
+            `第 ${target.index} 章按根因分组修复（第 ${groupIndex + 1}/${repairGroups.length} 组，${group.issues.length} 个问题）…`,
+          );
+        }
+        const plan = await repairChapterPatches(
+          detail.meta,
+          chapterPlan,
+          candidateText,
+          group.issues,
+          canonForChapter(canon, target.index),
+          previousEnding,
+          nextOpening,
+          `根据${sourceLabel}做定点修复：只修改与这些问题直接相关的段落，其余原文尽量保持不动。`,
+          "",
+          {
+            evidenceContext: evidence.text,
+            authorDirective,
+            crossChapterContext,
+            affectedChapters: [
+              target.index,
+              ...Object.keys(crossChapters).map(Number),
+            ],
+          },
         );
+        const patchChapters: PatchChapter[] = [
+          {
+            index: target.index,
+            text: candidateText,
+            extraAuthorizedAnchors: plan.authorizedAnchors,
+          },
+          ...Object.keys(crossChapters).map((key) => {
+            const index = Number(key);
+            return {
+              index,
+              text: crossChapters[index],
+              extraAuthorizedAnchors: crossAnchors[index],
+            };
+          }),
+        ];
+        const batches = applyRepairPatchesAcross({
+          chapters: patchChapters,
+          targetIndex: target.index,
+          patches: plan.patches,
+          issues: group.issues,
+        });
+        const targetBatch = batches.find(
+          (batch) => batch.chapterIndex === target.index,
+        );
+        if (!targetBatch) {
+          throw new RepairPatchError(
+            "UNCOVERED_ISSUE",
+            "补丁没有修改目标章节，无法解决当前章节问题",
+          );
+        }
+        for (const batch of batches) {
+          logPatchBatch(job, batch.chapterIndex, batch);
+        }
+        changedChapters.push(...batches);
+        candidateText = targetBatch.text;
+        if (plan.regressionScope) {
+          regressionScope = [regressionScope, plan.regressionScope]
+            .filter(Boolean)
+            .join("；");
+        }
+        causalBaselines = [...causalBaselines, ...(plan.causalBaselines ?? [])];
       }
-      for (const batch of changedChapters) {
-        logPatchBatch(job, batch.chapterIndex, batch);
-      }
-      text = targetBatch.text;
-      regressionScope = plan.regressionScope;
-      causalBaselines = plan.causalBaselines ?? [];
+      text = candidateText;
     } catch (error) {
       if (error instanceof RepairNeedsAuthorDecisionError) {
         if (!decisionOption && error.options.length) {
@@ -2384,7 +2426,7 @@ async function runRepair(
       evidenceContext: evidence.text,
     });
     throwIfCancelled(job);
-    const candidateText = result.text;
+    let candidateText = result.text;
 
     if (isPauseRequested(job)) {
       const draft = await saveRejectedDraft(job.slug, {
@@ -2424,10 +2466,258 @@ async function runRepair(
       break;
     }
 
-    // 4) 统一验收：原问题全部解决、无新增严重问题或警告、事实未被破坏。
+    // 4) 新增严重问题必须由独立调用确认；只有 confirmed_new 才进入第二轮。
+    let ignoredAdded: ContinuityIssue[] = [];
+    let ignoredAddedKeys = new Set<string>();
+    if (allowsGroupedRepair) {
+      const baselineComparison = compareToBaseline(
+        repairBaseline,
+        result.review,
+        detail.characters,
+      );
+      const addedCritical = baselineComparison.added.filter(
+        (issue) => issue.severity === "critical",
+      );
+      if (addedCritical.length) {
+        logJob(
+          job,
+          `第 ${target.index} 章候选稿出现 ${addedCritical.length} 个疑似新增严重问题，交给独立确认…`,
+        );
+        const confirmations = await confirmRepairRegressions({
+          meta: detail.meta,
+          chapter: chapterPlan,
+          originalText: target.content,
+          candidateText,
+          baseline: repairBaseline,
+          newIssues: addedCritical,
+          evidenceContext: evidence.text,
+        });
+        const outcome = summarizeConfirmations(confirmations);
+        if (outcome.schemeFailure) {
+          const draft = await saveRejectedDraft(job.slug, {
+            index: target.index,
+            content: candidateText,
+            mode: "rewrite",
+            reason: "第一次修复方案本身不成立（新增问题属于方案级失败），未写入正文，需要作者重新选择方案",
+            review: result.review,
+          });
+          rejectedCount += 1;
+          logJob(
+            job,
+            `第 ${target.index} 章新增问题表明第一次修复方案本身不成立，停止在错误方案上继续打补丁；候选稿保存在 ${draft.path}。`,
+          );
+          continue;
+        }
+        if (outcome.uncertain.length) {
+          const draft = await saveRejectedDraft(job.slug, {
+            index: target.index,
+            content: candidateText,
+            mode: "rewrite",
+            reason: `新增严重问题无法独立确认（${outcome.uncertain.length} 个 uncertain），需要作者确认`,
+            review: result.review,
+          });
+          paused = true;
+          job.result = `第 ${target.index} 章需要作者确认新增问题`;
+          logJob(
+            job,
+            `第 ${target.index} 章有 ${outcome.uncertain.length} 个新增严重问题无法确认是否由本次修复引入，已停止自动修复；候选稿保存在 ${draft.path}。`,
+          );
+          break;
+        }
+        ignoredAdded = outcome.ignored;
+        ignoredAddedKeys = new Set(
+          ignoredAdded.map((issue) => `${issue.type}|${issue.evidence}|${issue.detail}`),
+        );
+        if (!outcome.confirmedNew.length) {
+          logJob(
+            job,
+            `第 ${target.index} 章疑似新增严重问题经独立确认均非本次修复引入（pre_existing/false_positive），不阻断验收。`,
+          );
+        } else {
+          logJob(
+            job,
+            `第 ${target.index} 章确认 ${outcome.confirmedNew.length} 个新增严重问题，进入第二轮定点修复（只处理这些新增问题）。`,
+          );
+          const round2Issues = withIssueIds(outcome.confirmedNew);
+          const protectedIds = baselineComparison.resolved
+            .map((issue) => issue.id)
+            .filter((id): id is string => Boolean(id));
+          const round2Directive = [
+            authorDirective,
+            `第二轮只允许修复新增问题：${round2Issues
+              .map((issue) => issue.id)
+              .join("、")}；不得重新处理已解决的原问题：${
+              protectedIds.join("、") || "无"
+            }；不得修改第一轮授权锚点之外的段落。`,
+          ]
+            .filter(Boolean)
+            .join("\n");
+          try {
+            const plan2 = await repairChapterPatches(
+              detail.meta,
+              chapterPlan,
+              candidateText,
+              round2Issues,
+              canonForChapter(canon, target.index),
+              previousEnding,
+              nextOpening,
+              "第二轮只修复第一次修复新增的严重问题，不得重做已解决的原问题。",
+              "",
+              {
+                evidenceContext: evidence.text,
+                authorDirective: round2Directive,
+                affectedChapters: [target.index],
+              },
+            );
+            const [batch2] = applyRepairPatchesAcross({
+              chapters: [
+                {
+                  index: target.index,
+                  text: candidateText,
+                  extraAuthorizedAnchors: plan2.authorizedAnchors,
+                },
+              ],
+              targetIndex: target.index,
+              patches: plan2.patches,
+              issues: round2Issues,
+            });
+            if (!batch2) {
+              throw new RepairPatchError(
+                "UNCOVERED_ISSUE",
+                "第二轮补丁没有修改目标章节",
+              );
+            }
+            logPatchBatch(job, batch2.chapterIndex, batch2);
+            candidateText = batch2.text;
+            causalBaselines = [
+              ...causalBaselines,
+              ...(plan2.causalBaselines ?? []),
+            ];
+            if (plan2.regressionScope) {
+              regressionScope = [regressionScope, plan2.regressionScope]
+                .filter(Boolean)
+                .join("；");
+            }
+          } catch (error) {
+            const draft = await saveRejectedDraft(job.slug, {
+              index: target.index,
+              content: candidateText,
+              mode: "rewrite",
+              reason: `第二轮修复未生成可用补丁：${errorMessage(error)}`,
+              review: result.review,
+            });
+            rejectedCount += 1;
+            logJob(
+              job,
+              `第 ${target.index} 章第二轮修复未生成可用补丁，停止自动修复；候选稿保存在 ${draft.path}。`,
+            );
+            continue;
+          }
+          logJob(job, `第 ${target.index} 章第二轮候选稿完成，重新独立审校…`);
+          const second = await verifyChapter({
+            job,
+            project: detail,
+            meta: detail.meta,
+            bible: detail.bible,
+            characters: detail.characters,
+            chapter: chapterPlan,
+            text: candidateText,
+            canon,
+            memory,
+            story,
+            previousEnding,
+            previousSummaries: priorSummaries.slice(-2),
+            nextOpening,
+            nextSummary,
+            mode: "rewrite",
+            rewriteInstruction: "第二轮定点修复后的独立审校。",
+            reviewFeedback: "",
+            maxRepairs: 0,
+            evidenceContext: evidence.text,
+          });
+          throwIfCancelled(job);
+          if (isPauseRequested(job)) {
+            const draft = await saveRejectedDraft(job.slug, {
+              index: target.index,
+              content: second.text,
+              mode: "rewrite",
+              reason: "第二轮候选稿审校完成后任务暂停，未写入正文",
+              review: second.review,
+            });
+            paused = true;
+            job.result = `已暂停：第 ${target.index} 章第二轮候选稿保存在草稿`;
+            logJob(
+              job,
+              `第 ${target.index} 章第二轮候选稿审校后任务已暂停，候选稿保存在 ${draft.path}，原正文未改动。`,
+            );
+            break;
+          }
+          if (second.auditFailed || second.review.extractionOk === false) {
+            const draft = await saveRejectedDraft(job.slug, {
+              index: target.index,
+              content: second.text,
+              mode: "rewrite",
+              reason: "第二轮候选稿审校或事实抽取失败，未覆盖原稿",
+              review: second.review,
+            });
+            paused = true;
+            job.result = `第 ${target.index} 章第二轮候选稿未覆盖原稿`;
+            logJob(
+              job,
+              `第 ${target.index} 章第二轮候选稿审校或抽取失败（不是正文问题），未写入正文；候选稿保存在 ${draft.path}。`,
+            );
+            break;
+          }
+          candidateText = second.text;
+          const secondComparison = compareToBaseline(
+            repairBaseline,
+            second.review,
+            detail.characters,
+          );
+          const secondAdded = secondComparison.added.filter(
+            (issue) =>
+              issue.severity === "critical" &&
+              !ignoredAddedKeys.has(`${issue.type}|${issue.evidence}|${issue.detail}`),
+          );
+          const stillNew = compareCriticalIssues(
+            round2Issues,
+            second.review.issues,
+            detail.characters,
+          ).remaining;
+          if (
+            secondComparison.remaining.length ||
+            secondAdded.length ||
+            stillNew.length
+          ) {
+            const draft = await saveRejectedDraft(job.slug, {
+              index: target.index,
+              content: candidateText,
+              mode: "rewrite",
+              reason: `第二轮修复仍未通过验收：原问题遗留 ${secondComparison.remaining.length}，新增 ${secondAdded.length}，第二轮问题未解决 ${stillNew.length}`,
+              review: second.review,
+            });
+            rejectedCount += 1;
+            logJob(
+              job,
+              `第 ${target.index} 章第二轮修复仍未通过验收（原问题遗留 ${secondComparison.remaining.length}，新增 ${secondAdded.length}，未解决 ${stillNew.length}），停止自动修复；候选稿保存在 ${draft.path}。`,
+            );
+            continue;
+          }
+          Object.assign(result, second);
+          logJob(
+            job,
+            `第 ${target.index} 章第二轮修复完成：原始严重问题与确认的新增问题均已解决，停止自动修复（不进行第三轮）。`,
+          );
+        }
+      }
+    }
+
+    // 5) 统一验收：原问题全部解决、无新增严重问题或警告、事实未被破坏。
     const acceptance = evaluateRepair({
       before: issues,
-      after: result.review.issues,
+      after: result.review.issues.filter(
+        (issue) => !ignoredAddedKeys.has(`${issue.type}|${issue.evidence}|${issue.detail}`),
+      ),
       characters: detail.characters,
       extractionOk: true,
       auditFailed: false,
@@ -2596,25 +2886,44 @@ async function runRepair(
       break;
     }
 
+    // 回归审校中的 warning/ignore 只记录，不因为数组非空就阻断写回。
+    const regressionCritical = regression.issues.filter(
+      (issue) => issue.severity === "critical",
+    );
     const regressionAcceptance = evaluateRepair({
       before: issues,
-      after: [...result.review.issues, ...regression.issues],
+      after: [
+        ...result.review.issues.filter(
+          (issue) =>
+            !ignoredAddedKeys.has(`${issue.type}|${issue.evidence}|${issue.detail}`),
+        ),
+        ...regressionCritical,
+      ],
       characters: detail.characters,
       extractionOk: true,
       auditFailed: false,
-      factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+      factConflicts: [...(result.factConflicts ?? []), ...regressionCritical],
       // 基线是否为空已由问题验收阶段判定；回归阶段只检查新增问题和因果变化。
       allowNoBaseline: true,
       causalChanges: regression.causalChanges,
       causalVerified: regression.causalVerified,
     });
-    if (regression.issues.length || !regressionAcceptance.accepted) {
+    if (regression.issues.length > regressionCritical.length) {
+      logJob(
+        job,
+        `第 ${target.index} 章回归审校另有 ${regression.issues.length - regressionCritical.length} 条 warning/ignore，已记录，不阻断写回。`,
+      );
+    }
+    if (regressionCritical.length || !regressionAcceptance.accepted) {
       const draft = await saveRejectedDraft(job.slug, {
         index: target.index,
         content: candidateText,
         mode: "rewrite",
         reason: `修复后回归审校未通过（${regressionAcceptance.status}）：${describeAcceptance(regressionAcceptance)}`,
-        review: { ...result.review, issues: [...result.review.issues, ...regression.issues] },
+        review: {
+          ...result.review,
+          issues: [...result.review.issues, ...regressionCritical],
+        },
       });
       rejectedCount += 1;
       logJob(
@@ -3190,19 +3499,29 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       break;
     }
 
-    const mergedIssues = [...result.review.issues, ...regression.issues];
+    // 回归 warning/ignore 只记录；只有 critical 才进入验收。
+    const regressionCritical = regression.issues.filter(
+      (issue) => issue.severity === "critical",
+    );
+    const mergedIssues = [...result.review.issues, ...regressionCritical];
     const regressionAcceptance = evaluateRepair({
       before: result.initialIssues,
       after: mergedIssues,
       characters: detail.characters,
       extractionOk: true,
       auditFailed: false,
-      factConflicts: [...(result.factConflicts ?? []), ...regression.issues],
+      factConflicts: [...(result.factConflicts ?? []), ...regressionCritical],
       allowNoBaseline: true,
       causalChanges: regression.causalChanges,
       causalVerified: regression.causalVerified,
     });
-    if (regression.issues.length || !regressionAcceptance.accepted) {
+    if (regression.issues.length > regressionCritical.length) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章回归审校另有 ${regression.issues.length - regressionCritical.length} 条 warning/ignore，已记录，不阻断采用。`,
+      );
+    }
+    if (regressionCritical.length || !regressionAcceptance.accepted) {
       const updated = await saveRejectedDraft(job.slug, {
         index: requestedDraft.index,
         content: result.text,

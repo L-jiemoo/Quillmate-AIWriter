@@ -579,9 +579,9 @@ ${clip(chapterText, 16000)}
 
 针对性判断：
 - 时间线冲突必须核对冲突时刻人物的实际位置与可达性。若“人物当时在异地”的唯一证据就是被后文解释为伪造/冒充的那通电话（声音、背景音、通话内容），该证据随之失效，不得再用它反推人物时间线；只有存在独立于该电话场景的正文旁白或既定事实时，才可保留时间线矛盾。
-- 人物台词、转述和角色推断不是客观事实。像“早到半天”这类人物说法属于 CHARACTER_BELIEF，不能当作精确时刻；除非它与独立旁白直接冲突，否则不能据此判 critical。
+- 人物台词、转述和角色推断不是客观事实。像“大约早到了半天”这类人物估测属于 CHARACTER_BELIEF，不能当作精确时刻；除非它与独立旁白直接冲突，否则不能据此判 critical。
 - 作者已经在正文中明确写出解释（如“电话是伪造的”）时，不要因为缺少进一步铺垫、途中细节或读者可能追问就判 critical；确实无法理解事件如何发生时才标 CLARITY_GAP，且只记录不阻断。
-- 区分承载物与被收纳对象：既有规则只禁止活人进入某物时，不能直接推断活人的执念/残念不能作为独立对象被收纳；状态词（如“已噬”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。`,
+- 区分承载物与被收纳对象：既有规则只禁止某种实体进入某物时，不能直接推断该实体的衍生形态不能作为独立对象被收纳；自定义状态词（如“已清除”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。`,
     },
   ];
 }
@@ -728,7 +728,7 @@ ${clip(repairedText, 16000)}
 因果结构对比（必须逐项执行，并始终返回 causalChanges 数组；没有变化时返回空数组）：
 1. 动作的执行者是否被替换或拆分？
 2. 动作的直接作用对象是否改变？
-3. 被记录/改变/处理的对象与最终结果是否仍然对应？例如书中记录对象与记录页面的归属是否错位？
+3. 被记录/改变/处理的对象与最终结果是否仍然对应？例如在记录类载体中，被记录对象与记录位置的归属是否错位？
 4. 是否新增了原文没有建立因果关系的中间对象、媒介或动作落点？
 5. 事件先后顺序是否改变？
 6. 结果是否指向了另一个人物或物体？
@@ -739,9 +739,69 @@ ${clip(repairedText, 16000)}
 - CAUSAL_CHANGE：改变动作对象、作用对象、事件顺序、结果指向或因果链，或新增无依据的中间对象。
 - CAUSAL_CONTRADICTION：修复后与原文既定事实或世界观规则直接冲突。
 同一场景中出现的对象不能互相替换；不能因为两个对象都在场，就认为记录对象、作用对象可以互换。
-示例：原文是“陈默念出沈长庚的罪行，记录之书自动生成沈长庚页”。修复稿若变成“陈默把手指按在周坤页空白处，念出沈长庚罪行，书在周坤页之后翻出沈长庚页”，却没有解释周坤页与沈长庚记录的关联，必须判为 CAUSAL_CHANGE，不能只因为句子更生动就放过。
+示例（甲、乙、丙及载体均为抽象占位，仅用于说明分类标准，不代表任何具体作品的世界观机制）：原文是“甲说出了乙的罪证，记录载体自动生成乙的记录页”。修复稿若变成“甲把手指按在丙页空白处，说出乙的罪证，记录载体在丙页之后翻出乙的记录页”，却没有解释丙页与乙的记录之间的关联，必须判为 CAUSAL_CHANGE，不能只因为句子更生动就放过。
 
 只有修复稿中真实存在的问题才报告；纯文风偏好标 ignore，不要求整章重写。修复范围之外发现的历史问题不要当作本次修复引入的新问题。`,
+    },
+  ];
+}
+
+// 第一次修复后：独立确认候选稿新增的严重问题是否真的由本次修复引入。
+export function repairRegressionConfirmMessages(
+  meta: ProjectMeta,
+  chapter: ChapterPlan,
+  originalText: string,
+  candidateText: string,
+  baselineIssues: ContinuityIssue[],
+  newIssues: ContinuityIssue[],
+  evidenceContext = "",
+): ChatMessage[] {
+  const baseline = baselineIssues
+    .map((issue, index) => `${index + 1}. [${issue.id ?? `issue-${index + 1}`}] ${issue.type}：${issue.evidence}｜${issue.detail}`)
+    .join("\n");
+  const candidates = newIssues
+    .map((issue, index) => `${index + 1}. ${issue.type}：${issue.evidence}｜${issue.detail}`)
+    .join("\n");
+  return [
+    {
+      role: "system",
+      content: `你是独立的问题确认员，不参与制定修复方案，也不修改正文。你的任务是判断候选稿中的每个新增严重问题是否真的由本次修复引入。必须依据原文证据，不能接受推测。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `请确认《${meta.title}》第 ${chapter.index} 章《${chapter.title}》修复候选稿中的新增严重问题。
+
+【修复前已确认的问题】
+${baseline || "（无）"}
+
+【待确认的新增严重问题】
+${candidates || "（无）"}
+
+${evidenceContext ? `【相关原文证据】\n${clip(evidenceContext, 5000)}\n\n` : ""}【修复前正文】
+${clip(originalText, 10000)}
+
+【修复后候选稿】
+${clip(candidateText, 12000)}
+
+请只输出 JSON：
+{
+  "confirmations": [
+    {
+      "index": 1,
+      "verdict": "confirmed_new | pre_existing | false_positive | uncertain",
+      "explanation": "依据原文说明判断",
+      "schemeLevelFailure": false
+    }
+  ]
+}
+
+判定规则：
+- confirmed_new：修复前原文没有该问题，候选稿中的证据明确引入或改变了相关事实、因果、对象或状态。
+- pre_existing：该问题在修复前正文中已经存在，不能算作本次修复回归。
+- false_positive：候选稿中找不到所引证据，或问题与原文、台账并不冲突。
+- uncertain：证据不足、无法判断是否由本次修复引入；不得猜成 confirmed_new。
+- 如果新增问题说明第一次修复方案本身不成立（例如为修复一个问题而新增违反世界观的能力、改变核心人物身份、新增未授权关键事件），把 schemeLevelFailure 设为 true。
+- 只判断【待确认的新增严重问题】，不要重新审校整章，也不要提出修改建议。`,
     },
   ];
 }

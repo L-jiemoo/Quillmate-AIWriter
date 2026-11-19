@@ -121,7 +121,7 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("人物说出的判断不能自动当作客观世界观规则");
     expect(text).toContain("唯一证据就是被后文解释为伪造");
     expect(text).toContain("人物台词、转述和角色推断不是客观事实");
-    expect(text).toContain("早到半天");
+    expect(text).toContain("人物估测属于 CHARACTER_BELIEF");
     expect(text).toContain("承载物与被收纳对象");
   });
 
@@ -149,7 +149,8 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("CAUSAL_CHANGE");
     expect(text).toContain("CAUSAL_CONTRADICTION");
     expect(text).toContain("causalChanges");
-    expect(text).toContain("周坤页");
+    expect(text).toContain("丙页");
+    expect(text).toContain("抽象占位");
     expect(text).toContain("新增了原文没有建立因果关系的中间对象");
   });
 
@@ -159,12 +160,12 @@ describe("典型小说审校提示词回归", () => {
       chapterRepairPlanMessages(
         detail.meta,
         detail.plan.chapters[3],
-        "陈默念出沈长庚的罪行，记录之书自动生成沈长庚页。",
+        "甲说出了乙的罪证，记录载体自动生成乙的记录页。",
         [
           {
             severity: "critical",
             type: "剧情因果",
-            evidence: "陈默念出沈长庚的罪行。",
+            evidence: "甲说出了乙的罪证。",
             detail: "与第 4 章冲突。",
           },
         ],
