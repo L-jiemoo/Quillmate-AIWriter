@@ -171,7 +171,7 @@ function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
 // 审校证据常用“……”把不同段落的原文拼在一起，整条证据无法在正文中命中。
 function evidenceFragments(anchor: string): string[] {
   return anchor
-    .split(/…+|\.{3,}|⋯+/u)
+    .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
     .map((part) => part.trim())
     .filter((part) => part.length >= 2);
 }

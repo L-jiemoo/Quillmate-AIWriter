@@ -190,6 +190,16 @@ function uniqueIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
   });
 }
 
+// 审校证据常用“……”或“／”把不同位置的原文拼在一起；整串拼接后不可能在正文中连续出现。
+const EVIDENCE_SEPARATORS = /…+|\.{3,}|⋯+|[／/|｜]+|\n+/u;
+
+function evidenceFragments(value: string): string[] {
+  return value
+    .split(EVIDENCE_SEPARATORS)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 export function filterSeedIssues(
   issues: ContinuityIssue[],
   chapterText: string,
@@ -198,11 +208,14 @@ export function filterSeedIssues(
   const active: ContinuityIssue[] = [];
   const stale: ContinuityIssue[] = [];
   for (const issue of uniqueIssues(issues)) {
-    const evidence = normalizeIssueText(issue.evidence);
-    if (
-      evidence.length >= MIN_EVIDENCE_LENGTH &&
-      normalizedText.includes(evidence)
-    ) {
+    const fragments = evidenceFragments(issue.evidence)
+      .map(normalizeIssueText)
+      .filter((part) => part.length >= MIN_EVIDENCE_LENGTH);
+    const whole = normalizeIssueText(issue.evidence);
+    const matched = fragments.length
+      ? fragments.every((part) => normalizedText.includes(part))
+      : whole.length >= MIN_EVIDENCE_LENGTH && normalizedText.includes(whole);
+    if (matched) {
       active.push(issue);
     } else {
       stale.push(issue);
