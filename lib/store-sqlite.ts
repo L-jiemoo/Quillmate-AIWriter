@@ -3,6 +3,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { buildInitialCanon, isCanonEmpty } from "./canon";
 import { normalizeMemory } from "./memory";
+import {
+  assertValidPlanLedger,
+  derivePlanLedger,
+  emptyPlanLedger,
+  mergePlanLedgers,
+  normalizePlanLedger,
+  planEntriesForChapters,
+} from "./plan-ledger";
 import { normalizeStory } from "./story";
 import { derivePublishLedger, removePublishEntry, upsertPublishEntry } from "./publish-ledger";
 import {
@@ -66,6 +74,7 @@ import type {
   FanqieConfig,
   ProjectDetail,
   ProjectFile,
+  PlanLedger,
   ProjectMemory,
   ProjectMeta,
   ProjectPlan,
@@ -106,6 +115,16 @@ async function chapterPath(slug: string, index: number): Promise<string> {
   return projectFile(slug, "chapters", `${index}.md`);
 }
 
+// 旧项目或迁移前项目没有计划台账行：只读派生 planned 记录，不写库。
+function resolvePlanLedger(
+  slug: string,
+  plan: ProjectPlan,
+  outlineMd: string,
+  updatedAt: string,
+): PlanLedger {
+  return repo.getPlanLedger(slug) ?? derivePlanLedger(plan, outlineMd, updatedAt);
+}
+
 export async function createProject(input: CreateProjectInput): Promise<ProjectDetail> {
   const title = input.title.trim();
   if (!title) throw new Error("书名不能为空");
@@ -141,6 +160,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectD
   await fs.mkdir(projectFile(slug, "chapters"), { recursive: true });
   try {
     repo.insertProject(file);
+    repo.replacePlanLedger(slug, emptyPlanLedger(now));
     await writeText(
       projectFile(slug, "world.md"),
       `# ${title} · 世界观圣经\n\n> 在「总览」中点击「生成架构」后，这里会自动填充。\n\n## 核心创意\n\n${meta.idea || "（尚未填写）"}\n`,
@@ -228,6 +248,7 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
   }
   const bible = await readText(projectFile(slug, "world.md"));
   const outlineMd = await readText(projectFile(slug, "outline.md"));
+  const planLedger = resolvePlanLedger(slug, plan, outlineMd, file.meta.updatedAt);
   const chapterStates = repo.getChapterStates(slug);
   const writtenSet = new Set(state.written);
 
@@ -253,6 +274,7 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
     state,
     chapters,
     canon,
+    planLedger,
     publish: file.publish,
     publishLedger,
     pendingChapters: chapters.filter((chapter) => !chapter.written).length,
@@ -312,6 +334,7 @@ export async function savePlan(
 export async function appendChapters(
   slug: string,
   chapters: ChapterPlan[],
+  planLedger?: PlanLedger,
 ): Promise<ProjectPlan> {
   const file = repo.getProjectFile(slug);
   const plan = repo.getPlan(slug);
@@ -355,7 +378,19 @@ export async function appendChapters(
   };
   const previous = previousPlanForRollback(slug);
 
-  repo.appendPlanChapters(slug, chapters, nextFile);
+  let nextLedger: PlanLedger;
+  if (planLedger) {
+    nextLedger = normalizePlanLedger(planLedger);
+  } else {
+    const current =
+      repo.getPlanLedger(slug) ?? derivePlanLedger(plan, await readText(projectFile(slug, "outline.md")), file.meta.updatedAt);
+    nextLedger = mergePlanLedgers(current, {
+      ...emptyPlanLedger(file.meta.updatedAt),
+      events: planEntriesForChapters(chapters, file.meta.updatedAt),
+    });
+  }
+  assertValidPlanLedger(nextLedger, nextPlan);
+  repo.appendPlanChapters(slug, chapters, nextFile, nextLedger);
   try {
     await commitProjectWrites(slug, [
       {
@@ -394,7 +429,7 @@ export async function appendOutlineSection(
 
 export async function commitArchitecture(
   slug: string,
-  generated: { plan: ProjectPlan; bible: string; outlineMd: string },
+  generated: { plan: ProjectPlan; bible: string; outlineMd: string; planLedger?: PlanLedger },
   characters: Character[],
   options: { seedCanon?: boolean } = {},
 ): Promise<CommitArchitectureResult> {
@@ -426,6 +461,10 @@ export async function commitArchitecture(
   const existing = repo.getCharacters(slug);
   const merged = mergeGeneratedCharacters(existing, normalized);
   const syncedOutline = ensurePlanOutlineSync(generated.outlineMd, sortedPlan.chapters);
+  const planLedger = generated.planLedger
+    ? normalizePlanLedger(generated.planLedger)
+    : derivePlanLedger(sortedPlan, syncedOutline);
+  assertValidPlanLedger(planLedger, sortedPlan);
   const nextFile: ProjectFile = {
     ...file,
     meta: {
@@ -437,6 +476,7 @@ export async function commitArchitecture(
   const previous = previousPlanForRollback(slug);
   const previousCharacters = repo.getCharacters(slug);
   const previousCanon = repo.getCanon(slug);
+  const previousPlanLedger = repo.getPlanLedger(slug) ?? emptyPlanLedger();
   const initialCanon =
     options.seedCanon === true && isCanonEmpty(previousCanon)
       ? buildInitialCanon(merged.characters)
@@ -448,6 +488,7 @@ export async function commitArchitecture(
     merged.characters,
     nextFile,
     initialCanon,
+    planLedger,
   );
   try {
     await commitProjectWrites(slug, [
@@ -469,6 +510,7 @@ export async function commitArchitecture(
       previousCharacters,
       previous.file,
       previousCanon,
+      previousPlanLedger,
     );
     throw error;
   }
@@ -611,6 +653,19 @@ export async function getStory(slug: string): Promise<StoryLedger> {
 export async function saveStory(slug: string, story: StoryLedger): Promise<void> {
   repo.getProjectFile(slug);
   repo.replaceStory(slug, normalizeStory(story));
+}
+
+export async function getPlanLedger(slug: string): Promise<PlanLedger> {
+  const file = repo.getProjectFile(slug);
+  const plan = repo.getPlan(slug);
+  const outlineMd = await readText(projectFile(slug, "outline.md"));
+  return resolvePlanLedger(slug, plan, outlineMd, file.meta.updatedAt);
+}
+
+export async function savePlanLedger(slug: string, ledger: PlanLedger): Promise<void> {
+  const file = repo.getProjectFile(slug);
+  repo.replacePlanLedger(slug, normalizePlanLedger(ledger));
+  repo.updateProjectFile({ ...file, meta: { ...file.meta, updatedAt: nowIso() } });
 }
 
 export async function commitCanonRebuild(

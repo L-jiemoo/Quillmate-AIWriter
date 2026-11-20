@@ -45,15 +45,37 @@ export function architectMessages(meta: ProjectMeta): ChatMessage[] {
   "outlineMd": "全书主线大纲（Markdown）：分卷结构、主线冲突、伏笔与回收点、爽点节奏",
   "chapters": [
     {"index": 1, "title": "章节标题（不含“第X章”前缀）", "summary": "本章 80-150 字剧情梗概", "keyBeats": ["关键事件1", "关键事件2"]}
-  ]
+  ],
+  "planLedger": {
+    "events": [
+      {"id": "plan-event-1", "name": "计划事件名称", "chapter": 1, "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "core"}
+    ],
+    "characterChanges": [
+      {"id": "plan-char-1", "character": "人物姓名", "chapter": 8, "before": "变化前状态", "after": "变化后状态", "reason": "变化原因", "eventIds": ["plan-event-1"]}
+    ],
+    "foreshadows": [
+      {"id": "plan-foreshadow-1", "text": "伏笔内容", "plantChapter": 2, "resolveChapter": 12, "purpose": "伏笔作用", "eventIds": ["plan-event-1"], "resolveCondition": "回收条件"}
+    ],
+    "timeline": [
+      {"id": "plan-time-1", "chapter": 1, "time": "计划时间", "eventIds": ["plan-event-1"], "sequence": "事件先后关系", "constraints": "时间约束", "participants": ["人物"]}
+    ],
+    "items": [
+      {"id": "plan-item-1", "item": "重要物品", "chapter": 5, "holder": "预计持有人", "stateChange": "预计状态变化", "eventIds": ["plan-event-1"]}
+    ]
+  }
 }
 
 要求：
 - chapters 从 index 1 开始连续编号，数量为 ${meta.targetChapters}。
+- planLedger 是“创作计划”，只描述未来准备发生什么；不得包含 status、actualChapter 或任何“已经发生”的字段。
+- 每个章节至少关联一个计划事件；events 的 chapter 必须落在 1-${meta.targetChapters}。
+- 所有 id 必须唯一且稳定，relatedEventIds/eventIds 只能引用本 planLedger 中存在的 id。
+- 人物变化必须写成计划：例如人物计划在第 8 章死亡，只能在 characterChanges 中登记第 8 章“存活 → 死亡”，绝不能写成当前已经死亡。
+- 物品和时间线也必须是计划中的变化，不能提前写成既定事实。
 - 先定全书主线的起点、发展阶段、关键转折和终局方向，再拆分卷；每卷要有独立的阶段目标，并服务于全书主线。
 - 重要冲突要写清起因、发展、代价和后果，不能只堆事件。
 - 人物行动必须符合其性格、目标、认知和当前处境，不要为了爽点牺牲人物逻辑和故事因果。
-- 重要伏笔在 outlineMd 中记录埋设章节、作用和预计回收位置；伏笔必须有实际剧情价值，不得为了制造悬念而随意设置。
+- 重要伏笔在 outlineMd 和 planLedger.foreshadows 中同时记录埋设章节、作用和预计回收位置；伏笔必须有实际剧情价值，不得为了制造悬念而随意设置。
 - 世界观规则必须内部一致，为长篇连载留出扩展空间，但不得前后矛盾。
 - 每章都要有明确推进作用；关键节点章要有冲突或钩子，过渡章允许铺垫和情绪沉淀，不必章章强反转。
 - 避免生成只有事件堆积、缺少人物动机和情节联系的大纲。`,
@@ -126,11 +148,25 @@ ${clip(context.storyContext?.trim() || "（未检索到剧情台账；不得虚�
 {
   "chapters": [
     {"index": ${startIndex}, "title": "章节标题（不含“第X章”前缀）", "summary": "本章 80-150 字剧情梗概", "keyBeats": ["关键事件1", "关键事件2"]}
-  ]
+  ],
+  "planLedger": {
+    "events": [
+      {"id": "plan-extend-event-${startIndex}-1", "name": "计划事件名称", "chapter": ${startIndex}, "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "major"}
+    ],
+    "characterChanges": [],
+    "foreshadows": [
+      {"id": "plan-extend-foreshadow-1", "text": "伏笔内容", "plantChapter": ${startIndex}, "resolveChapter": 0, "purpose": "伏笔作用", "eventIds": [], "resolveCondition": "回收条件"}
+    ],
+    "timeline": [],
+    "items": []
+  }
 }
 
 要求：
 - chapters 从 index ${startIndex} 开始连续编号，共 ${count} 章。
+- planLedger 只登记本批新章节的计划，chapter 必须落在 ${startIndex}-${startIndex + count - 1}；不要重复登记已有章节。
+- 新 id 统一使用 plan-extend- 前缀，不得复用已有台账 id；只描述未来计划，不得包含 status 或 actualChapter。
+- 每个新章节至少关联一个计划事件；人物变化、物品和时间线也只写成计划，不代表已经发生。
 - 新章节标题必须互不相同，且不得与【现有章节标题（不得复用）】中的任何一条重复；尤其不要复用现有最后一章的标题。
 - 续排必须尊重事实台账、人物档案和剧情台账，不得推翻或改写已经发生的事实。
 - 充分考虑人物当前状态、人物关系、已发生事件和未解决冲突；人物不得知道其尚未掌握的信息。
@@ -273,7 +309,7 @@ ${clip(characterJson, 6000)}
 
 【不可违背的事实台账（来自已写章节）】
 ${formatCanonForPrompt(options.canon)}
-${options.memoryContext?.trim() ? `\n【长期记忆（来自已写章节，按当前章节相关度检索）】\n${options.memoryContext.trim()}\n` : ""}${options.storyContext?.trim() ? `\n【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】\n${options.storyContext.trim()}\n` : ""}${options.reviewFeedback?.trim() ? `\n【上一版审校发现的严重问题（新稿中仍存在则必须解决，已不存在的不要强行改剧情）】\n${clip(options.reviewFeedback.trim(), 2400)}\n` : ""}
+${options.memoryContext?.trim() ? `\n【长期记忆（来自已写章节，按当前章节相关度检索）】\n${options.memoryContext.trim()}\n` : ""}${options.storyContext?.trim() ? `\n【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】\n${options.storyContext.trim()}\n` : ""}${options.planContext?.trim() ? `\n【本章计划台账（创作计划，不代表已经发生）】\n${clip(options.planContext.trim(), 2400)}\n` : ""}${options.reviewFeedback?.trim() ? `\n【上一版审校发现的严重问题（新稿中仍存在则必须解决，已不存在的不要强行改剧情）】\n${clip(options.reviewFeedback.trim(), 2400)}\n` : ""}
 【上一章结尾（原文）】
 ${ending}
 ${nextOpening ? `\n【下一章开头（供收束参考）】\n${clip(nextOpening, 800)}\n` : ""}
@@ -302,6 +338,9 @@ ${nextOpening ? "- 本章结尾必须能自然过渡到【下一章开头（供�
 - 【长期记忆】只来自已写章节的摘要/事件/人物/规则检索结果；记忆中没有记录的人物、物品、关系和事件，不得补写成既定事实。检索不到时按本章细纲自然推进，不要虚构“前文已经发生”的内容。
 - 如果【长期记忆】与事实台账冲突，以事实台账为准；如果与本章细纲冲突，以已写事实为准并自然处理。
 - 【剧情台账】中的人物状态、关系、事件和伏笔也只来自已写章节；未记录的状态变化、关系和因果不得凭空补写。人物行为必须符合其当前生死、位置、身体、能力和掌握的信息。
+- 【本章计划台账】只是创作计划，不代表这些事情已经发生；正文没有实际写出的计划事件、人物变化、物品转移或伏笔，不得当成既定事实。
+- 计划与事实台账或实际剧情冲突时，以事实台账和已写剧情为准；不得为了完成计划而强行制造不符合前文的剧情。
+- 三种台账冲突时的优先级：事实台账 > 实际剧情台账/长期记忆 > 计划台账。已确认事实不能被计划覆盖。
 - 伏笔只按台账中“未回收/待回收/发展中”的状态推进；不得在没有正文依据时宣布回收。若本章按细纲需要回收，必须写出明确回收情节。
 - 已死角色只能以回忆、尸体、幻象、遗物或他人转述出现；不得说话、行走、战斗、持有物品或推动现场剧情。若细纲要求其行动，改用其他在世角色承担该行动，或明确处理为上述非活人形式。
 - 字数约 ${meta.wordsPerChapter} 字（上下浮动 20% 以内）。

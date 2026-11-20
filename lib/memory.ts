@@ -516,7 +516,6 @@ export function seedChapterMemory(detail: ProjectDetail, index: number): Chapter
   );
   const items = canon.items.filter((item) => item.chapter === index);
   const deadlines = canon.timeline.deadlines.filter((item) => item.chapter === index);
-  const foreshadows = parseOutlineForeshadows(detail.outlineMd);
   return {
     index,
     summary: clipText(summary, 2000),
@@ -534,12 +533,10 @@ export function seedChapterMemory(detail: ProjectDetail, index: number): Chapter
       ...items.map((item) => `物品：${item.name}`),
       ...deadlines.map((item) => `期限：${item.name}`),
     ]).slice(0, 40),
-    foreshadowsPlanted: foreshadows
-      .filter((item) => item.plantedChapter === index)
-      .map((item) => item.text),
-    foreshadowsResolved: foreshadows
-      .filter((item) => item.resolvedChapter === index)
-      .map((item) => item.text),
+    // 大纲里的伏笔只是计划，不能因为章节已写就视为已经埋设。
+    // 实际埋设/回收只能来自正文抽取结果（写章节时写入记忆）。
+    foreshadowsPlanted: [],
+    foreshadowsResolved: [],
     source: "summary",
     updatedAt: detail.state.updatedAt || detail.meta.updatedAt || nowIso(),
   };
@@ -570,7 +567,8 @@ export function collectOpenForeshadows(
   beforeChapter: number,
 ): OpenForeshadow[] {
   const chapters = Object.values(memory.chapters)
-    .filter((item) => item.index < beforeChapter)
+    // source=summary 的记忆来自大纲/摘要自动派生，不能作为伏笔实际埋设或回收的证据。
+    .filter((item) => item.index < beforeChapter && item.source !== "summary")
     .sort((a, b) => a.index - b.index);
   const planted: OpenForeshadow[] = [];
   for (const chapter of chapters) {
@@ -1096,7 +1094,8 @@ export function buildMemoryContext(
     {
       title: "未回收伏笔",
       lines: open.length ? open.map(foreshadowLine) : ["（未检索到未回收伏笔）"],
-      priority: 90,
+      // 核心事实和未回收伏笔在预算紧张时优先于全书摘要。
+      priority: 112,
     },
     {
       title: "相关人物",
@@ -1106,7 +1105,7 @@ export function buildMemoryContext(
       ].length
         ? [...relevantCanonCharacters.map(canonicalCharacterLine), ...relevantCards.map(characterCardLine)]
         : ["（未检索到与本章直接相关的人物；不要虚构人物关系）"],
-      priority: 85,
+      priority: 108,
     },
     {
       title: "相关历史章节（只含摘要，不含正文）",

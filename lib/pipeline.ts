@@ -49,6 +49,12 @@ import {
   buildEffectiveMemory,
   buildMemoryContext,
 } from "./memory";
+import {
+  emptyPlanLedger,
+  formatPlanContext,
+  mergePlanLedgers,
+  reconcileChapterPlan,
+} from "./plan-ledger";
 import { promptVersionInfo } from "./prompt-store";
 import { findPublishEntry } from "./publish-ledger";
 import { loginFanqie, publishFanqie } from "./publishers/fanqie";
@@ -104,6 +110,7 @@ import {
   recordPublishOutcome,
   saveCanon,
   saveMemory,
+  savePlanLedger,
   saveStory,
   saveRejectedDraft,
   saveRepairBackup,
@@ -358,6 +365,10 @@ async function runPlan(job: Job): Promise<void> {
     characters,
     { seedCanon },
   );
+  logJob(
+    job,
+    `计划台账已登记：${generated.planLedger?.events.length ?? 0} 个计划事件、${generated.planLedger?.foreshadows.length ?? 0} 条计划伏笔（均未视为已发生）。`,
+  );
   job.result = `已生成 ${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色`;
   logJob(
     job,
@@ -419,7 +430,7 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     `续排上下文：事实台账 ${detail.canon.characters.length} 位人物 / ${detail.canon.items.length} 件物品，人物卡 ${detail.characters.length} 位，剧情台账 ${storyRetrieval.text.length} 字。`,
   );
 
-  const chapters = await extendPlan(
+  const extended = await extendPlan(
     detail.meta,
     detail.plan,
     detail.bible,
@@ -433,8 +444,13 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     },
   );
   throwIfCancelled(job);
-  // appendChapters 现在会在一次提交里同步 plan.json、outline.md 和项目元数据。
-  const plan = await appendChapters(job.slug, chapters);
+  const chapters = extended.chapters;
+  const nextLedger = mergePlanLedgers(
+    detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt),
+    extended.planLedger,
+  );
+  // 章节、主线大纲和计划台账在同一次提交里落盘。
+  const plan = await appendChapters(job.slug, chapters, nextLedger);
 
   job.result = `新增 ${chapters.length} 章大纲`;
   logJob(
@@ -1559,6 +1575,7 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
   let canon = detail.canon;
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   let paused = false;
 
   // 逐章串行：每章写完立即落盘并更新摘要，任务中途失败时，
@@ -1573,6 +1590,13 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
     logMemoryRetrieval(job, chapter.index, retrieval);
     const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
     logStoryRetrieval(job, chapter.index, storyRetrieval);
+    const planContext = formatPlanContext(planLedger, chapterPlan);
+    logJob(
+      job,
+      planContext
+        ? `第 ${chapter.index} 章计划台账已注入（计划不代表已发生）。`
+        : `第 ${chapter.index} 章没有登记计划台账。`,
+    );
     let text = await writeChapter(
       detail.meta,
       detail.bible,
@@ -1584,6 +1608,7 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
         canon: canonForChapter(canon, chapter.index),
         memoryContext: retrieval.text,
         storyContext: storyRetrieval.text,
+        planContext,
       },
     );
     if (!text.trim()) throw new Error(`第 ${chapter.index} 章正文为空，请重试`);
@@ -1659,6 +1684,22 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
     await saveCanon(job.slug, canon);
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
+    const reconciled = reconcileChapterPlan({
+      ledger: planLedger,
+      chapter: chapter.index,
+      chapterMemory: result.memory,
+      extracted: result.story,
+      storyEvents: story.events,
+      canon,
+    });
+    planLedger = reconciled.ledger;
+    await savePlanLedger(job.slug, planLedger);
+    if (reconciled.changes.length) {
+      logJob(
+        job,
+        `第 ${chapter.index} 章计划执行对比：${reconciled.changes.slice(0, 5).join("；")}${reconciled.changes.length > 5 ? "；……" : ""}`,
+      );
+    }
     history.push(result.review.summary);
 
     const issueCount = result.review.issues.length;
@@ -1737,6 +1778,7 @@ async function runRewrite(
   let canon = detail.canon;
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   let paused = false;
 
   for (const target of targets) {
@@ -1792,6 +1834,7 @@ async function runRewrite(
     logMemoryRetrieval(job, target.index, retrieval);
     const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
     logStoryRetrieval(job, target.index, storyRetrieval);
+    const planContext = formatPlanContext(planLedger, chapterPlan);
     let text = await writeChapter(
       detail.meta,
       detail.bible,
@@ -1807,6 +1850,7 @@ async function runRewrite(
         canon: canonForChapter(canon, target.index),
         memoryContext: retrieval.text,
         storyContext: storyRetrieval.text,
+        planContext,
       },
     );
     if (!text.trim()) throw new Error(`第 ${target.index} 章正文为空，请重试`);
@@ -1897,6 +1941,22 @@ async function runRewrite(
     await saveCanon(job.slug, canon);
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
+    const planReconciled = reconcileChapterPlan({
+      ledger: planLedger,
+      chapter: target.index,
+      chapterMemory: result.memory,
+      extracted: result.story,
+      storyEvents: story.events,
+      canon,
+    });
+    planLedger = planReconciled.ledger;
+    await savePlanLedger(job.slug, planLedger);
+    if (planReconciled.changes.length) {
+      logJob(
+        job,
+        `第 ${target.index} 章计划执行对比：${planReconciled.changes.slice(0, 5).join("；")}${planReconciled.changes.length > 5 ? "；……" : ""}`,
+      );
+    }
 
     const issueCount = result.review.issues.length;
     const repairedNote = result.review.repaired
@@ -1973,6 +2033,7 @@ async function runRepair(
   let canon = detail.canon;
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   let remainingCritical = 0;
   let repairedCount = 0;
   let rejectedCount = 0;
@@ -3070,6 +3131,21 @@ async function runRepair(
     }
     memory = await persistChapterMemory(job, detail, memory, result.memory);
     story = await persistChapterStory(job, detail, memory, story, result.memory, result.story);
+    // 修复后的正文同样要与计划台账对账；只记录计划执行情况，不改写正文。
+    for (const index of [...changedCross.map((batch) => batch.chapterIndex), target.index]) {
+      const audited = index === target.index ? result : crossResults.get(index);
+      if (!audited) continue;
+      const planReconciled = reconcileChapterPlan({
+        ledger: planLedger,
+        chapter: index,
+        chapterMemory: audited.memory,
+        extracted: audited.story,
+        storyEvents: story.events,
+        canon,
+      });
+      planLedger = planReconciled.ledger;
+    }
+    await savePlanLedger(job.slug, planLedger);
     remainingCritical += countCritical(result.review.issues);
     repairedCount += 1;
     logJob(
@@ -3129,6 +3205,7 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
   let canon = detail.canon;
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   let adopted = 0;
   let failed = 0;
   let paused = false;
@@ -3774,6 +3851,20 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       result.memory,
       result.story,
     );
+    for (const index of [...changedCross, requestedDraft.index]) {
+      const audited = index === requestedDraft.index ? result : crossResults.get(index);
+      if (!audited) continue;
+      const planReconciled = reconcileChapterPlan({
+        ledger: planLedger,
+        chapter: index,
+        chapterMemory: audited.memory,
+        extracted: audited.story,
+        storyEvents: story.events,
+        canon,
+      });
+      planLedger = planReconciled.ledger;
+    }
+    await savePlanLedger(job.slug, planLedger);
 
     adopted += 1;
     const repairedNote = result.review.repaired
@@ -3827,6 +3918,7 @@ async function runRecanon(job: Job): Promise<void> {
   );
 
   let canon = emptyCanon();
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   const summaries: Record<string, string> = {};
   const failures: { index: number; title: string; error: string }[] = [];
   let conflicts = 0;
@@ -3879,6 +3971,20 @@ async function runRecanon(job: Job): Promise<void> {
         // 只暂存摘要，等全部章节成功后再和台账一起提交。
         summaries[String(chapter.index)] = extraction.facts.summary;
       }
+      // 历史正文中已有证据的计划，只有在本次抽取结果中匹配后才升级状态。
+      const chapterMemory = buildChapterMemory(
+        chapter.index,
+        extraction.facts.summary || chapterPlan.summary,
+        extraction.facts,
+        "ai",
+      );
+      planLedger = reconcileChapterPlan({
+        ledger: planLedger,
+        chapter: chapter.index,
+        chapterMemory,
+        extracted: extraction.facts.story,
+        canon,
+      }).ledger;
       logJob(job, `第 ${chapter.index} 章处理完成（暂存在内存，未写入正式台账）`);
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -3921,6 +4027,7 @@ async function runRecanon(job: Job): Promise<void> {
 
   // 所有章节成功并通过校验后才统一提交，正式台账在此之前保持原样。
   await commitCanonRebuild(job.slug, canon, summaries);
+  await savePlanLedger(job.slug, planLedger);
   job.result = `已从 ${written.length} 章重建事实台账`;
   logJob(
     job,
@@ -3958,6 +4065,7 @@ async function runMemoryRebuild(job: Job): Promise<void> {
   );
 
   let canon = emptyCanon();
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
   const generated: ChapterMemory[] = [];
   const generatedStories = new Map<number, ExtractedStory | undefined>();
   const storyMemories = new Map<number, ChapterMemory | undefined>();
@@ -4024,6 +4132,27 @@ async function runMemoryRebuild(job: Job): Promise<void> {
       chapter.index,
       generatedStories.get(chapter.index),
       storyMemories.get(chapter.index),
+    );
+  }
+
+  // 用本次重建的实际记忆与剧情事件重算计划执行状态；只更新计划台账。
+  for (const chapter of written) {
+    planLedger = reconcileChapterPlan({
+      ledger: planLedger,
+      chapter: chapter.index,
+      chapterMemory: storyMemories.get(chapter.index),
+      extracted: generatedStories.get(chapter.index),
+      storyEvents: story.events,
+      canon,
+    }).ledger;
+  }
+  try {
+    await savePlanLedger(job.slug, planLedger);
+    logJob(job, "计划台账已按正文重建结果更新执行状态。");
+  } catch (error) {
+    logJob(
+      job,
+      `计划台账保存失败，长期记忆和剧情台账已更新，旧计划台账保持不变：${errorMessage(error)}`,
     );
   }
 

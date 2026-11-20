@@ -63,6 +63,18 @@ export async function saveStory(
   return (await backend()).saveStory(...args);
 }
 
+export async function getPlanLedger(
+  ...args: Parameters<StoreModule["getPlanLedger"]>
+): ReturnType<StoreModule["getPlanLedger"]> {
+  return (await backend()).getPlanLedger(...args);
+}
+
+export async function savePlanLedger(
+  ...args: Parameters<StoreModule["savePlanLedger"]>
+): ReturnType<StoreModule["savePlanLedger"]> {
+  return (await backend()).savePlanLedger(...args);
+}
+
 export async function commitCanonRebuild(
   ...args: Parameters<StoreModule["commitCanonRebuild"]>
 ): ReturnType<StoreModule["commitCanonRebuild"]> {

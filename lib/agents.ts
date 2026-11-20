@@ -43,6 +43,12 @@ import {
   type RegressionConfirmation,
   type RepairBaseline,
 } from "./repair-iteration";
+import {
+  assertValidPlanLedger,
+  emptyPlanLedger,
+  planEntriesForChapters,
+  sanitizeGeneratedPlanLedger,
+} from "./plan-ledger";
 import { normalizeCharacter } from "./store";
 import type {
   CanonFacts,
@@ -51,6 +57,7 @@ import type {
   Character,
   ContinuityIssue,
   ExtractedFacts,
+  PlanLedger,
   ProjectMeta,
   ProjectPlan,
   ReviewResult,
@@ -115,14 +122,28 @@ export async function generatePlan(meta: ProjectMeta): Promise<GeneratedPlan> {
     requireContiguous: true,
   });
 
+  const plan: ProjectPlan = {
+    logline: str(data.logline),
+    tags: arr(data.tags),
+    chapters,
+  };
+  const rawLedger = data.planLedger ?? data.plan_ledger;
+  const rawRecord = (rawLedger ?? {}) as Record<string, unknown>;
+  const hasLedgerFields = Array.isArray(rawRecord.events) || Array.isArray(rawRecord.foreshadows);
+  if (!hasLedgerFields) {
+    throw new Error("架构师没有返回结构化计划台账（planLedger），请在设置中重试或更换模型");
+  }
+  const planLedger = sanitizeGeneratedPlanLedger(rawLedger);
+  if (!planLedger.events.length) {
+    throw new Error("计划台账没有登记任何计划事件，架构未提交");
+  }
+  assertValidPlanLedger(planLedger, plan);
+
   return {
-    plan: {
-      logline: str(data.logline),
-      tags: arr(data.tags),
-      chapters,
-    },
+    plan,
     bible: str(data.bibleMd ?? data.bible_md),
     outlineMd: str(data.outlineMd ?? data.outline_md),
+    planLedger,
   };
 }
 
@@ -231,6 +252,11 @@ async function repairDuplicateTitles(
   }
 }
 
+export interface ExtendedPlanResult {
+  chapters: ChapterPlan[];
+  planLedger: PlanLedger;
+}
+
 export async function extendPlan(
   meta: ProjectMeta,
   plan: ProjectPlan,
@@ -243,12 +269,21 @@ export async function extendPlan(
     characters?: Character[];
     storyContext?: string;
   } = {},
-): Promise<ChapterPlan[]> {
+): Promise<ExtendedPlanResult> {
   const startIndex = plan.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
 
-  if (isMock()) return mockExtendedChapters(meta, startIndex, count);
+  if (isMock()) {
+    const chapters = mockExtendedChapters(meta, startIndex, count);
+    return {
+      chapters,
+      planLedger: {
+        ...emptyPlanLedger(),
+        events: planEntriesForChapters(chapters),
+      },
+    };
+  }
 
   const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
@@ -302,7 +337,21 @@ export async function extendPlan(
     chapters,
     plan.chapters.map((chapter) => chapter.title),
   );
-  return chapters;
+
+  const rawLedger = data.planLedger ?? data.plan_ledger;
+  const rawRecord = (rawLedger ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(rawRecord.events) && !Array.isArray(rawRecord.foreshadows)) {
+    throw new Error("续排没有返回结构化计划台账（planLedger），本次新章节未提交");
+  }
+  const planLedger = sanitizeGeneratedPlanLedger(rawLedger);
+  if (!planLedger.events.length) {
+    throw new Error("续排计划台账为空，本次新章节未提交");
+  }
+  assertValidPlanLedger(planLedger, {
+    ...plan,
+    chapters: [...plan.chapters, ...chapters].sort((a, b) => a.index - b.index),
+  });
+  return { chapters, planLedger };
 }
 
 // 部分模型会用 ```markdown 包裹正文，写入章节文件前去掉首尾围栏。

@@ -182,19 +182,39 @@ describe("分层记忆解析与聚合", () => {
     expect(memory.chapters["1"].source).toBe("summary");
     expect(memory.chapters["1"].characters).toContain("张三");
     expect(memory.chapters["1"].newSettings).toContain("物品：玉佩");
-    expect(memory.chapters["1"].foreshadowsPlanted.join("")).toContain("玉佩");
-    expect(memory.chapters["3"].foreshadowsResolved.join("")).toContain("玉佩");
+    // 大纲伏笔只进计划台账，不能因为章节已写就被当成实际埋设。
+    expect(memory.chapters["1"].foreshadowsPlanted).toEqual([]);
+    expect(memory.chapters["3"].foreshadowsResolved).toEqual([]);
     expect(memory.volumes).toHaveLength(2);
     expect(memory.book.logline).toContain("玉佩");
     expect(memory.book.keyConflicts.join("")).toContain("黑衣人");
     expect(memory.book.finalGoal).toContain("旧案");
   });
 
-  it("按章节边界判断伏笔是否已回收", () => {
-    const memory = buildEffectiveMemory(fixture(), null);
-    expect(collectOpenForeshadows(memory, 3).map((item) => item.text).join("")).toContain(
-      "玉佩",
-    );
+  it("只有正文抽取出的伏笔才会进入待回收列表", () => {
+    const detail = fixture();
+    const planOnly = buildEffectiveMemory(detail, null);
+    // 大纲计划第 1 章埋、第 3 章回收，但正文抽取没有记录，检索不到。
+    expect(collectOpenForeshadows(planOnly, 3)).toEqual([]);
+    expect(collectOpenForeshadows(planOnly, 4)).toEqual([]);
+
+    const memory = buildEffectiveMemory(detail, null);
+    memory.chapters["1"].source = "ai";
+    memory.chapters["3"].source = "ai";
+    memory.chapters["1"].foreshadowsPlanted = ["玉佩的秘密"];
+    memory.chapters["3"].foreshadowsResolved = ["玉佩的秘密"];
+    expect(collectOpenForeshadows(memory, 3).map((item) => item.text)).toEqual([
+      "玉佩的秘密",
+    ]);
+    expect(collectOpenForeshadows(memory, 4)).toEqual([]);
+  });
+
+  it("旧项目 summary 记忆中的大纲伏笔不会被当成实际埋设", () => {
+    const detail = fixture();
+    const memory = buildEffectiveMemory(detail, null);
+    memory.chapters["1"].foreshadowsPlanted = ["玉佩的秘密"];
+    memory.chapters["3"].foreshadowsResolved = ["玉佩的秘密"];
+    expect(collectOpenForeshadows(memory, 3)).toEqual([]);
     expect(collectOpenForeshadows(memory, 4)).toEqual([]);
   });
 
@@ -221,6 +241,23 @@ describe("分层记忆解析与聚合", () => {
     });
     expect(tight.truncated).toBe(true);
     expect(tight.text.length).toBeLessThanOrEqual(520);
+  });
+
+  it("预算紧张时优先保留人物生死和未回收伏笔", () => {
+    const detail = fixture();
+    const memory = buildEffectiveMemory(detail, null);
+    memory.chapters["1"].source = "ai";
+    memory.chapters["1"].foreshadowsPlanted = ["玉佩的秘密"];
+    const chapter = detail.plan.chapters[3];
+    const retrieval = buildMemoryContext(detail, chapter, memory, {
+      recentWindow: 0,
+      budget: 260,
+    });
+    expect(retrieval.truncated).toBe(true);
+    expect(retrieval.text).toContain("李四");
+    expect(retrieval.text).toContain("第 2 章死亡");
+    expect(retrieval.text).toContain("玉佩的秘密");
+    expect(retrieval.text.length).toBeLessThanOrEqual(280);
   });
 
   it("手工维护的全书和分卷记忆不会被章节更新覆盖", () => {

@@ -18,13 +18,13 @@ export interface PromptCatalogEntry {
 export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   architect: {
     label: "架构师",
-    version: "2026.11.18-p7",
-    description: "生成世界观、主线大纲和章节细纲。",
+    version: "2026.11.20-p9",
+    description: "生成世界观、主线大纲、章节细纲和结构化计划台账。",
   },
   "extend-plan": {
     label: "大纲续排",
-    version: "2026.11.18-p7",
-    description: "在既有大纲后续排新章节。",
+    version: "2026.11.20-p9",
+    description: "在既有大纲后续排新章节，并同步登记计划台账。",
   },
   "title-repair": {
     label: "章节改名",
@@ -38,8 +38,8 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   writer: {
     label: "写作",
-    version: "2026.11.18-p7",
-    description: "续写或重写章节正文。",
+    version: "2026.11.20-p9",
+    description: "续写或重写章节正文，并区分计划、事实与实际剧情。",
   },
   "fact-extractor": {
     label: "事实抽取",

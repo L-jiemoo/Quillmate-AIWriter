@@ -265,6 +265,10 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("过渡章允许铺垫和情绪沉淀");
     expect(text).not.toContain("每章都要有明确冲突或钩子");
     expect(text).toContain('"chapters"');
+    expect(text).toContain('"planLedger"');
+    expect(text).toContain('"characterChanges"');
+    expect(text).toContain("不得包含 status、actualChapter");
+    expect(text).toContain("人物计划在第 8 章死亡");
   });
 
   it("大纲续排注入事实台账、人物档案和剧情台账", () => {
@@ -296,6 +300,9 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("尚未回收的伏笔");
     expect(text).toContain("相邻章节之间要有合理的因果联系");
     expect(text).toContain("不要连续多章重复相同的冲突模式");
+    expect(text).toContain('"planLedger"');
+    expect(text).toContain("plan-extend-");
+    expect(text).toContain("只描述未来计划");
   });
 
   it("大纲续排没有上下文时给出明确占位，并截断过长剧情台账", () => {
@@ -367,7 +374,12 @@ describe("各 Agent 的增量提示词约束", () => {
         detail.plan.chapters[3],
         "上一章结尾：张三推开门。",
         ["前情：张三发现玉佩。"],
-        { canon: detail.canon },
+        {
+          canon: detail.canon,
+          memoryContext: "【未回收伏笔】玉佩的秘密。",
+          storyContext: "【人物动态状态】张三：在客栈。",
+          planContext: "第 4 章计划事件：张三进入密室（未执行）。",
+        },
       ),
     );
 
@@ -379,6 +391,13 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("章末应按章节定位自然收束或留钩子");
     expect(text).toContain("细纲是创作依据，不是必须逐句执行的机械模板");
     expect(text).toContain("不得把人物猜测、谎言或计划写成客观事实");
+    expect(text).toContain("【长期记忆（来自已写章节，按当前章节相关度检索）】");
+    expect(text).toContain("【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】");
+    expect(text).toContain("【本章计划台账（创作计划，不代表已经发生）】");
+    expect(text).toContain("张三进入密室");
+    expect(text).toContain("正文没有实际写出的计划事件");
+    expect(text).toContain("计划与事实台账或实际剧情冲突时");
+    expect(text).toContain("事实台账 > 实际剧情台账/长期记忆 > 计划台账");
   });
 
   it("事实抽取区分计划、怀疑、评价和未知信息", () => {

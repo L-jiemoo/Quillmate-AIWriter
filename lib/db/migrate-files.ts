@@ -449,6 +449,7 @@ async function migrateProjects(): Promise<MigrationProjectResult[]> {
     const versions = await readProjectVersions(slug, warnings);
     const memory = await fileStore.getMemory(slug);
     const story = await fileStore.getStory(slug);
+    const planLedger = await fileStore.getPlanLedger(slug);
     repo.importProjectSnapshot({
       file: await fileStore.getProjectFile(slug),
       plan: detail.plan,
@@ -460,6 +461,7 @@ async function migrateProjects(): Promise<MigrationProjectResult[]> {
       publishLedger: detail.publishLedger,
       memory,
       story,
+      planLedger,
     });
 
     results.push({

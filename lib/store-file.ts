@@ -10,6 +10,14 @@ import {
 } from "./canon";
 import { PROJECTS_DIR } from "./config";
 import { emptyMemory, normalizeMemory } from "./memory";
+import {
+  assertValidPlanLedger,
+  derivePlanLedger,
+  emptyPlanLedger,
+  mergePlanLedgers,
+  normalizePlanLedger,
+  planEntriesForChapters,
+} from "./plan-ledger";
 import { emptyStory, normalizeStory } from "./story";
 import {
   appendChapterOutline,
@@ -57,6 +65,7 @@ import type {
   ProjectDetail,
   ProjectFile,
   ProjectMemory,
+  PlanLedger,
   ProjectMeta,
   ProjectPlan,
   ProjectState,
@@ -117,6 +126,10 @@ export function memoryFile(slug: string): string {
 
 export function storyFile(slug: string): string {
   return projectFile(slug, "story.json");
+}
+
+export function planLedgerFile(slug: string): string {
+  return projectFile(slug, "plan-ledger.json");
 }
 
 const BACKUP_KEEP = 20;
@@ -290,6 +303,27 @@ export async function saveStory(slug: string, story: StoryLedger): Promise<void>
   );
 }
 
+// 计划台账缺失时按大纲派生 planned 记录，兼容没有该文件的旧项目。
+// 派生结果只在本次读取中存在，普通读取不写盘。
+export async function getPlanLedger(slug: string): Promise<PlanLedger> {
+  const file = await getProjectFile(slug);
+  const raw = await readJsonOptional<unknown>(planLedgerFile(slug), null);
+  if (raw !== null) return normalizePlanLedger(raw, file.meta.updatedAt);
+  const plan = await readJson<ProjectPlan>(projectFile(slug, "plan.json"), DEFAULT_PLAN);
+  const outline = await readText(projectFile(slug, "outline.md"));
+  return derivePlanLedger(plan, outline, file.meta.updatedAt);
+}
+
+export async function savePlanLedger(slug: string, ledger: PlanLedger): Promise<void> {
+  await getProjectFile(slug);
+  const normalized = normalizePlanLedger(ledger);
+  await writeJson(
+    planLedgerFile(slug),
+    normalized,
+    projectBackup(slug, "plan-ledger.json"),
+  );
+}
+
 // 台账重建成功后的统一提交：先写摘要，最后写 canon.json。
 // 摘要写入失败时旧台账仍是完整的；不能反过来先写台账，否则摘要失败会留下半提交状态。
 export async function commitCanonRebuild(
@@ -458,6 +492,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectD
   await writeJson(projectFile(slug, "canon.json"), emptyCanon());
   await writeJson(memoryFile(slug), emptyMemory(now));
   await writeJson(storyFile(slug), emptyStory(now));
+  await writeJson(planLedgerFile(slug), emptyPlanLedger(now));
   await writeText(
     projectFile(slug, "world.md"),
     `# ${title} · 世界观圣经\n\n> 在「总览」中点击「生成架构」后，这里会自动填充。\n\n## 核心创意\n\n${meta.idea || "（尚未填写）"}\n`,
@@ -567,6 +602,10 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
   const publishLedger = await loadPublishLedger(slug, false);
   const bible = await readText(projectFile(slug, "world.md"));
   const outlineMd = await readText(projectFile(slug, "outline.md"));
+  const rawPlanLedger = await readJsonOptional<unknown>(planLedgerFile(slug), null);
+  const planLedger = rawPlanLedger
+    ? normalizePlanLedger(rawPlanLedger, file.meta.updatedAt)
+    : derivePlanLedger(plan, outlineMd, file.meta.updatedAt);
   const writtenSet = new Set(state.written);
 
   // 目录以 plan.chapters 为骨架；是否已写只看 state.written，
@@ -592,6 +631,7 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
     state,
     chapters,
     canon,
+    planLedger,
     publish: file.publish,
     publishLedger,
     pendingChapters: chapters.filter((chapter) => !chapter.written).length,
@@ -647,6 +687,7 @@ export async function savePlan(
 export async function appendChapters(
   slug: string,
   chapters: ChapterPlan[],
+  planLedger?: PlanLedger,
 ): Promise<ProjectPlan> {
   const file = await getProjectFile(slug);
   // 必须读到真实大纲再合并；损坏时直接抛错，避免用“仅新增章节”覆盖原有目录。
@@ -692,8 +733,20 @@ export async function appendChapters(
       updatedAt: nowIso(),
     },
   };
+  let mergedLedger: PlanLedger;
+  if (planLedger) {
+    mergedLedger = normalizePlanLedger(planLedger);
+  } else {
+    // 未传计划台账时至少把新增章节登记为 planned，避免大纲与台账脱节。
+    const current = await getPlanLedger(slug);
+    mergedLedger = mergePlanLedgers(current, {
+      ...emptyPlanLedger(file.meta.updatedAt),
+      events: planEntriesForChapters(chapters, file.meta.updatedAt),
+    });
+  }
+  assertValidPlanLedger(mergedLedger, nextPlan);
 
-  await commitProjectWrites(slug, [
+  const writes: PendingWrite[] = [
     {
       filePath: projectFile(slug, "plan.json"),
       content: jsonText(nextPlan),
@@ -709,7 +762,15 @@ export async function appendChapters(
       content: jsonText(nextFile),
       backupName: "project.json",
     },
-  ]);
+  ];
+  if (mergedLedger) {
+    writes.push({
+      filePath: planLedgerFile(slug),
+      content: jsonText(mergedLedger),
+      backupName: "plan-ledger.json",
+    });
+  }
+  await commitProjectWrites(slug, writes);
 
   return nextPlan;
 }
@@ -798,7 +859,7 @@ export interface CommitArchitectureResult {
 // 大纲、世界观、主线大纲和人物卡全部生成并通过校验后，再一次性提交。
 export async function commitArchitecture(
   slug: string,
-  generated: { plan: ProjectPlan; bible: string; outlineMd: string },
+  generated: { plan: ProjectPlan; bible: string; outlineMd: string; planLedger?: PlanLedger },
   characters: Character[],
   options: { seedCanon?: boolean } = {},
 ): Promise<CommitArchitectureResult> {
@@ -838,6 +899,11 @@ export async function commitArchitecture(
     generated.outlineMd,
     sortedPlan.chapters,
   );
+  // 计划台账与架构一起校验、一起提交；缺失时按大纲派生 planned 记录。
+  const planLedger = generated.planLedger
+    ? normalizePlanLedger(generated.planLedger)
+    : derivePlanLedger(sortedPlan, syncedOutline);
+  assertValidPlanLedger(planLedger, sortedPlan);
   const nextFile: ProjectFile = {
     ...file,
     meta: {
@@ -871,6 +937,11 @@ export async function commitArchitecture(
       filePath: projectFile(slug, "characters.json"),
       content: jsonText(merged.characters),
       backupName: "characters.json",
+    },
+    {
+      filePath: planLedgerFile(slug),
+      content: jsonText(planLedger),
+      backupName: "plan-ledger.json",
     },
     {
       filePath: projectFile(slug, "project.json"),

@@ -6,6 +6,7 @@ import {
   normalizeMemory,
   normalizeVolumeMemory,
 } from "../memory";
+import { emptyPlanLedger, normalizePlanLedger } from "../plan-ledger";
 import { emptyStory, normalizeStory } from "../story";
 import { PUBLISH_LEDGER_VERSION, publishLedgerKey } from "../publish-ledger";
 import { StorageError } from "../storage";
@@ -18,6 +19,7 @@ import type {
   ChapterVersionSource,
   Character,
   CharacterSource,
+  PlanLedger,
   PublishLedger,
   PublishLedgerEntry,
   PublishLedgerStatus,
@@ -294,6 +296,38 @@ export function getPlan(slug: string): ProjectPlan {
   };
 }
 
+export function getPlanLedger(slug: string): PlanLedger | null {
+  const row = getDatabase()
+    .prepare("SELECT data_json FROM plan_ledgers WHERE slug = ?")
+    .get(slug) as { data_json: string } | undefined;
+  if (!row) return null;
+  return normalizePlanLedger(parseJson<unknown>(row.data_json, emptyPlanLedger()));
+}
+
+export function replacePlanLedger(slug: string, ledger: PlanLedger): void {
+  const normalized = normalizePlanLedger(ledger);
+  getDatabase()
+    .prepare(
+      `INSERT INTO plan_ledgers (slug, version, data_json, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(slug) DO UPDATE SET version = excluded.version,
+         data_json = excluded.data_json, updated_at = excluded.updated_at`,
+    )
+    .run(slug, normalized.version, JSON.stringify(normalized), normalized.updatedAt);
+}
+
+function replacePlanLedgerInTransaction(
+  db = getDatabase(),
+  slug: string,
+  ledger: PlanLedger,
+): void {
+  const normalized = normalizePlanLedger(ledger);
+  db.prepare(
+    `INSERT INTO plan_ledgers (slug, version, data_json, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(slug) DO UPDATE SET version = excluded.version,
+       data_json = excluded.data_json, updated_at = excluded.updated_at`,
+  ).run(slug, normalized.version, JSON.stringify(normalized), normalized.updatedAt);
+}
+
 function replacePlanInTransaction(
   db = getDatabase(),
   slug: string,
@@ -333,6 +367,7 @@ export function appendPlanChapters(
   slug: string,
   chapters: ChapterPlan[],
   file: ProjectFile,
+  planLedger?: PlanLedger,
 ): void {
   withTransaction((db) => {
     const insert = db.prepare(
@@ -351,6 +386,7 @@ export function appendPlanChapters(
       "UPDATE projects SET target_chapters = ?, updated_at = ? WHERE slug = ?",
     ).run(file.meta.targetChapters, file.meta.updatedAt, slug);
     updateProjectFile(file);
+    if (planLedger) replacePlanLedgerInTransaction(db, slug, planLedger);
   });
 }
 
@@ -428,11 +464,13 @@ export function commitArchitecture(
   characters: Character[],
   file: ProjectFile,
   canon?: CanonFacts,
+  planLedger?: PlanLedger,
 ): void {
   withTransaction((db) => {
     replacePlanInTransaction(db, slug, plan, file);
     replaceCharactersInTransaction(db, slug, characters);
     if (canon) replaceCanonInTransaction(db, slug, canon);
+    if (planLedger) replacePlanLedgerInTransaction(db, slug, planLedger);
     updateProjectFile(file);
   });
 }
@@ -1522,6 +1560,7 @@ export interface ImportProjectSnapshotInput {
   publishLedger: PublishLedger;
   memory?: ProjectMemory;
   story?: StoryLedger;
+  planLedger?: PlanLedger;
 }
 
 // 迁移专用：一次性导入一个项目的结构化快照，失败时整个项目回滚。
@@ -1537,6 +1576,7 @@ export function importProjectSnapshot(input: ImportProjectSnapshotInput): void {
     publishLedger,
     memory,
     story,
+    planLedger,
   } = input;
   const slug = file.meta.slug;
 
@@ -1685,6 +1725,7 @@ export function importProjectSnapshot(input: ImportProjectSnapshotInput): void {
 
     if (memory) replaceMemoryInTransaction(db, slug, memory);
     if (story) replaceStoryInTransaction(db, slug, story);
+    if (planLedger) replacePlanLedgerInTransaction(db, slug, planLedger);
 
     db.prepare("UPDATE projects SET updated_at = ? WHERE slug = ?").run(
       file.meta.updatedAt,

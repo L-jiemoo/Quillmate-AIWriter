@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizePlanLedger } from "@/lib/plan-ledger";
 import type { ProjectMemory, StoryLedger } from "@/lib/types";
 
 let dataDir: string;
@@ -229,6 +230,30 @@ describe("SQLite 项目存储", () => {
       };
       expect(row.count, table).toBe(0);
     }
+  });
+
+  it("计划台账独立保存，不会写进事实台账或剧情台账", async () => {
+    const slug = (await store.createProject({ title: "SQLite 计划台账", targetChapters: 2 }))
+      .meta.slug;
+    const created = await store.getProjectDetail(slug);
+    expect(created.planLedger).toMatchObject({ version: 1, events: [] });
+
+    const ledger = normalizePlanLedger({
+      events: [{ id: "plan-event-1", name: "计划事件", chapter: 1 }],
+      foreshadows: [
+        { id: "plan-foreshadow-1", text: "计划伏笔", plantChapter: 1, resolveChapter: 2 },
+      ],
+    });
+    await store.savePlanLedger(slug, ledger);
+
+    const loaded = await store.getPlanLedger(slug);
+    expect(loaded.events[0]).toMatchObject({ name: "计划事件", status: "planned" });
+    expect(loaded.foreshadows[0]).toMatchObject({
+      actualPlantChapter: 0,
+      status: "planned",
+    });
+    expect((await store.getCanon(slug)).characters).toEqual([]);
+    expect((await store.getStory(slug)).foreshadows).toEqual([]);
   });
 
   it("人物来源、补章、发布台账、审计报告和删除均正常", async () => {

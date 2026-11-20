@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { nowIso } from "../utils";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 // 结构化数据表。章节正文、世界观、大纲、审校报告等长文本仍保存在 Markdown 文件里。
 const SCHEMA_V1 = `
@@ -336,10 +336,21 @@ CREATE INDEX IF NOT EXISTS story_events_slug_chapter ON story_events(slug, chapt
 CREATE INDEX IF NOT EXISTS story_foreshadows_slug_status ON story_foreshadows(slug, status, planted_chapter);
 `;
 
+// v4 新增计划台账：只追加一张独立表，与事实台账、剧情台账保持物理分离。
+const SCHEMA_V4 = `
+CREATE TABLE IF NOT EXISTS plan_ledgers (
+  slug TEXT PRIMARY KEY REFERENCES projects(slug) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  data_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 export function ensureSchema(db: DatabaseSync): void {
   db.exec(SCHEMA_V1);
   db.exec(SCHEMA_V2);
   db.exec(SCHEMA_V3);
+  db.exec(SCHEMA_V4);
 
   const row = db
     .prepare("SELECT MAX(version) AS version FROM schema_migrations")
@@ -358,6 +369,9 @@ export function ensureSchema(db: DatabaseSync): void {
   if (current < 2) insertMigration.run(2, nowIso(), "long-form layered memory");
   if (current < 3) {
     insertMigration.run(3, nowIso(), "character states, relations, plot events and foreshadows");
+  }
+  if (current < 4) {
+    insertMigration.run(4, nowIso(), "plan ledger separated from canon and story ledgers");
   }
   // 兼容早期 v3 测试库：story_meta 可能还没有 suppressed_json 列。
   const storyMetaColumns = db

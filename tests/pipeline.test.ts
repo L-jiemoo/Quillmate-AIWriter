@@ -47,6 +47,10 @@ describe("mock 全流程冒烟", () => {
     const withPlan = await store.getProjectDetail(slug);
     expect(withPlan.plan.chapters.length).toBeGreaterThan(0);
     expect(withPlan.characters.length).toBeGreaterThan(0);
+    expect(withPlan.planLedger?.events).toHaveLength(withPlan.plan.chapters.length);
+    expect(withPlan.planLedger?.events.every((event) => event.status === "planned")).toBe(
+      true,
+    );
 
     const writeJob = await pipeline.startJob(slug, "write", { count: 1 });
     const writeDone = await waitForJob(writeJob.id);
@@ -70,6 +74,19 @@ describe("mock 全流程冒烟", () => {
     expect(story.events.some((event) => event.chapter === written[0].index)).toBe(true);
     expect(
       writeDone.logs.some((line) => line.message.includes("剧情台账")),
+    ).toBe(true);
+
+    const planLedger = await store.getPlanLedger(slug);
+    const planEvent = planLedger.events.find(
+      (event) => event.chapter === written[0].index,
+    );
+    expect(planEvent?.actualChapter).toBe(written[0].index);
+    expect(planEvent?.status).not.toBe("planned");
+    expect(
+      writeDone.logs.some((line) => line.message.includes("计划台账已注入")),
+    ).toBe(true);
+    expect(
+      writeDone.logs.some((line) => line.message.includes("计划执行对比")),
     ).toBe(true);
 
     const exported = await store.exportBookFile(slug);

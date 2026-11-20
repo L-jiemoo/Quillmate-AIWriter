@@ -1,5 +1,5 @@
 import { canonForChapter } from "./canon";
-import { buildEffectiveMemory, estimateTokens, parseOutlineForeshadows } from "./memory";
+import { buildEffectiveMemory, estimateTokens } from "./memory";
 import { nowIso } from "./utils";
 import type {
   CanonCharacterStatus,
@@ -636,38 +636,14 @@ function seedEvents(detail: ProjectDetail, memory: ProjectMemory): PlotEvent[] {
 }
 
 function seedForeshadows(
-  detail: ProjectDetail,
   memory: ProjectMemory,
   events: PlotEvent[],
 ): ForeshadowRecord[] {
+  // 大纲伏笔只进入计划台账；剧情台账只登记“正文抽取结果中确实出现”的伏笔。
   const records: ForeshadowRecord[] = [];
-  const parsed = parseOutlineForeshadows(detail.outlineMd);
-  for (const item of parsed) {
-    const chapterMemory = memory.chapters[String(item.plantedChapter)];
-    const related = (chapterMemory?.characters ?? []).filter((name) =>
-      item.text.includes(name),
-    );
-    records.push({
-      id: storyForeshadowId(item.text, item.plantedChapter),
-      text: item.text,
-      plantedChapter: item.plantedChapter,
-      relatedCharacters: related,
-      expectedStartChapter: item.plantedChapter,
-      expectedEndChapter: item.resolvedChapter,
-      status: "pending",
-      eventIds: events
-        .filter((event) => event.chapter === item.plantedChapter)
-        .map((event) => event.id)
-        .slice(0, 10),
-      resolution: "",
-      resolvedChapter: 0,
-      resolutionCandidate: "",
-      source: "summary",
-      updatedAt: memory.updatedAt,
-    });
-  }
-
-  const chapters = Object.values(memory.chapters).sort((a, b) => a.index - b.index);
+  const chapters = Object.values(memory.chapters)
+    .filter((chapter) => chapter.source !== "summary")
+    .sort((a, b) => a.index - b.index);
   for (const chapter of chapters) {
     for (const text of chapter.foreshadowsPlanted) {
       const existing = findForeshadow(records, text);
@@ -762,7 +738,9 @@ function refreshForeshadowStatuses(
   memory: ProjectMemory,
   latestChapter: number,
 ): void {
-  const chapters = Object.values(memory.chapters).sort((a, b) => a.index - b.index);
+  const chapters = Object.values(memory.chapters)
+    .filter((chapter) => chapter.source !== "summary")
+    .sort((a, b) => a.index - b.index);
   for (const record of ledger.foreshadows) {
     if (record.source === "manual") continue;
     if (record.resolvedChapter > 0) {
@@ -834,9 +812,21 @@ export function buildEffectiveStory(
   const stored = normalizeStory(storedInput ?? emptyStory());
   const seedEventsResult = seedEvents(detail, memory);
   const seedStatesResult = seedStates(detail, memory, seedEventsResult);
-  const seedForeshadowsResult = seedForeshadows(detail, memory, seedEventsResult);
+  const seedForeshadowsResult = seedForeshadows(memory, seedEventsResult);
 
   const suppressed = new Set(stored.suppressedIds);
+  // 旧版本可能把大纲伏笔直接写进 story.json。这里只保留有正文抽取记忆支撑的记录；
+  // 其余迁移到计划台账（读取时按大纲派生），不再作为“已埋设伏笔”参与检索。
+  const actualPlantedTexts = Object.values(memory.chapters)
+    .filter((chapter) => chapter.source !== "summary")
+    .flatMap((chapter) => chapter.foreshadowsPlanted);
+  const storedForeshadows = stored.foreshadows.filter(
+    (item) =>
+      item.source === "manual" ||
+      item.resolvedChapter > 0 ||
+      Boolean(item.resolutionCandidate) ||
+      actualPlantedTexts.some((text) => sameForeshadow(text, item.text)),
+  );
   const ledger: StoryLedger = {
     version: 1,
     states: mergeById(seedStatesResult, stored.states).filter(
@@ -848,7 +838,7 @@ export function buildEffectiveStory(
     events: mergeById(seedEventsResult, stored.events).filter(
       (item) => !suppressed.has(item.id),
     ),
-    foreshadows: mergeForeshadows(seedForeshadowsResult, stored.foreshadows).filter(
+    foreshadows: mergeForeshadows(seedForeshadowsResult, storedForeshadows).filter(
       (item) => !suppressed.has(item.id),
     ),
     suppressedIds: stored.suppressedIds,

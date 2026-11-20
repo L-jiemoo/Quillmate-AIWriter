@@ -1,9 +1,18 @@
-import type { ChapterPlan, Character, ProjectMeta, ProjectPlan, ReviewResult } from "./types";
+import { derivePlanLedger } from "./plan-ledger";
+import type {
+  ChapterPlan,
+  Character,
+  PlanLedger,
+  ProjectMeta,
+  ProjectPlan,
+  ReviewResult,
+} from "./types";
 
 export interface GeneratedPlan {
   plan: ProjectPlan;
   bible: string;
   outlineMd: string;
+  planLedger?: PlanLedger;
 }
 
 export function mockPlan(meta: ProjectMeta): GeneratedPlan {
@@ -16,12 +25,26 @@ export function mockPlan(meta: ProjectMeta): GeneratedPlan {
     keyBeats: ["冲突升级", "人物关系推进", "结尾留悬念"],
   }));
 
+  const plan: ProjectPlan = {
+    logline: `（mock 示例）${meta.title}：在「${meta.tone}」的基调中展开一段${meta.genre}旅程。`,
+    tags: [meta.genre, meta.tone, "示例数据"],
+    chapters,
+  };
+  const outlineMd = `# ${meta.title} · 主线大纲
+
+（mock 模式自动生成）
+
+## 第一幕
+- 主角被卷入核心事件，获得关键能力或线索。
+
+## 第二幕
+- 冲突升级，盟友与对手同时登场，旧秩序开始松动。
+
+## 第三幕
+- 伏笔回收，主角完成阶段性成长，并为下一卷留下更大的谜团。
+`;
   return {
-    plan: {
-      logline: `（mock 示例）${meta.title}：在「${meta.tone}」的基调中展开一段${meta.genre}旅程。`,
-      tags: [meta.genre, meta.tone, "示例数据"],
-      chapters,
-    },
+    plan,
     bible: `# ${meta.title} · 世界观圣经
 
 （mock 模式自动生成，仅用于跑通流程）
@@ -39,19 +62,8 @@ export function mockPlan(meta: ProjectMeta): GeneratedPlan {
 - ${meta.tone}
 - 长篇连载，保留扩展空间。
 `,
-    outlineMd: `# ${meta.title} · 主线大纲
-
-（mock 模式自动生成）
-
-## 第一幕
-- 主角被卷入核心事件，获得关键能力或线索。
-
-## 第二幕
-- 冲突升级，盟友与对手同时登场，旧秩序开始松动。
-
-## 第三幕
-- 伏笔回收，主角完成阶段性成长，并为下一卷留下更大的谜团。
-`,
+    outlineMd,
+    planLedger: derivePlanLedger(plan, outlineMd),
   };
 }
 

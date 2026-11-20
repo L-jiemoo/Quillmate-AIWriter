@@ -86,6 +86,7 @@ async function readProjectFiles(slug: string): Promise<Record<string, string>> {
     "characters.json",
     "project.json",
     "canon.json",
+    "plan-ledger.json",
   ];
   const entries = await Promise.all(
     names.map(async (name) => [
@@ -152,6 +153,11 @@ describe("架构统一提交", () => {
     expect(detail.canon.items).toEqual([]);
     expect(detail.canon.rules).toEqual([]);
     expect(detail.canon.timeline).toEqual({ currentDay: "", deadlines: [] });
+    expect(detail.planLedger?.events).toHaveLength(3);
+    expect(detail.planLedger?.events.every((event) => event.status === "planned")).toBe(true);
+    expect(
+      finished.logs.some((line) => line.message.includes("计划台账已登记")),
+    ).toBe(true);
     expect(
       finished.logs.some((line) => line.message.includes("架构初始事实台账")),
     ).toBe(true);

@@ -893,6 +893,29 @@ export function mergeCanon(
 
     existing.aliases = uniqueStrings([...existing.aliases, ...fact.aliases], existing.name);
     if (existing.chapter <= chapterIndex || (mode === "rewrite" && existing.chapter === chapterIndex)) {
+      // 重要物品转移必须能在本章证据中找到物品和接手人；证据不足时保留原持有人，
+      // 只记录冲突给作者确认，避免一次含糊抽取直接改写既有事实。
+      const holderChanged =
+        Boolean(existing.holder) &&
+        Boolean(fact.holder) &&
+        normalizeName(existing.holder) !== normalizeName(fact.holder) &&
+        existing.chapter < chapterIndex;
+      const evidence = fact.evidence.trim();
+      const mentionsItem =
+        Boolean(evidence) &&
+        [fact.name, ...fact.aliases].some((name) => name && evidence.includes(name));
+      const mentionsNewHolder = Boolean(evidence) && fact.holder
+        ? evidence.includes(fact.holder)
+        : false;
+      if (holderChanged && !(mentionsItem && mentionsNewHolder)) {
+        conflicts.push({
+          severity: "warning",
+          type: "物品归属",
+          evidence: fact.evidence,
+          detail: `「${existing.name}」原持有人为 ${existing.holder}；本章抽取为 ${fact.holder}，但证据没有同时点名物品和新持有人。已保留原持有人，请人工确认是否发生转移。`,
+        });
+        continue;
+      }
       if (fact.holder) existing.holder = fact.holder;
       if (fact.state) existing.state = fact.state;
       if (fact.note) existing.note = fact.note;

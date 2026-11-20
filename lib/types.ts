@@ -25,6 +25,115 @@ export interface ProjectPlan {
   chapters: ChapterPlan[];
 }
 
+// 计划台账记录“未来准备发生什么”，与事实台账、剧情台账严格分离。
+// planned 只能由作者或大纲推进；realized 必须有正文抽取证据，不能按章节进度自动升级。
+export type PlanStatus =
+  | "planned"
+  | "partially_realized"
+  | "realized"
+  | "deviated"
+  | "cancelled";
+
+export type PlanImportance = "core" | "major" | "minor" | "background";
+
+export interface PlanEvent {
+  id: string;
+  name: string;
+  chapter: number;
+  participants: string[];
+  premise: string;
+  process: string;
+  expectedResult: string;
+  impact: string;
+  relatedEventIds: string[];
+  importance: PlanImportance;
+  status: PlanStatus;
+  actualChapter: number;
+  actualEventIds: string[];
+  evidence: string;
+  note: string;
+  updatedAt: string;
+}
+
+export interface PlanCharacterChange {
+  id: string;
+  character: string;
+  chapter: number;
+  before: string;
+  after: string;
+  reason: string;
+  eventIds: string[];
+  status: PlanStatus;
+  actualChapter: number;
+  evidence: string;
+  updatedAt: string;
+}
+
+export interface PlanForeshadow {
+  id: string;
+  text: string;
+  plantChapter: number;
+  resolveChapter: number;
+  purpose: string;
+  eventIds: string[];
+  resolveCondition: string;
+  status: PlanStatus;
+  actualPlantChapter: number;
+  actualResolveChapter: number;
+  evidence: string;
+  updatedAt: string;
+}
+
+export interface PlanTimelineEntry {
+  id: string;
+  chapter: number;
+  time: string;
+  eventIds: string[];
+  sequence: string;
+  constraints: string;
+  participants: string[];
+  status: PlanStatus;
+  actualChapter: number;
+  evidence: string;
+  updatedAt: string;
+}
+
+export interface PlanItemChange {
+  id: string;
+  item: string;
+  chapter: number;
+  holder: string;
+  stateChange: string;
+  eventIds: string[];
+  status: PlanStatus;
+  actualChapter: number;
+  evidence: string;
+  updatedAt: string;
+}
+
+// 计划与正文实际发展不一致时只记录偏离，不回写正文、不删除原计划。
+export interface PlanDeviation {
+  id: string;
+  planType: "event" | "character-change" | "foreshadow" | "timeline" | "item";
+  planId: string;
+  chapter: number;
+  expected: string;
+  actual: string;
+  reason: string;
+  at: string;
+}
+
+export interface PlanLedger {
+  version: number;
+  events: PlanEvent[];
+  characterChanges: PlanCharacterChange[];
+  foreshadows: PlanForeshadow[];
+  timeline: PlanTimelineEntry[];
+  items: PlanItemChange[];
+  deviations: PlanDeviation[];
+  updatedAt: string;
+}
+
 export type CharacterSource = "ai" | "user" | "system";
 
 export interface Character {
@@ -566,6 +675,8 @@ export interface ChapterWriteOptions {
   canon?: CanonFacts;
   memoryContext?: string;
   storyContext?: string;
+  // 本章计划台账文本；只作为创作计划，不代表已经发生。
+  planContext?: string;
 }
 
 export interface ProjectDetail {
@@ -577,6 +688,8 @@ export interface ProjectDetail {
   state: ProjectState;
   chapters: ChapterContent[];
   canon: CanonFacts;
+  // 旧项目可能没有计划台账文件；读取时按大纲派生 planned 记录，绝不视为已发生。
+  planLedger?: PlanLedger;
   publish: ProjectPublish;
   publishLedger: PublishLedger;
   pendingChapters: number;

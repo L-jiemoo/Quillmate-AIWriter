@@ -6,7 +6,6 @@ import {
   characterStatesAt,
   eventsForCharacter,
   finalizeStory,
-  isForeshadowOverdue,
   normalizeStory,
   storyChecks,
   storyStats,
@@ -214,7 +213,7 @@ function extractedChapterFour(): ExtractedStory {
 }
 
 describe("剧情台账生成与增量更新", () => {
-  it("从章节记忆、台账和大纲离线生成人物状态、事件与伏笔", () => {
+  it("从章节记忆和台账离线生成人物状态与事件，不把大纲伏笔当成已埋设", () => {
     const detail = fixture();
     const story = buildEffectiveStory(detail, null, null);
     const states = characterStatesAt(story, 3);
@@ -233,22 +232,15 @@ describe("剧情台账生成与增量更新", () => {
     });
     expect(story.events.map((event) => event.chapter)).toEqual([1, 2, 3]);
 
-    const foreshadow = story.foreshadows.find((item) => item.text.includes("玉佩"));
-    expect(foreshadow).toBeTruthy();
-    expect(foreshadow).toMatchObject({
-      plantedChapter: 1,
-      expectedEndChapter: 3,
-      status: "pending",
-    });
-    expect(foreshadow?.resolutionCandidate).toContain("第 3 章");
-    expect(foreshadow?.status).not.toBe("resolved");
-    expect(isForeshadowOverdue(foreshadow!, 3)).toBe(false);
-    expect(isForeshadowOverdue(foreshadow!, 4)).toBe(true);
+    // 大纲写了“第 1 章埋、第 3 章回收”，但正文抽取没有证据：
+    // 剧情台账必须为空，只有计划台账登记 planned。
+    expect(story.foreshadows).toEqual([]);
 
     const stats = storyStats(detail, story);
-    expect(stats.states).toBeGreaterThanOrEqual(3);
-    expect(stats.openForeshadows).toBe(1);
+    expect(stats.openForeshadows).toBe(0);
     expect(stats.overdueForeshadows).toBe(0);
+    expect(stats.states).toBeGreaterThanOrEqual(3);
+    expect(stats.events).toBeGreaterThanOrEqual(3);
   });
 
   it("章节增量更新会写入状态、关系和事件，并保留手工记录", () => {
@@ -268,7 +260,7 @@ describe("剧情台账生成与增量更新", () => {
       location: "山洞",
       endingState: "张三受伤",
       newSettings: ["玉佩机关"],
-      foreshadowsPlanted: [],
+      foreshadowsPlanted: ["玉佩的秘密"],
       foreshadowsResolved: ["玉佩的秘密"],
       source: "ai",
       updatedAt,
@@ -357,11 +349,23 @@ describe("剧情台账生成与增量更新", () => {
     const detail = fixture();
     const memory = buildEffectiveMemory(detail, null);
     const story = buildEffectiveStory(detail, memory, null);
+    // 作者手工登记一条“已回收”伏笔；自动聚合不能把它改回未回收。
+    story.foreshadows.push({
+      id: "fs-manual-1",
+      text: "玉佩的秘密",
+      plantedChapter: 1,
+      relatedCharacters: ["张三"],
+      expectedStartChapter: 1,
+      expectedEndChapter: 3,
+      status: "resolved",
+      eventIds: [],
+      resolution: "作者确认第 3 章回收",
+      resolvedChapter: 3,
+      resolutionCandidate: "",
+      source: "manual",
+      updatedAt,
+    });
     const record = story.foreshadows.find((item) => item.text.includes("玉佩"))!;
-    record.source = "manual";
-    record.status = "resolved";
-    record.resolvedChapter = 3;
-    record.resolution = "作者确认第 3 章回收";
 
     const next = finalizeStory(detail, memory, story);
     const kept = next.foreshadows.find((item) => item.id === record.id);
