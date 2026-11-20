@@ -83,6 +83,167 @@ export function architectMessages(meta: ProjectMeta): ChatMessage[] {
   ];
 }
 
+// 架构拆成三个阶段，避免一次请求同时生成世界观、全部细纲和大型台账而触发输出上限。
+export function architectFoundationMessages(meta: ProjectMeta): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `你是一位资深中文网络小说策划与架构师，擅长世界观设计、主线冲突与商业连载的节奏安排。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `请先为下面这部小说完成「第一阶段：全书架构」，不要生成逐章细纲或结构化计划台账。
+
+书名：${meta.title}
+类型：${meta.genre}
+基调：${meta.tone}
+核心创意：${meta.idea || "（未提供，请自行补全一个高概念创意）"}
+目标语言：${meta.language}
+单章目标字数：约 ${meta.wordsPerChapter} 字
+本次规划章节数：${meta.targetChapters} 章
+
+请输出 JSON：
+{
+  "logline": "一句话卖点（不超过 60 字）",
+  "tags": ["标签1", "标签2", "标签3"],
+  "bibleMd": "世界观圣经（Markdown）：世界规则、力量体系、地理势力、历史背景、核心矛盾、基调与禁忌",
+  "outlineMd": "全书主线大纲（Markdown）：分卷结构、各卷阶段目标、关键转折、伏笔与回收点、爽点节奏",
+  "volumes": [
+    {"title": "卷名", "chapters": "第 1-10 章", "goal": "本卷阶段目标", "turningPoints": ["关键转折"]}
+  ]
+}
+
+要求：
+- outlineMd 必须包含分卷结构和全书主线的起点、发展阶段、关键转折与终局方向。
+- 每卷要有独立阶段目标，并服务于全书主线；重要冲突写清起因、发展、代价和后果。
+- 人物行动必须符合性格、目标、认知和当前处境，不要为了爽点牺牲因果。
+- 重要伏笔在 outlineMd 中记录埋设位置、作用和预计回收方向，不得为了悬念随意设置。
+- 世界观规则必须内部一致，为长篇连载留出扩展空间。
+- 本阶段只输出整体架构，不要输出 chapters、planLedger 或逐章梗概。`,
+    },
+  ];
+}
+
+export function architectChapterBatchMessages(
+  meta: ProjectMeta,
+  foundation: { bible: string; outlineMd: string },
+  startIndex: number,
+  count: number,
+  previousChapters: ChapterPlan[],
+): ChatMessage[] {
+  const endIndex = startIndex + count - 1;
+  const tail = previousChapters
+    .slice(-8)
+    .map((chapter) => `第 ${chapter.index} 章《${chapter.title}》：${chapter.summary}`)
+    .join("\n");
+  return [
+    {
+      role: "system",
+      content: `你是一位资深中文网络小说策划与架构师，负责在既定全书架构下拆分连续章节细纲，保持主线、人物动机和因果一致。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `《${meta.title}》（${meta.genre} / ${meta.tone}）已经完成全书架构。现在只生成第 ${startIndex}-${endIndex} 章的细纲。
+
+【世界观圣经】
+${clip(foundation.bible, 2600)}
+
+【全书主线大纲与分卷规划】
+${clip(foundation.outlineMd, 3200)}
+
+【前面已生成的章节细纲（最近 8 章）】
+${tail || "（这是第一批章节，暂无前序细纲）"}
+
+请输出 JSON：
+{
+  "chapters": [
+    {"index": ${startIndex}, "title": "章节标题（不含“第X章”前缀）", "summary": "本章 80-150 字剧情梗概", "keyBeats": ["关键事件1", "关键事件2"]}
+  ]
+}
+
+要求：
+- 必须恰好生成 ${count} 章，index 从 ${startIndex} 连续到 ${endIndex}，不得缺失、重复或跳号。
+- 章节标题必须互不相同，且自然、简洁、有画面感，不提前剧透本章反转。
+- 本批章节必须承接前序章节，并与全书主线、当前分卷阶段目标保持一致。
+- 每章要有明确推进作用；关键节点章保留冲突或钩子，过渡章允许铺垫和情绪沉淀。
+- 人物不得知道其尚未掌握的信息，不得为了爽点破坏既定因果。
+- 本阶段只输出 chapters，不要输出 bibleMd、outlineMd 或 planLedger。`,
+    },
+  ];
+}
+
+export function architectLedgerBatchMessages(
+  meta: ProjectMeta,
+  foundation: { bible: string; outlineMd: string },
+  chapters: ChapterPlan[],
+  priorEvents: Array<{ id: string; name: string; chapter: number }>,
+  batchNo: number,
+): ChatMessage[] {
+  const list = chapters
+    .map((chapter) => {
+      const beats = chapter.keyBeats?.length ? `；关键事件：${chapter.keyBeats.join("；")}` : "";
+      return `第 ${chapter.index} 章《${chapter.title}》：${chapter.summary}${beats}`;
+    })
+    .join("\n");
+  const events = priorEvents
+    .slice(-80)
+    .map((event) => `${event.id}（第 ${event.chapter} 章：${event.name}）`)
+    .join("、");
+  const first = chapters[0]?.index ?? 1;
+  const last = chapters[chapters.length - 1]?.index ?? first;
+  return [
+    {
+      role: "system",
+      content: `你是一位中文小说策划，负责把已确定的章节细纲整理成结构化创作计划台账。计划只描述未来准备发生什么，不能写成已经发生的事实。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `《${meta.title}》（${meta.genre} / ${meta.tone}）的第 ${first}-${last} 章细纲如下，请只为这些章节生成计划台账。
+
+【世界观规则摘要】
+${clip(foundation.bible, 1600)}
+
+【全书主线与分卷目标】
+${clip(foundation.outlineMd, 1800)}
+
+【本批章节细纲】
+${list}
+
+【前面批次已有的计划事件 ID】
+${events || "（这是第一批，暂无既有事件）"}
+
+请输出 JSON：
+{
+  "planLedger": {
+    "events": [
+      {"id": "plan-arch-b${batchNo}-event-1", "name": "计划事件名称", "chapter": ${first}, "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "core"}
+    ],
+    "characterChanges": [
+      {"id": "plan-arch-b${batchNo}-char-1", "character": "人物姓名", "chapter": ${first}, "before": "变化前状态", "after": "变化后状态", "reason": "变化原因", "eventIds": []}
+    ],
+    "foreshadows": [
+      {"id": "plan-arch-b${batchNo}-foreshadow-1", "text": "伏笔内容", "plantChapter": ${first}, "resolveChapter": 0, "purpose": "伏笔作用", "eventIds": [], "resolveCondition": "回收条件"}
+    ],
+    "timeline": [
+      {"id": "plan-arch-b${batchNo}-time-1", "chapter": ${first}, "time": "计划时间", "eventIds": [], "sequence": "事件先后关系", "constraints": "时间约束", "participants": ["人物"]}
+    ],
+    "items": [
+      {"id": "plan-arch-b${batchNo}-item-1", "item": "重要物品", "chapter": ${first}, "holder": "预计持有人", "stateChange": "预计状态变化", "eventIds": []}
+    ]
+  }
+}
+
+要求：
+- events 必须覆盖第 ${first}-${last} 章的每一章，至少每章一个计划事件；chapter 不得超出本批范围。
+- 本批所有 id 必须唯一，并以 plan-arch-b${batchNo}- 开头；relatedEventIds/eventIds 只能引用前面批次已有事件或本批事件。
+- 只描述未来计划，不得包含 status、actualChapter、evidence 或任何“已经发生”的字段。
+- 人物变化必须写成计划（例如“计划第 8 章由存活转为死亡”），不能写成当前已经死亡。
+- 伏笔埋设章节必须在本批或前文合理位置；回收章节可以是未来章节，不确定时填 0。
+- 时间线和物品变化同样是计划，不是既定事实。`,
+    },
+  ];
+}
+
 export function extendMessages(
   meta: ProjectMeta,
   plan: { chapters: ChapterPlan[] },
@@ -225,7 +386,12 @@ ${list}
   ];
 }
 
-export function characterMessages(meta: ProjectMeta, bible: string, outlineMd: string): ChatMessage[] {
+export function characterMessages(
+  meta: ProjectMeta,
+  bible: string,
+  outlineMd: string,
+  feedback?: string[],
+): ChatMessage[] {
   return [
     {
       role: "system",
@@ -266,7 +432,13 @@ ${clip(outlineMd)}
 - 重要人物之间应有真实的利益、价值观或情感冲突，关系可以随剧情发展发生变化。
 - 反派应当有自己的立场、动机和合理性，不能只是阻碍主角的工具；配角应有一定自主性，不应只在主角需要时出现。
 - 人物说话方式应体现其身份、性格、经历和当前情绪，避免所有角色使用同一种语气。
-- 角色之间必须有利益冲突和情感牵绊，避免功能重复。`,
+- 角色之间必须有利益冲突和情感牵绊，避免功能重复。${
+      feedback?.length
+        ? `\n\n【上一轮输出未通过校验，请修正】
+${feedback.join("\n")}
+请补全所有字段，确保恰好 6-10 位角色且姓名互不重复。`
+        : ""
+    }`,
     },
   ];
 }

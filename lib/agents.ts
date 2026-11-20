@@ -1,6 +1,10 @@
 import { normalizeExtractedFacts, normalizeReviewResult } from "./canon";
 import { getRuntimeConfig } from "./config";
-import { LLMClient } from "./llm";
+import {
+  LLMClient,
+  LLMOutputTruncatedError,
+  type LLMProgressEvent,
+} from "./llm";
 import {
   groundExtractedMemory,
   normalizeExtractedMemory,
@@ -12,7 +16,9 @@ import {
 import { mockChapter, mockCharacters, mockExtendedChapters, mockPlan, mockReview } from "./mock";
 import { assertValidChapterPlans, parseChapterIndex } from "./plan-validation";
 import {
-  architectMessages,
+  architectChapterBatchMessages,
+  architectFoundationMessages,
+  architectLedgerBatchMessages,
   auditMessages,
   chapterRepairMessages,
   chapterRepairPatchMessages,
@@ -46,10 +52,17 @@ import {
 import {
   assertValidPlanLedger,
   emptyPlanLedger,
+  mergePlanLedgers,
   planEntriesForChapters,
   sanitizeGeneratedPlanLedger,
 } from "./plan-ledger";
 import { normalizeCharacter } from "./store";
+import {
+  needsHigherTier,
+  normalizeOutputTokens,
+  tokenBudgetForTask,
+} from "./token-tiers";
+import { errorMessage } from "./utils";
 import type {
   CanonFacts,
   ChapterPlan,
@@ -76,19 +89,112 @@ function isMock(): boolean {
   return getRuntimeConfig().provider === "mock";
 }
 
-export async function generatePlan(meta: ProjectMeta): Promise<GeneratedPlan> {
-  if (isMock()) return mockPlan(meta);
+type ProgressReporter = (message: string) => void;
 
-  const llm = new LLMClient();
-  const data = await llm.json<Record<string, unknown>>(architectMessages(meta), {
-    agent: "architect",
-  });
-  const rawChapters = Array.isArray(data.chapters) ? data.chapters : [];
-  if (!rawChapters.length) {
-    throw new Error("架构师没有返回章节细纲，请重试或更换模型");
+export interface PlanGenerationOptions {
+  onProgress?: ProgressReporter;
+  client?: LLMClient;
+}
+
+export interface CharacterGenerationOptions {
+  onProgress?: ProgressReporter;
+  client?: LLMClient;
+}
+
+interface ArchitectureFoundation {
+  logline: string;
+  tags: string[];
+  bible: string;
+  outlineMd: string;
+}
+
+interface EventReference {
+  id: string;
+  name: string;
+  chapter: number;
+}
+
+interface ArchitectureContext {
+  client: LLMClient;
+  meta: ProjectMeta;
+  foundation: ArchitectureFoundation;
+  budget: number;
+  report: ProgressReporter;
+  onProgress: (event: LLMProgressEvent) => void;
+}
+
+export function architectureBatchSize(configured: number): number {
+  return normalizeOutputTokens(configured) >= 32768 ? 20 : 10;
+}
+
+function reporter(onProgress: ProgressReporter | undefined): ProgressReporter {
+  return onProgress ?? (() => undefined);
+}
+
+function llmProgress(report: ProgressReporter) {
+  return (event: LLMProgressEvent) => {
+    report(`[${event.model}] ${event.message}`);
+  };
+}
+
+function parseFoundation(data: Record<string, unknown>): ArchitectureFoundation {
+  const bible = str(data.bibleMd ?? data.bible_md).trim();
+  const outlineMd = str(data.outlineMd ?? data.outline_md).trim();
+  if (!bible) throw new Error("架构第一阶段没有返回世界观圣经（bibleMd）");
+  if (!outlineMd) throw new Error("架构第一阶段没有返回全书主线大纲（outlineMd）");
+  return {
+    logline: str(data.logline).trim(),
+    tags: arr(data.tags),
+    bible,
+    outlineMd,
+  };
+}
+
+async function generateFoundation(
+  client: LLMClient,
+  meta: ProjectMeta,
+  budget: number,
+  report: ProgressReporter,
+  onProgress: (event: LLMProgressEvent) => void,
+): Promise<ArchitectureFoundation> {
+  report("架构第一阶段：生成世界观、全书主线与分卷规划…");
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const data = await client.json<Record<string, unknown>>(
+        architectFoundationMessages(meta),
+        { agent: "architect", maxTokens: budget, onProgress },
+      );
+      return parseFoundation(data);
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LLMOutputTruncatedError) {
+        throw new Error(`架构生成第一阶段失败：${errorMessage(error)} 旧架构保持不变。`);
+      }
+      if (attempt >= 3) break;
+      report(
+        `架构第一阶段未通过校验（第 ${attempt}/3 次）：${errorMessage(error)}，正在重试…`,
+      );
+    }
   }
+  throw new Error(`架构生成第一阶段连续 3 次失败：${errorMessage(lastError)}`);
+}
 
-  const hasAnyIndex = rawChapters.some((item) => {
+function parseChapterBatch(
+  data: Record<string, unknown>,
+  startIndex: number,
+  count: number,
+): ChapterPlan[] {
+  const rawChapters = Array.isArray(data.chapters) ? data.chapters : [];
+  if (rawChapters.length < count) {
+    throw new Error(
+      `模型只返回了 ${rawChapters.length} 章，本批需要 ${count} 章（第 ${startIndex}-${
+        startIndex + count - 1
+      } 章）`,
+    );
+  }
+  const records = rawChapters.slice(0, count);
+  const hasAnyIndex = records.some((item) => {
     const record = (item ?? {}) as Record<string, unknown>;
     return (
       record.index !== undefined &&
@@ -97,72 +203,496 @@ export async function generatePlan(meta: ProjectMeta): Promise<GeneratedPlan> {
     );
   });
 
-  const chapters: ChapterPlan[] = rawChapters
-    .map((item, position) => {
-      const record = (item ?? {}) as Record<string, unknown>;
-      const parsed = parseChapterIndex(record.index);
-      if (hasAnyIndex && parsed === null) {
-        throw new Error(
-          `架构师返回的章节序号不合法：第 ${position + 1} 项为 ${String(record.index)}，必须是大于 0 的整数`,
-        );
-      }
-      return {
-        // 全部章节都没给序号时按数组顺序补号；混用有效/无效序号则直接报错。
-        index: parsed ?? position + 1,
-        title: str(record.title).trim(),
-        summary: str(record.summary).trim(),
-        keyBeats: arr(record.keyBeats ?? record.key_beats),
-      };
-    })
-    .sort((a, b) => a.index - b.index);
+  const chapters: ChapterPlan[] = records.map((item, position) => {
+    const record = (item ?? {}) as Record<string, unknown>;
+    const expected = startIndex + position;
+    const parsed = parseChapterIndex(record.index);
+    if (hasAnyIndex && parsed !== expected) {
+      throw new Error(
+        `章节序号不连续：本批第 ${position + 1} 项应为第 ${expected} 章，实际为 ${String(
+          record.index,
+        )}`,
+      );
+    }
+    const title = str(record.title).trim();
+    const summary = str(record.summary).trim();
+    if (!title) throw new Error(`第 ${expected} 章标题为空`);
+    if (!summary) throw new Error(`第 ${expected} 章梗概为空`);
+    return {
+      // 全部章节都没给序号时按批次位置补号；混用有效/无效序号则直接报错。
+      index: parsed ?? expected,
+      title,
+      summary,
+      keyBeats: arr(record.keyBeats ?? record.key_beats),
+    };
+  });
 
   assertValidChapterPlans(chapters, {
-    expectedCount: meta.targetChapters,
+    expectedCount: count,
+    startIndex,
+    requireContiguous: true,
+  });
+  return chapters;
+}
+
+async function collectChapterRange(
+  context: ArchitectureContext,
+  startIndex: number,
+  count: number,
+  collected: ChapterPlan[],
+): Promise<void> {
+  const endIndex = startIndex + count - 1;
+  const label = `章节细纲第 ${startIndex}-${endIndex} 章`;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    context.report(`${label}：生成中（第 ${attempt}/3 次）…`);
+    try {
+      const data = await context.client.json<Record<string, unknown>>(
+        architectChapterBatchMessages(
+          context.meta,
+          context.foundation,
+          startIndex,
+          count,
+          collected,
+        ),
+        { agent: "architect", maxTokens: context.budget, onProgress: context.onProgress },
+      );
+      const chapters = parseChapterBatch(data, startIndex, count);
+      collected.push(...chapters);
+      context.report(`${label}：已完成 ${chapters.length} 章。`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LLMOutputTruncatedError && count > 1) {
+        const left = Math.ceil(count / 2);
+        context.report(
+          `${label} 达到 ${error.maxTokens} Tokens 上限，拆成 ${left} + ${
+            count - left
+          } 章后分别重试…`,
+        );
+        await collectChapterRange(context, startIndex, left, collected);
+        await collectChapterRange(context, startIndex + left, count - left, collected);
+        return;
+      }
+      if (attempt >= 3) break;
+      context.report(`${label}失败（第 ${attempt}/3 次）：${errorMessage(error)}，正在重试…`);
+    }
+  }
+  throw new Error(`架构生成${label}失败：${errorMessage(lastError)}`);
+}
+
+function restrictLedgerToChapters(
+  ledger: PlanLedger,
+  chapters: ChapterPlan[],
+): PlanLedger {
+  const indexes = new Set(chapters.map((chapter) => chapter.index));
+  return {
+    ...ledger,
+    events: ledger.events.filter((event) => indexes.has(event.chapter)),
+    characterChanges: ledger.characterChanges.filter((change) => indexes.has(change.chapter)),
+    foreshadows: ledger.foreshadows.filter((item) => indexes.has(item.plantChapter)),
+    timeline: ledger.timeline.filter((item) => indexes.has(item.chapter)),
+    items: ledger.items.filter((item) => indexes.has(item.chapter)),
+    deviations: [],
+  };
+}
+
+function safeIdPart(value: string): string {
+  const cleaned = value.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").slice(0, 100);
+  return cleaned || "id";
+}
+
+function namespaceLedgerIds(ledger: PlanLedger, namespace: string): PlanLedger {
+  const eventIds = new Map<string, string>();
+  const mapId = (id: string) => {
+    if (!eventIds.has(id)) eventIds.set(id, `${namespace}-${safeIdPart(id)}`);
+    return eventIds.get(id)!;
+  };
+  const remap = (ids: string[]) => ids.map((id) => eventIds.get(id) ?? id);
+
+  return {
+    ...ledger,
+    events: ledger.events
+      .map((event) => ({ ...event, id: mapId(event.id) }))
+      .map((event) => ({ ...event, relatedEventIds: remap(event.relatedEventIds) })),
+    characterChanges: ledger.characterChanges.map((change) => ({
+      ...change,
+      id: mapId(change.id),
+      eventIds: remap(change.eventIds),
+    })),
+    foreshadows: ledger.foreshadows.map((item) => ({
+      ...item,
+      id: mapId(item.id),
+      eventIds: remap(item.eventIds),
+    })),
+    timeline: ledger.timeline.map((item) => ({
+      ...item,
+      id: mapId(item.id),
+      eventIds: remap(item.eventIds),
+    })),
+    items: ledger.items.map((item) => ({
+      ...item,
+      id: mapId(item.id),
+      eventIds: remap(item.eventIds),
+    })),
+    deviations: [],
+  };
+}
+
+function ensureLedgerCoverage(
+  ledger: PlanLedger,
+  chapters: ChapterPlan[],
+  report: ProgressReporter,
+): PlanLedger {
+  const covered = new Set(ledger.events.map((event) => event.chapter));
+  const missing = chapters.filter((chapter) => !covered.has(chapter.index));
+  if (!missing.length) return ledger;
+
+  const used = new Set(ledger.events.map((event) => event.id));
+  const fallback = planEntriesForChapters(missing).map((event) => {
+    let id = event.id;
+    let suffix = 2;
+    while (used.has(id)) {
+      id = `${event.id}-${suffix}`;
+      suffix += 1;
+    }
+    used.add(id);
+    return { ...event, id };
+  });
+  report(
+    `计划台账缺少第 ${missing.map((chapter) => chapter.index).join("、")} 章的事件，已用章节细纲补齐。`,
+  );
+  return { ...ledger, events: [...ledger.events, ...fallback] };
+}
+
+function pruneLedgerReferences(ledger: PlanLedger): {
+  ledger: PlanLedger;
+  removed: number;
+} {
+  const eventIds = new Set(ledger.events.map((event) => event.id));
+  let removed = 0;
+  const keep = (ids: string[]) => {
+    const kept = ids.filter((id) => eventIds.has(id));
+    removed += ids.length - kept.length;
+    return kept;
+  };
+  return {
+    removed,
+    ledger: {
+      ...ledger,
+      events: ledger.events.map((event) => ({
+        ...event,
+        relatedEventIds: keep(event.relatedEventIds),
+      })),
+      characterChanges: ledger.characterChanges.map((change) => ({
+        ...change,
+        eventIds: keep(change.eventIds),
+      })),
+      foreshadows: ledger.foreshadows.map((item) => ({
+        ...item,
+        eventIds: keep(item.eventIds),
+      })),
+      timeline: ledger.timeline.map((item) => ({
+        ...item,
+        eventIds: keep(item.eventIds),
+      })),
+      items: ledger.items.map((item) => ({
+        ...item,
+        eventIds: keep(item.eventIds),
+      })),
+    },
+  };
+}
+
+async function collectLedgerRange(
+  context: ArchitectureContext,
+  chapters: ChapterPlan[],
+  priorEvents: EventReference[],
+  collected: PlanLedger[],
+  batchNo: number,
+  namespace: string,
+): Promise<void> {
+  const first = chapters[0]?.index ?? 0;
+  const last = chapters[chapters.length - 1]?.index ?? first;
+  const label = `计划台账第 ${first}-${last} 章`;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    context.report(`${label}：生成中（第 ${attempt}/3 次）…`);
+    try {
+      const data = await context.client.json<Record<string, unknown>>(
+        architectLedgerBatchMessages(
+          context.meta,
+          context.foundation,
+          chapters,
+          priorEvents,
+          batchNo,
+        ),
+        { agent: "architect", maxTokens: context.budget, onProgress: context.onProgress },
+      );
+      const rawLedger = data.planLedger ?? data.plan_ledger;
+      const rawRecord = (rawLedger ?? {}) as Record<string, unknown>;
+      if (!Array.isArray(rawRecord.events) && !Array.isArray(rawRecord.foreshadows)) {
+        throw new Error("模型没有返回结构化计划台账（planLedger）");
+      }
+      let ledger = restrictLedgerToChapters(
+        sanitizeGeneratedPlanLedger(rawLedger),
+        chapters,
+      );
+      if (!ledger.events.length) {
+        throw new Error(`计划台账没有覆盖第 ${first}-${last} 章的任何事件`);
+      }
+      ledger = ensureLedgerCoverage(ledger, chapters, context.report);
+      ledger = namespaceLedgerIds(ledger, namespace);
+      collected.push(ledger);
+      priorEvents.push(
+        ...ledger.events.map((event) => ({
+          id: event.id,
+          name: event.name,
+          chapter: event.chapter,
+        })),
+      );
+      context.report(`${label}：已完成 ${ledger.events.length} 个计划事件。`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LLMOutputTruncatedError && chapters.length > 1) {
+        const middle = Math.ceil(chapters.length / 2);
+        context.report(
+          `${label} 达到 ${error.maxTokens} Tokens 上限，拆成 ${middle} + ${
+            chapters.length - middle
+          } 章后分别重试…`,
+        );
+        await collectLedgerRange(
+          context,
+          chapters.slice(0, middle),
+          priorEvents,
+          collected,
+          batchNo,
+          `${namespace}a`,
+        );
+        await collectLedgerRange(
+          context,
+          chapters.slice(middle),
+          priorEvents,
+          collected,
+          batchNo,
+          `${namespace}b`,
+        );
+        return;
+      }
+      if (attempt >= 3) break;
+      context.report(`${label}失败（第 ${attempt}/3 次）：${errorMessage(error)}，正在重试…`);
+    }
+  }
+  throw new Error(`架构生成${label}失败：${errorMessage(lastError)}`);
+}
+
+export async function generatePlan(
+  meta: ProjectMeta,
+  options: PlanGenerationOptions = {},
+): Promise<GeneratedPlan> {
+  if (isMock()) return mockPlan(meta);
+
+  const runtime = getRuntimeConfig();
+  const budget = tokenBudgetForTask("architecture", runtime.maxTokens);
+  const report = reporter(options.onProgress);
+  const client = options.client ?? new LLMClient();
+  const onProgress = llmProgress(report);
+  const target = Math.max(1, Math.round(meta.targetChapters) || 1);
+
+  report(
+    `架构生成：模型 ${runtime.model}，输出预算 ${budget} Tokens，目标 ${target} 章。`,
+  );
+  if (needsHigherTier("architecture", runtime.maxTokens)) {
+    report(
+      "提示：当前为标准档 8192 Tokens。架构会分批生成；如果仍被截断，请在「模型设置」选择高输出档或超大输出档。",
+    );
+  }
+
+  const foundation = await generateFoundation(client, meta, budget, report, onProgress);
+  report(
+    `架构第一阶段完成：世界观 ${foundation.bible.length} 字，主线大纲 ${foundation.outlineMd.length} 字。`,
+  );
+
+  const batchSize = architectureBatchSize(runtime.maxTokens);
+  const context: ArchitectureContext = {
+    client,
+    meta,
+    foundation,
+    budget,
+    report,
+    onProgress,
+  };
+  const chapterBatches = Math.ceil(target / batchSize);
+  let chapterBatch = 0;
+  const chapters: ChapterPlan[] = [];
+  report(`架构第二阶段：分批生成章节细纲，共 ${chapterBatches} 批。`);
+  for (let start = 1; start <= target; start += batchSize) {
+    chapterBatch += 1;
+    const count = Math.min(batchSize, target - start + 1);
+    report(
+      `章节细纲第 ${chapterBatch}/${chapterBatches} 批：第 ${start}-${start + count - 1} 章。`,
+    );
+    await collectChapterRange(context, start, count, chapters);
+  }
+
+  if (chapters.length !== target) {
+    throw new Error(`章节细纲数量为 ${chapters.length}，预期 ${target} 章，架构未提交`);
+  }
+  assertValidChapterPlans(chapters, {
+    expectedCount: target,
     startIndex: 1,
     requireContiguous: true,
   });
+  await repairDuplicateTitles(client, chapters, []);
+  report(`章节细纲已完成：共 ${chapters.length} 章，编号连续且标题已去重。`);
 
+  const ledgerParts: PlanLedger[] = [];
+  const priorEvents: EventReference[] = [];
+  const ledgerBatches = Math.ceil(chapters.length / batchSize);
+  let batchNo = 0;
+  report(`架构第三阶段：分批生成结构化计划台账，共 ${ledgerBatches} 批。`);
+  for (let start = 0; start < chapters.length; start += batchSize) {
+    batchNo += 1;
+    const batch = chapters.slice(start, start + batchSize);
+    report(
+      `计划台账第 ${batchNo}/${ledgerBatches} 批：第 ${batch[0]?.index}-${batch[batch.length - 1]?.index} 章。`,
+    );
+    await collectLedgerRange(
+      context,
+      batch,
+      priorEvents,
+      ledgerParts,
+      batchNo,
+      `b${batchNo}`,
+    );
+  }
+
+  let planLedger = ledgerParts.reduce(
+    (merged, part) => mergePlanLedgers(merged, part),
+    emptyPlanLedger(),
+  );
+  const pruned = pruneLedgerReferences(planLedger);
+  planLedger = pruned.ledger;
+  if (pruned.removed) {
+    report(`计划台账清理了 ${pruned.removed} 个不存在的跨事件引用。`);
+  }
+  planLedger = ensureLedgerCoverage(planLedger, chapters, report);
   const plan: ProjectPlan = {
-    logline: str(data.logline),
-    tags: arr(data.tags),
+    logline: foundation.logline,
+    tags: foundation.tags,
     chapters,
   };
-  const rawLedger = data.planLedger ?? data.plan_ledger;
-  const rawRecord = (rawLedger ?? {}) as Record<string, unknown>;
-  const hasLedgerFields = Array.isArray(rawRecord.events) || Array.isArray(rawRecord.foreshadows);
-  if (!hasLedgerFields) {
-    throw new Error("架构师没有返回结构化计划台账（planLedger），请在设置中重试或更换模型");
-  }
-  const planLedger = sanitizeGeneratedPlanLedger(rawLedger);
-  if (!planLedger.events.length) {
-    throw new Error("计划台账没有登记任何计划事件，架构未提交");
-  }
   assertValidPlanLedger(planLedger, plan);
+  report(
+    `计划台账已完成：${planLedger.events.length} 个计划事件、${planLedger.foreshadows.length} 条计划伏笔。`,
+  );
 
   return {
     plan,
-    bible: str(data.bibleMd ?? data.bible_md),
-    outlineMd: str(data.outlineMd ?? data.outline_md),
+    bible: foundation.bible,
+    outlineMd: foundation.outlineMd,
     planLedger,
   };
 }
 
-export async function generateCharacters(meta: ProjectMeta, generated: GeneratedPlan): Promise<Character[]> {
-  if (isMock()) return mockCharacters(meta);
+type CharacterTextField = Exclude<keyof Character, "source" | "updatedAt">;
 
-  const llm = new LLMClient();
-  const data = await llm.json<Record<string, unknown>>(
-    characterMessages(meta, generated.bible, generated.outlineMd),
-    { agent: "character-designer" },
-  );
-  const items = Array.isArray(data.characters) ? data.characters : [];
-  const characters = items
-    .map(normalizeCharacter)
-    .filter((character) => character.name.trim().length > 0);
-  if (!characters.length) {
-    throw new Error("角色设计师没有返回可用角色，请重试或更换模型");
+const CHARACTER_FIELDS: Array<[CharacterTextField, string]> = [
+  ["name", "姓名"],
+  ["role", "角色定位"],
+  ["gender", "性别"],
+  ["age", "年龄"],
+  ["appearance", "外貌"],
+  ["personality", "性格"],
+  ["background", "背景"],
+  ["goals", "目标"],
+  ["arc", "成长弧光"],
+  ["relationships", "人物关系"],
+  ["speechStyle", "说话风格"],
+];
+
+function characterNameKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+export function validateGeneratedCharacters(input: unknown): Character[] {
+  if (!Array.isArray(input)) {
+    throw new Error("角色 JSON 中的 characters 必须是数组");
+  }
+  if (input.length < 6 || input.length > 10) {
+    throw new Error(`角色数量为 ${input.length}，要求 6-10 位核心角色`);
+  }
+
+  const characters = input.map(normalizeCharacter);
+  const problems: string[] = [];
+  for (const [position, character] of characters.entries()) {
+    const missing = CHARACTER_FIELDS.filter(([key]) => !character[key]?.trim()).map(
+      ([, label]) => label,
+    );
+    if (missing.length) {
+      problems.push(
+        `第 ${position + 1} 位角色${character.name ? `「${character.name}」` : ""}缺少：${missing.join("、")}`,
+      );
+    }
+  }
+
+  const seen = new Map<string, string>();
+  for (const character of characters) {
+    const key = characterNameKey(character.name);
+    if (!key) continue;
+    const previous = seen.get(key);
+    if (previous) problems.push(`角色姓名重复：「${previous}」与「${character.name}」`);
+    else seen.set(key, character.name);
+  }
+
+  if (problems.length) {
+    throw new Error(`角色卡结构校验未通过：${problems.slice(0, 6).join("；")}`);
   }
   return characters;
+}
+
+export async function generateCharacters(
+  meta: ProjectMeta,
+  generated: GeneratedPlan,
+  options: CharacterGenerationOptions = {},
+): Promise<Character[]> {
+  if (isMock()) return mockCharacters(meta);
+
+  const runtime = getRuntimeConfig();
+  const budget = tokenBudgetForTask("characters", runtime.maxTokens);
+  const report = reporter(options.onProgress);
+  const client = options.client ?? new LLMClient();
+  const onProgress = llmProgress(report);
+  report(`角色生成：模型 ${runtime.model}，输出预算 ${budget} Tokens。`);
+  if (needsHigherTier("characters", runtime.maxTokens)) {
+    report(
+      "提示：当前为标准档 8192 Tokens，角色生成建议使用高输出档 16384 Tokens。",
+    );
+  }
+
+  let feedback: string[] | undefined;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const data = await client.json<Record<string, unknown>>(
+        characterMessages(meta, generated.bible, generated.outlineMd, feedback),
+        { agent: "character-designer", maxTokens: budget, onProgress },
+      );
+      return validateGeneratedCharacters(data.characters);
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LLMOutputTruncatedError) {
+        throw new Error(`角色生成失败：${errorMessage(error)} 已生成的架构尚未提交。`);
+      }
+      if (attempt >= 2) break;
+      feedback = [errorMessage(error)];
+      report(`角色卡结构校验失败（第 ${attempt}/2 次）：${errorMessage(error)}，正在受控重试…`);
+    }
+  }
+  throw new Error(
+    `角色生成连续两次未通过结构校验：${errorMessage(lastError)} 已生成的架构尚未提交。`,
+  );
 }
 
 function normalizeTitle(value: string): string {
@@ -257,7 +787,12 @@ export interface ExtendedPlanResult {
   planLedger: PlanLedger;
 }
 
-export async function extendPlan(
+export interface ExtendPlanOptions {
+  onProgress?: ProgressReporter;
+  client?: LLMClient;
+}
+
+async function extendPlanBatch(
   meta: ProjectMeta,
   plan: ProjectPlan,
   bible: string,
@@ -268,24 +803,15 @@ export async function extendPlan(
     canon?: CanonFacts;
     characters?: Character[];
     storyContext?: string;
-  } = {},
+  },
+  llm: LLMClient,
+  maxTokens: number,
+  onProgress: (event: LLMProgressEvent) => void,
 ): Promise<ExtendedPlanResult> {
   const startIndex = plan.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
 
-  if (isMock()) {
-    const chapters = mockExtendedChapters(meta, startIndex, count);
-    return {
-      chapters,
-      planLedger: {
-        ...emptyPlanLedger(),
-        events: planEntriesForChapters(chapters),
-      },
-    };
-  }
-
-  const llm = new LLMClient();
   const data = await llm.json<Record<string, unknown>>(
     extendMessages(
       meta,
@@ -297,7 +823,7 @@ export async function extendPlan(
       startIndex,
       context,
     ),
-    { agent: "extend-plan" },
+    { agent: "extend-plan", maxTokens, onProgress },
   );
   const raw = Array.isArray(data.chapters) ? data.chapters : [];
   // 模型可能多返回几章或夹带空标题的行：丢掉无效项后必须凑够请求数量，
@@ -351,6 +877,82 @@ export async function extendPlan(
     ...plan,
     chapters: [...plan.chapters, ...chapters].sort((a, b) => a.index - b.index),
   });
+  return { chapters, planLedger };
+}
+
+export async function extendPlan(
+  meta: ProjectMeta,
+  plan: ProjectPlan,
+  bible: string,
+  outlineMd: string,
+  recentSummaries: string[],
+  count: number,
+  context: {
+    canon?: CanonFacts;
+    characters?: Character[];
+    storyContext?: string;
+  } = {},
+  options: ExtendPlanOptions = {},
+): Promise<ExtendedPlanResult> {
+  const startIndex = plan.chapters.length
+    ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
+    : 1;
+
+  if (isMock()) {
+    const chapters = mockExtendedChapters(meta, startIndex, count);
+    return {
+      chapters,
+      planLedger: {
+        ...emptyPlanLedger(),
+        events: planEntriesForChapters(chapters),
+      },
+    };
+  }
+
+  const runtime = getRuntimeConfig();
+  const budget = tokenBudgetForTask("chapter-batch", runtime.maxTokens);
+  const client = options.client ?? new LLMClient();
+  const report = reporter(options.onProgress);
+  const onProgress = llmProgress(report);
+  const batchSize = architectureBatchSize(runtime.maxTokens);
+  const totalBatches = Math.ceil(count / batchSize);
+  const workPlan: ProjectPlan = { ...plan, chapters: [...plan.chapters] };
+  const chapters: ChapterPlan[] = [];
+  let planLedger = emptyPlanLedger();
+
+  report(
+    `续排：模型 ${runtime.model}，输出预算 ${budget} Tokens，共 ${count} 章，分 ${totalBatches} 批。`,
+  );
+  if (needsHigherTier("chapter-batch", runtime.maxTokens)) {
+    report("提示：当前为标准档 8192 Tokens，续排会分批生成；如仍截断请提高输出档位。");
+  }
+
+  for (let offset = 0; offset < count; offset += batchSize) {
+    const batchNo = Math.floor(offset / batchSize) + 1;
+    const size = Math.min(batchSize, count - offset);
+    report(
+      `续排第 ${batchNo}/${totalBatches} 批：从第 ${
+        Math.max(...workPlan.chapters.map((chapter) => chapter.index), 0) + 1
+      } 章起新增 ${size} 章。`,
+    );
+    const result = await extendPlanBatch(
+      meta,
+      workPlan,
+      bible,
+      outlineMd,
+      recentSummaries,
+      size,
+      context,
+      client,
+      budget,
+      onProgress,
+    );
+    const part = namespaceLedgerIds(result.planLedger, `extend-b${batchNo}`);
+    chapters.push(...result.chapters);
+    workPlan.chapters.push(...result.chapters);
+    planLedger = mergePlanLedgers(planLedger, part);
+  }
+
   return { chapters, planLedger };
 }
 

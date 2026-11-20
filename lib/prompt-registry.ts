@@ -18,8 +18,8 @@ export interface PromptCatalogEntry {
 export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   architect: {
     label: "架构师",
-    version: "2026.11.20-p9",
-    description: "生成世界观、主线大纲、章节细纲和结构化计划台账。",
+    version: "2026.11.20-p10",
+    description: "分阶段生成世界观、主线大纲、分批章节细纲和结构化计划台账。",
   },
   "extend-plan": {
     label: "大纲续排",
@@ -33,8 +33,8 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   "character-designer": {
     label: "角色设计",
-    version: "2026.11.18-p7",
-    description: "生成核心人物卡。",
+    version: "2026.11.20-p10",
+    description: "生成核心人物卡，并在结构校验失败后带反馈受控重试。",
   },
   writer: {
     label: "写作",

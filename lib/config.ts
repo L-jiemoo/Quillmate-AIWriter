@@ -1,5 +1,6 @@
 import path from "path";
 import { readSettingsSync } from "./settings";
+import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "./token-tiers";
 
 // QUILLMATE_DATA_DIR 只用于测试隔离；未设置时仍使用项目下的 data/。
 export const DATA_DIR = process.env.QUILLMATE_DATA_DIR?.trim()
@@ -73,6 +74,6 @@ export function getRuntimeConfig(): RuntimeConfig {
     model: process.env.LLM_MODEL?.trim() || "deepseek-chat",
     apiKey,
     temperature: Number(process.env.LLM_TEMPERATURE ?? 0.85),
-    maxTokens: Number(process.env.LLM_MAX_TOKENS ?? 8192),
+    maxTokens: normalizeOutputTokens(process.env.LLM_MAX_TOKENS, DEFAULT_OUTPUT_TOKENS),
   };
 }

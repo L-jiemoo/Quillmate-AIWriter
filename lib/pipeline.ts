@@ -348,15 +348,19 @@ async function runPlan(job: Job): Promise<void> {
   // 只有完全没有正文、且台账仍是空壳时才建立初始基线，绝不覆盖已有事实。
   const seedCanon =
     detail.state.written.length === 0 && isCanonEmpty(detail.canon);
-  logJob(job, "架构师正在构思世界观、主线与章节细纲…");
-  const generated = await generatePlan(detail.meta);
+  logJob(job, "架构师正在分阶段构思世界观、主线、章节细纲与计划台账…");
+  const generated = await generatePlan(detail.meta, {
+    onProgress: (message) => logJob(job, message),
+  });
   throwIfCancelled(job);
   logJob(
     job,
     `细纲已生成（${generated.plan.chapters.length} 章），正在创建人物档案；全部完成前不会写入任何文件…`,
   );
 
-  const characters = await generateCharacters(detail.meta, generated);
+  const characters = await generateCharacters(detail.meta, generated, {
+    onProgress: (message) => logJob(job, message),
+  });
   throwIfCancelled(job);
 
   const committed = await commitArchitecture(
@@ -442,6 +446,7 @@ async function runExtend(job: Job, requested: number): Promise<void> {
       characters: detail.characters,
       storyContext: storyRetrieval.text,
     },
+    { onProgress: (message) => logJob(job, message) },
   );
   throwIfCancelled(job);
   const chapters = extended.chapters;

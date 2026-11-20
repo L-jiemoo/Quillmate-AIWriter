@@ -1,6 +1,7 @@
 import { promises as fs, readFileSync, statSync } from "fs";
 import path from "path";
 import { writeFileAtomic } from "./storage";
+import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "./token-tiers";
 import type { LLMProvider } from "./config";
 
 const DATA_DIR = process.env.QUILLMATE_DATA_DIR?.trim()
@@ -50,7 +51,8 @@ function normalize(raw: unknown): SavedSettings | null {
     model: text(record.model, DEFAULT_MODEL),
     apiKey: typeof record.apiKey === "string" ? record.apiKey.trim() : "",
     temperature: clampNumber(record.temperature, 0.85, 0, 2),
-    maxTokens: Math.round(clampNumber(record.maxTokens, 8192, 1, 32768)),
+    // 旧版本允许任意数值；读取时映射到最接近的三档，避免旧配置读坏或悄悄降额。
+    maxTokens: normalizeOutputTokens(record.maxTokens, DEFAULT_OUTPUT_TOKENS),
   };
 }
 
@@ -83,6 +85,10 @@ export async function readSettings(): Promise<SavedSettings | null> {
 }
 
 export async function writeSettings(settings: SavedSettings): Promise<void> {
+  settings = {
+    ...settings,
+    maxTokens: normalizeOutputTokens(settings.maxTokens, DEFAULT_OUTPUT_TOKENS),
+  };
   // 文件里有明文 API Key，尽量收紧为仅当前用户可读写；
   // Windows 对 mode 的支持有限，所以同时依赖 .gitignore 防止误提交。
   // 原子写入避免进程中断留下半截配置，导致下次启动读不到 Key。

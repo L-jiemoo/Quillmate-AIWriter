@@ -5,6 +5,12 @@ import { useEffect, useState } from "react";
 import { PromptVersionsPanel } from "@/components/PromptVersionsPanel";
 import { BusyLabel, SkeletonLines } from "@/components/ui/Loading";
 import type { LLMProvider } from "@/lib/config";
+import {
+  DEFAULT_OUTPUT_TOKENS,
+  OUTPUT_TOKEN_TIERS,
+  normalizeOutputTokens,
+  outputTierForTokens,
+} from "@/lib/token-tiers";
 import { errorMessage } from "@/lib/utils";
 
 interface SettingsView {
@@ -68,7 +74,7 @@ const EMPTY_FORM = {
   model: "deepseek-chat",
   apiKey: "",
   temperature: "0.85",
-  maxTokens: "8192",
+  maxTokens: String(DEFAULT_OUTPUT_TOKENS),
 };
 
 export function SettingsPanel() {
@@ -77,6 +83,7 @@ export function SettingsPanel() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [draggingTier, setDraggingTier] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +103,18 @@ export function SettingsPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!draggingTier) return;
+    // 指针在滑杆外面松开时也要停止拖动动效，避免高亮一直闪。
+    const stopDragging = () => setDraggingTier(false);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    return () => {
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    };
+  }, [draggingTier]);
+
   function applySnapshot(data: Snapshot) {
     setSnapshot(data);
     const source = data.saved ?? data.effective;
@@ -105,7 +124,7 @@ export function SettingsPanel() {
       model: source.model,
       apiKey: "",
       temperature: String(source.temperature),
-      maxTokens: String(source.maxTokens),
+      maxTokens: String(normalizeOutputTokens(source.maxTokens)),
     });
   }
 
@@ -206,6 +225,13 @@ export function SettingsPanel() {
   const effectiveIsMock = !snapshot || snapshot.effective.provider === "mock";
   const keySaved = Boolean(snapshot?.saved?.apiKeySet);
   const keyAvailable = Boolean(snapshot?.saved?.apiKeySet || snapshot?.effective.apiKeySet);
+  const selectedTier = outputTierForTokens(form.maxTokens);
+  const selectedTierIndex = Math.max(
+    0,
+    OUTPUT_TOKEN_TIERS.findIndex((tier) => tier.id === selectedTier.id),
+  );
+  const sliderProgress =
+    (selectedTierIndex / (OUTPUT_TOKEN_TIERS.length - 1)) * 100;
 
   return (
     <main className="shell settings-page">
@@ -248,6 +274,13 @@ export function SettingsPanel() {
                       {snapshot.effective.apiKeySet
                         ? `已配置（${snapshot.effective.apiKeyPreview}）`
                         : "未配置"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>输出档位</dt>
+                    <dd>
+                      {outputTierForTokens(snapshot.effective.maxTokens).label} ·{" "}
+                      {snapshot.effective.maxTokens.toLocaleString()} Tokens
                     </dd>
                   </div>
                   <div>
@@ -365,17 +398,89 @@ export function SettingsPanel() {
                   onChange={(event) => update("temperature", event.target.value)}
                 />
               </label>
-              <label className="field">
-                <span>单次最大 tokens</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  max={32768}
-                  value={form.maxTokens}
-                  onChange={(event) => update("maxTokens", event.target.value)}
-                />
-              </label>
+              <div className="field">
+                <span>选择建议</span>
+                <p className="token-slider-tip">
+                  日常写作选高输出；全书架构或大型计划台账选超大输出档。
+                </p>
+              </div>
+            </div>
+
+            <div className="field">
+              <span>单次最大 Tokens</span>
+              <div
+                className={`token-slider${draggingTier ? " is-dragging" : ""}`}
+                data-tier={selectedTier.id}
+              >
+                <div className="token-slider-rail">
+                  <div className="token-slider-track">
+                    <span
+                      className="token-slider-fill"
+                      style={{ width: `${sliderProgress}%` }}
+                    />
+                    {OUTPUT_TOKEN_TIERS.map((tier, index) => (
+                      <span
+                        key={tier.id}
+                        className={`token-slider-dot${
+                          index <= selectedTierIndex ? " is-passed" : ""
+                        }`}
+                        style={{
+                          left: `${(index / (OUTPUT_TOKEN_TIERS.length - 1)) * 100}%`,
+                        }}
+                      />
+                    ))}
+                    <span
+                      className="token-slider-thumb"
+                      style={{ left: `${sliderProgress}%` }}
+                      aria-hidden="true"
+                    />
+                  </div>
+                  <input
+                    className="token-slider-input"
+                    type="range"
+                    min={0}
+                    max={OUTPUT_TOKEN_TIERS.length - 1}
+                    step={1}
+                    value={selectedTierIndex}
+                    aria-label="单次最大 Tokens 档位"
+                    aria-valuetext={`${selectedTier.label}，${selectedTier.tokens.toLocaleString()} Tokens，${selectedTier.summary}`}
+                    onChange={(event) => {
+                      const tier = OUTPUT_TOKEN_TIERS[Number(event.target.value)];
+                      if (tier) update("maxTokens", String(tier.tokens));
+                    }}
+                    onPointerDown={() => setDraggingTier(true)}
+                    onPointerUp={() => setDraggingTier(false)}
+                    onPointerCancel={() => setDraggingTier(false)}
+                    onBlur={() => setDraggingTier(false)}
+                  />
+                </div>
+                <div className="token-slider-labels" aria-hidden="true">
+                  {OUTPUT_TOKEN_TIERS.map((tier) => (
+                    <span
+                      key={tier.id}
+                      className={`token-slider-label${
+                        selectedTier.id === tier.id ? " is-active" : ""
+                      }`}
+                    >
+                      {tier.label}
+                      {tier.tokens === DEFAULT_OUTPUT_TOKENS ? " · 默认" : ""}
+                    </span>
+                  ))}
+                </div>
+                <div
+                  key={selectedTier.id}
+                  className="token-slider-readout"
+                  aria-live="polite"
+                >
+                  <div className="token-slider-readout-head">
+                    <strong>{selectedTier.label}</strong>
+                    <span>{selectedTier.tokens.toLocaleString()} Tokens</span>
+                  </div>
+                  <p>
+                    {selectedTier.summary}。{selectedTier.detail}
+                  </p>
+                </div>
+              </div>
             </div>
 
             {notice ? (
@@ -418,8 +523,8 @@ export function SettingsPanel() {
               Ollama 等本地服务时，Key 可任意填写非空值。
             </p>
             <p className="hint">
-              推理型模型（如 deepseek-flash / deepseek-reasoner）会先消耗推理
-              token，建议把「单次最大 tokens」设为 16384 以上；日常写作更推荐非推理的 deepseek-chat。
+              推理型模型会先消耗推理 token，建议选择「高输出档」或「超大输出档」；日常写作推荐非推理的
+              deepseek-chat。若模型供应商不支持所选额度，请求会明确报错，不会静默降级。
             </p>
           </form>
         </section>

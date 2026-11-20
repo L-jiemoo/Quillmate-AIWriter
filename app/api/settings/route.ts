@@ -14,13 +14,14 @@ import {
   writeSettings,
 } from "@/lib/settings";
 import type { SavedSettings } from "@/lib/settings";
+import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "@/lib/token-tiers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function envDefaults(): SavedSettings {
   const temperature = Number(process.env.LLM_TEMPERATURE ?? 0.85);
-  const maxTokens = Number(process.env.LLM_MAX_TOKENS ?? 8192);
+  const maxTokens = process.env.LLM_MAX_TOKENS;
   return {
     provider:
       process.env.LLM_PROVIDER?.trim().toLowerCase() === "mock"
@@ -30,7 +31,7 @@ function envDefaults(): SavedSettings {
     model: process.env.LLM_MODEL?.trim() || "deepseek-chat",
     apiKey: process.env.LLM_API_KEY?.trim() || "",
     temperature: Number.isFinite(temperature) ? temperature : 0.85,
-    maxTokens: Number.isFinite(maxTokens) ? maxTokens : 8192,
+    maxTokens: normalizeOutputTokens(maxTokens, DEFAULT_OUTPUT_TOKENS),
   };
 }
 
@@ -121,7 +122,8 @@ export async function PUT(request: Request) {
       model,
       apiKey,
       temperature: clamp(body.temperature, current.temperature, 0, 2),
-      maxTokens: Math.round(clamp(body.maxTokens, current.maxTokens, 1, 32768)),
+      // 后端只接受三档；旧客户端或手填的其他数值安全归一化到最近档位。
+      maxTokens: normalizeOutputTokens(body.maxTokens, current.maxTokens),
     });
 
     return noStoreJson(await snapshot());
