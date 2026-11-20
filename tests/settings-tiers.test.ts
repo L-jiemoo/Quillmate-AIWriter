@@ -44,6 +44,7 @@ describe("设置页三档 Tokens 持久化", () => {
       apiKey: "sk-test",
       temperature: 0.5,
       maxTokens: 4096,
+      storyContextChars: 3200,
     });
     const saved = JSON.parse(
       await readFile(path.join(dataDir, "settings.json"), "utf8"),
@@ -74,5 +75,82 @@ describe("设置页三档 Tokens 持久化", () => {
     };
     expect(data.saved.maxTokens).toBe(16384);
     expect(data.effective.maxTokens).toBe(16384);
+  });
+});
+
+describe("剧情上下文三档预算持久化", () => {
+  it("旧配置缺少字段时回落到标准档", async () => {
+    await writeFile(
+      path.join(dataDir, "settings.json"),
+      JSON.stringify({
+        provider: "openai-compatible",
+        baseUrl: "https://example.com/v1",
+        model: "test-model",
+        apiKey: "sk-test",
+        temperature: 0.5,
+        maxTokens: 16384,
+      }),
+      "utf8",
+    );
+    const settings = await import("@/lib/settings");
+    expect((await settings.readSettings())?.storyContextChars).toBe(3200);
+  });
+
+  it("写入时只保存三档字符预算", async () => {
+    const settings = await import("@/lib/settings");
+    await settings.writeSettings({
+      provider: "openai-compatible",
+      baseUrl: "https://example.com/v1",
+      model: "test-model",
+      apiKey: "sk-test",
+      temperature: 0.5,
+      maxTokens: 16384,
+      storyContextChars: 5000,
+    });
+    const saved = JSON.parse(
+      await readFile(path.join(dataDir, "settings.json"), "utf8"),
+    ) as { storyContextChars: number };
+    expect(saved.storyContextChars).toBe(4800);
+  });
+
+  it("运行时配置读取页面保存的档位", async () => {
+    const settings = await import("@/lib/settings");
+    await settings.writeSettings({
+      provider: "openai-compatible",
+      baseUrl: "https://example.com/v1",
+      model: "test-model",
+      apiKey: "sk-test",
+      temperature: 0.5,
+      maxTokens: 16384,
+      storyContextChars: 6400,
+    });
+    const config = await import("@/lib/config");
+    expect(config.getRuntimeConfig().storyContextChars).toBe(6400);
+  });
+
+  it("设置接口把旧数值归一化后保存", async () => {
+    const route = await import("@/app/api/settings/route");
+    const response = await route.PUT(
+      new Request("http://localhost/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "openai-compatible",
+          baseUrl: "https://example.com/v1",
+          model: "test-model",
+          apiKey: "sk-test",
+          temperature: 0.5,
+          maxTokens: 16384,
+          storyContextChars: 4600,
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as {
+      saved: { storyContextChars: number };
+      effective: { storyContextChars: number };
+    };
+    expect(data.saved.storyContextChars).toBe(4800);
+    expect(data.effective.storyContextChars).toBe(4800);
   });
 });

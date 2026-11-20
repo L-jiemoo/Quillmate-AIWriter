@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { apiError, assertSafeSlugParam, parsePositiveInt } from "@/lib/api";
+import { getRuntimeConfig } from "@/lib/config";
 import { buildEffectiveMemory } from "@/lib/memory";
 import { buildEffectiveStory, buildStoryContext } from "@/lib/story";
 import { getMemory, getProjectDetail, getStory } from "@/lib/store";
@@ -24,7 +25,11 @@ export async function GET(request: Request, context: RouteContext) {
     if (!chapter) throw new Error(`第 ${requested} 章不在当前大纲中`);
     const memory = buildEffectiveMemory(detail, await getMemory(slug));
     const story = buildEffectiveStory(detail, memory, await getStory(slug));
-    return NextResponse.json(buildStoryContext(detail, chapter, memory, story));
+    return NextResponse.json(
+      buildStoryContext(detail, chapter, memory, story, {
+        budget: getRuntimeConfig().storyContextChars,
+      }),
+    );
   } catch (error) {
     return apiError(error);
   }

@@ -1,5 +1,9 @@
 import path from "path";
 import { readSettingsSync } from "./settings";
+import {
+  DEFAULT_STORY_CONTEXT_CHARS,
+  normalizeStoryContextChars,
+} from "./story-context-tiers";
 import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "./token-tiers";
 
 // QUILLMATE_DATA_DIR 只用于测试隔离；未设置时仍使用项目下的 data/。
@@ -20,6 +24,8 @@ export interface RuntimeConfig {
   apiKey: string;
   temperature: number;
   maxTokens: number;
+  // 剧情台账注入写作/审校提示词的字符预算，按三档归一化。
+  storyContextChars: number;
 }
 
 export type BrowserChannel = "msedge" | "chrome" | undefined;
@@ -54,6 +60,7 @@ export function getRuntimeConfig(): RuntimeConfig {
       apiKey: saved.apiKey,
       temperature: saved.temperature,
       maxTokens: saved.maxTokens,
+      storyContextChars: saved.storyContextChars,
     };
   }
 
@@ -75,5 +82,9 @@ export function getRuntimeConfig(): RuntimeConfig {
     apiKey,
     temperature: Number(process.env.LLM_TEMPERATURE ?? 0.85),
     maxTokens: normalizeOutputTokens(process.env.LLM_MAX_TOKENS, DEFAULT_OUTPUT_TOKENS),
+    storyContextChars: normalizeStoryContextChars(
+      process.env.STORY_CONTEXT_CHARS,
+      DEFAULT_STORY_CONTEXT_CHARS,
+    ),
   };
 }

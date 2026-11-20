@@ -1,6 +1,10 @@
 import { promises as fs, readFileSync, statSync } from "fs";
 import path from "path";
 import { writeFileAtomic } from "./storage";
+import {
+  DEFAULT_STORY_CONTEXT_CHARS,
+  normalizeStoryContextChars,
+} from "./story-context-tiers";
 import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "./token-tiers";
 import type { LLMProvider } from "./config";
 
@@ -16,6 +20,7 @@ export interface SavedSettings {
   apiKey: string;
   temperature: number;
   maxTokens: number;
+  storyContextChars: number;
 }
 
 export interface PublicSettings {
@@ -24,6 +29,7 @@ export interface PublicSettings {
   model: string;
   temperature: number;
   maxTokens: number;
+  storyContextChars: number;
   apiKeySet: boolean;
   apiKeyPreview: string;
 }
@@ -53,6 +59,10 @@ function normalize(raw: unknown): SavedSettings | null {
     temperature: clampNumber(record.temperature, 0.85, 0, 2),
     // 旧版本允许任意数值；读取时映射到最接近的三档，避免旧配置读坏或悄悄降额。
     maxTokens: normalizeOutputTokens(record.maxTokens, DEFAULT_OUTPUT_TOKENS),
+    storyContextChars: normalizeStoryContextChars(
+      record.storyContextChars,
+      DEFAULT_STORY_CONTEXT_CHARS,
+    ),
   };
 }
 
@@ -88,6 +98,10 @@ export async function writeSettings(settings: SavedSettings): Promise<void> {
   settings = {
     ...settings,
     maxTokens: normalizeOutputTokens(settings.maxTokens, DEFAULT_OUTPUT_TOKENS),
+    storyContextChars: normalizeStoryContextChars(
+      settings.storyContextChars,
+      DEFAULT_STORY_CONTEXT_CHARS,
+    ),
   };
   // 文件里有明文 API Key，尽量收紧为仅当前用户可读写；
   // Windows 对 mode 的支持有限，所以同时依赖 .gitignore 防止误提交。
@@ -113,6 +127,7 @@ export function toPublicSettings(settings: SavedSettings): PublicSettings {
     model: settings.model,
     temperature: settings.temperature,
     maxTokens: settings.maxTokens,
+    storyContextChars: settings.storyContextChars,
     apiKeySet: Boolean(settings.apiKey),
     apiKeyPreview: previewKey(settings.apiKey),
   };

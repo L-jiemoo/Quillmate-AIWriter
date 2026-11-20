@@ -3547,10 +3547,10 @@ input.switch:disabled {
   top: 50%;
   right: 11px;
   left: 11px;
-  height: 6px;
+  height: 24px;
   border-radius: var(--radius-pill);
   background: var(--surface-3);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.22);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.24);
   transform: translateY(-50%);
   transition: box-shadow var(--dur) var(--ease);
 }
@@ -3598,7 +3598,8 @@ input.switch:disabled {
 
 .token-slider-dot.is-passed {
   border-color: transparent;
-  background: var(--accent-bright);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.35);
 }
 
 .token-slider.is-dragging .token-slider-dot.is-passed {

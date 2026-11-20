@@ -16,6 +16,10 @@ const agentState = vi.hoisted(() => ({
   auditSteps: [] as AuditStep[],
   auditCalls: 0,
   repairCalls: 0,
+  // 模拟模型对多个问题给出修改区域重叠的补丁，用于验证逐个修复兜底。
+  overlapBatches: false,
+  // 模拟一个问题修复时顺带改写了另一个问题的原文证据。
+  siblingEvidence: "",
   repairIssues: [] as ContinuityIssue[][],
   repairFeedback: [] as string[],
   onAudit: null as (() => void | Promise<void>) | null,
@@ -85,7 +89,10 @@ vi.mock("../lib/agents", async (importOriginal) => {
       };
       return {
         patches: issues.map((issue, index) => {
-          const anchor = anchorOf(issue.evidence);
+          const anchor =
+            agentState.overlapBatches && issues.length > 1
+              ? anchorOf(issues[0].evidence)
+              : anchorOf(issue.evidence);
           const edits: {
             originalText: string;
             replacement: string;
@@ -100,6 +107,18 @@ vi.mock("../lib/agents", async (importOriginal) => {
           ];
           if (index === 0 && agentState.crossEdit) {
             edits.push({ ...agentState.crossEdit, reason: "跨章根因修复" });
+          }
+          if (
+            index === 0 &&
+            issues.length === 1 &&
+            agentState.overlapBatches &&
+            agentState.siblingEvidence
+          ) {
+            edits.push({
+              originalText: agentState.siblingEvidence,
+              replacement: "角色丙不再提那个时间。",
+              reason: "测试同步修复",
+            });
           }
           return {
             issueId: issue.id ?? `issue-${index + 1}`,
@@ -129,6 +148,8 @@ beforeEach(async () => {
   agentState.auditSteps = [];
   agentState.auditCalls = 0;
   agentState.repairCalls = 0;
+  agentState.overlapBatches = false;
+  agentState.siblingEvidence = "";
   agentState.repairIssues = [];
   agentState.repairFeedback = [];
   agentState.onAudit = null;
@@ -363,6 +384,64 @@ describe("未采用草稿修复", () => {
     const chapter = detail.chapters.find((item) => item.index === 1);
     expect(chapter?.written).toBe(true);
     expect(chapter?.content).toContain("【修复2】");
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+  });
+
+  it("多个问题补丁修改区域重叠时改为逐个问题修复", async () => {
+    const slug = await projectWithPlan("重叠改为逐个修复");
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
+    const content = `${textA}${textB}`;
+    const first = criticalIssue("时间线", textA);
+    const second = criticalIssue("人物行为", textB);
+    await saveDraft(slug, "write", content, {
+      review: reviewWith([first, second]),
+    });
+    setAuditScript([{ critical: [] }]);
+    agentState.overlapBatches = true;
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(
+      finished.logs.some((line) => line.message.includes("改为逐个问题修复")),
+    ).toBe(true);
+
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.written).toBe(true);
+    // 第一次整批补丁被重叠校验拒绝，随后两个问题各调用一次修复。
+    expect(chapter?.content).toContain("【修复2】");
+    expect(chapter?.content).toContain("【修复3】");
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+  });
+
+  it("逐个修复时前面的修改已改写后一个问题时跳过过期补丁", async () => {
+    const slug = await projectWithPlan("逐个修复跳过过期问题");
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
+    const first = criticalIssue("时间线", textA);
+    const second = criticalIssue("人物行为", textB);
+    await saveDraft(slug, "write", `${textA}${textB}`, {
+      review: reviewWith([first, second]),
+    });
+    setAuditScript([{ critical: [] }]);
+    agentState.overlapBatches = true;
+    agentState.siblingEvidence = textB;
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(
+      finished.logs.some((line) =>
+        line.message.includes("原文证据已被前面的修复改写"),
+      ),
+    ).toBe(true);
+
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.written).toBe(true);
+    expect(chapter?.content).toContain("【修复2】");
+    expect(chapter?.content).toContain("角色丙不再提那个时间。");
+    expect(chapter?.content).not.toContain("【修复3】");
     expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
   });
 

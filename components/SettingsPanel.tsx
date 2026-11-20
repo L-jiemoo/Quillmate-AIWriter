@@ -6,6 +6,12 @@ import { PromptVersionsPanel } from "@/components/PromptVersionsPanel";
 import { BusyLabel, SkeletonLines } from "@/components/ui/Loading";
 import type { LLMProvider } from "@/lib/config";
 import {
+  DEFAULT_STORY_CONTEXT_CHARS,
+  STORY_CONTEXT_TIERS,
+  normalizeStoryContextChars,
+  storyContextTierForChars,
+} from "@/lib/story-context-tiers";
+import {
   DEFAULT_OUTPUT_TOKENS,
   OUTPUT_TOKEN_TIERS,
   normalizeOutputTokens,
@@ -19,6 +25,7 @@ interface SettingsView {
   model: string;
   temperature: number;
   maxTokens: number;
+  storyContextChars: number;
   apiKeySet: boolean;
   apiKeyPreview: string;
 }
@@ -75,7 +82,141 @@ const EMPTY_FORM = {
   apiKey: "",
   temperature: "0.85",
   maxTokens: String(DEFAULT_OUTPUT_TOKENS),
+  storyContextChars: String(DEFAULT_STORY_CONTEXT_CHARS),
 };
+
+interface TierOption {
+  id: string;
+  label: string;
+  valueText: string;
+  summary: string;
+  detail: string;
+  isDefault: boolean;
+}
+
+const OUTPUT_TIER_OPTIONS: TierOption[] = OUTPUT_TOKEN_TIERS.map((tier) => ({
+  id: tier.id,
+  label: tier.label,
+  valueText: `${tier.tokens.toLocaleString()} Tokens`,
+  summary: tier.summary,
+  detail: tier.detail,
+  isDefault: tier.tokens === DEFAULT_OUTPUT_TOKENS,
+}));
+
+const STORY_TIER_OPTIONS: TierOption[] = STORY_CONTEXT_TIERS.map((tier) => ({
+  id: tier.id,
+  label: tier.label,
+  valueText: `${tier.chars.toLocaleString()} 字符`,
+  summary: tier.summary,
+  detail: tier.detail,
+  isDefault: tier.chars === DEFAULT_STORY_CONTEXT_CHARS,
+}));
+
+function TierSlider({
+  label,
+  ariaLabel,
+  options,
+  selectedIndex,
+  onChange,
+}: {
+  label: string;
+  ariaLabel: string;
+  options: TierOption[];
+  selectedIndex: number;
+  onChange: (index: number) => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    if (!dragging) return;
+    // 指针在滑杆外面松开时也要停止拖动动效，避免高亮一直闪。
+    const stopDragging = () => setDragging(false);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    return () => {
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    };
+  }, [dragging]);
+
+  const maxIndex = Math.max(0, options.length - 1);
+  const selected = options[Math.min(Math.max(selectedIndex, 0), maxIndex)];
+  const progress = maxIndex > 0 ? (selectedIndex / maxIndex) * 100 : 0;
+
+  return (
+    <div className="field">
+      <span>{label}</span>
+      <div
+        className={`token-slider${dragging ? " is-dragging" : ""}`}
+        data-tier={selected.id}
+      >
+        <div className="token-slider-rail">
+          <div className="token-slider-track">
+            <span
+              className="token-slider-fill"
+              style={{ width: `${progress}%` }}
+            />
+            {options.map((tier, index) => (
+              <span
+                key={tier.id}
+                className={`token-slider-dot${
+                  index <= selectedIndex ? " is-passed" : ""
+                }`}
+                style={{ left: `${(index / Math.max(maxIndex, 1)) * 100}%` }}
+              />
+            ))}
+            <span
+              className="token-slider-thumb"
+              style={{ left: `${progress}%` }}
+              aria-hidden="true"
+            />
+          </div>
+          <input
+            className="token-slider-input"
+            type="range"
+            min={0}
+            max={maxIndex}
+            step={1}
+            value={Math.min(Math.max(selectedIndex, 0), maxIndex)}
+            aria-label={ariaLabel}
+            aria-valuetext={`${selected.label}，${selected.valueText}，${selected.summary}`}
+            onChange={(event) => onChange(Number(event.target.value))}
+            onPointerDown={() => setDragging(true)}
+            onPointerUp={() => setDragging(false)}
+            onPointerCancel={() => setDragging(false)}
+            onBlur={() => setDragging(false)}
+          />
+        </div>
+        <div className="token-slider-labels" aria-hidden="true">
+          {options.map((tier) => (
+            <span
+              key={tier.id}
+              className={`token-slider-label${
+                selected.id === tier.id ? " is-active" : ""
+              }`}
+            >
+              {tier.label}
+              {tier.isDefault ? " · 默认" : ""}
+            </span>
+          ))}
+        </div>
+        <div
+          key={selected.id}
+          className="token-slider-readout"
+          aria-live="polite"
+        >
+          <div className="token-slider-readout-head">
+            <strong>{selected.label}</strong>
+            <span>{selected.valueText}</span>
+          </div>
+          <p>
+            {selected.summary}。{selected.detail}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsPanel() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -83,7 +224,6 @@ export function SettingsPanel() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [draggingTier, setDraggingTier] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,18 +243,6 @@ export function SettingsPanel() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!draggingTier) return;
-    // 指针在滑杆外面松开时也要停止拖动动效，避免高亮一直闪。
-    const stopDragging = () => setDraggingTier(false);
-    window.addEventListener("pointerup", stopDragging);
-    window.addEventListener("pointercancel", stopDragging);
-    return () => {
-      window.removeEventListener("pointerup", stopDragging);
-      window.removeEventListener("pointercancel", stopDragging);
-    };
-  }, [draggingTier]);
-
   function applySnapshot(data: Snapshot) {
     setSnapshot(data);
     const source = data.saved ?? data.effective;
@@ -125,6 +253,7 @@ export function SettingsPanel() {
       apiKey: "",
       temperature: String(source.temperature),
       maxTokens: String(normalizeOutputTokens(source.maxTokens)),
+      storyContextChars: String(normalizeStoryContextChars(source.storyContextChars)),
     });
   }
 
@@ -164,6 +293,7 @@ export function SettingsPanel() {
           apiKey: form.apiKey.trim() || undefined,
           temperature: Number(form.temperature),
           maxTokens: Number(form.maxTokens),
+          storyContextChars: Number(form.storyContextChars),
           clearApiKey,
         }),
       });
@@ -230,8 +360,11 @@ export function SettingsPanel() {
     0,
     OUTPUT_TOKEN_TIERS.findIndex((tier) => tier.id === selectedTier.id),
   );
-  const sliderProgress =
-    (selectedTierIndex / (OUTPUT_TOKEN_TIERS.length - 1)) * 100;
+  const selectedStoryTier = storyContextTierForChars(form.storyContextChars);
+  const selectedStoryTierIndex = Math.max(
+    0,
+    STORY_CONTEXT_TIERS.findIndex((tier) => tier.id === selectedStoryTier.id),
+  );
 
   return (
     <main className="shell settings-page">
@@ -281,6 +414,13 @@ export function SettingsPanel() {
                     <dd>
                       {outputTierForTokens(snapshot.effective.maxTokens).label} ·{" "}
                       {snapshot.effective.maxTokens.toLocaleString()} Tokens
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>剧情上下文</dt>
+                    <dd>
+                      {storyContextTierForChars(snapshot.effective.storyContextChars).label} ·{" "}
+                      {snapshot.effective.storyContextChars.toLocaleString()} 字符
                     </dd>
                   </div>
                   <div>
@@ -406,82 +546,31 @@ export function SettingsPanel() {
               </div>
             </div>
 
-            <div className="field">
-              <span>单次最大 Tokens</span>
-              <div
-                className={`token-slider${draggingTier ? " is-dragging" : ""}`}
-                data-tier={selectedTier.id}
-              >
-                <div className="token-slider-rail">
-                  <div className="token-slider-track">
-                    <span
-                      className="token-slider-fill"
-                      style={{ width: `${sliderProgress}%` }}
-                    />
-                    {OUTPUT_TOKEN_TIERS.map((tier, index) => (
-                      <span
-                        key={tier.id}
-                        className={`token-slider-dot${
-                          index <= selectedTierIndex ? " is-passed" : ""
-                        }`}
-                        style={{
-                          left: `${(index / (OUTPUT_TOKEN_TIERS.length - 1)) * 100}%`,
-                        }}
-                      />
-                    ))}
-                    <span
-                      className="token-slider-thumb"
-                      style={{ left: `${sliderProgress}%` }}
-                      aria-hidden="true"
-                    />
-                  </div>
-                  <input
-                    className="token-slider-input"
-                    type="range"
-                    min={0}
-                    max={OUTPUT_TOKEN_TIERS.length - 1}
-                    step={1}
-                    value={selectedTierIndex}
-                    aria-label="单次最大 Tokens 档位"
-                    aria-valuetext={`${selectedTier.label}，${selectedTier.tokens.toLocaleString()} Tokens，${selectedTier.summary}`}
-                    onChange={(event) => {
-                      const tier = OUTPUT_TOKEN_TIERS[Number(event.target.value)];
-                      if (tier) update("maxTokens", String(tier.tokens));
-                    }}
-                    onPointerDown={() => setDraggingTier(true)}
-                    onPointerUp={() => setDraggingTier(false)}
-                    onPointerCancel={() => setDraggingTier(false)}
-                    onBlur={() => setDraggingTier(false)}
-                  />
-                </div>
-                <div className="token-slider-labels" aria-hidden="true">
-                  {OUTPUT_TOKEN_TIERS.map((tier) => (
-                    <span
-                      key={tier.id}
-                      className={`token-slider-label${
-                        selectedTier.id === tier.id ? " is-active" : ""
-                      }`}
-                    >
-                      {tier.label}
-                      {tier.tokens === DEFAULT_OUTPUT_TOKENS ? " · 默认" : ""}
-                    </span>
-                  ))}
-                </div>
-                <div
-                  key={selectedTier.id}
-                  className="token-slider-readout"
-                  aria-live="polite"
-                >
-                  <div className="token-slider-readout-head">
-                    <strong>{selectedTier.label}</strong>
-                    <span>{selectedTier.tokens.toLocaleString()} Tokens</span>
-                  </div>
-                  <p>
-                    {selectedTier.summary}。{selectedTier.detail}
-                  </p>
-                </div>
-              </div>
-            </div>
+            <TierSlider
+              label="单次最大 Tokens"
+              ariaLabel="单次最大 Tokens 档位"
+              options={OUTPUT_TIER_OPTIONS}
+              selectedIndex={selectedTierIndex}
+              onChange={(index) => {
+                const tier = OUTPUT_TOKEN_TIERS[index];
+                if (tier) update("maxTokens", String(tier.tokens));
+              }}
+            />
+
+            <TierSlider
+              label="剧情台账上下文预算"
+              ariaLabel="剧情台账上下文预算档位"
+              options={STORY_TIER_OPTIONS}
+              selectedIndex={selectedStoryTierIndex}
+              onChange={(index) => {
+                const tier = STORY_CONTEXT_TIERS[index];
+                if (tier) update("storyContextChars", String(tier.chars));
+              }}
+            />
+            <p className="hint">
+              剧情上下文档位越高，写作和审校时注入的人物状态、伏笔、事件与关系越多，输入
+              token 也越多。默认标准档与旧版本一致。
+            </p>
 
             {notice ? (
               <p className={notice.type === "success" ? "form-note" : "form-error"}>

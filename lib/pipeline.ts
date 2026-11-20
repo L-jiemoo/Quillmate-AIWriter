@@ -428,6 +428,7 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     },
     memory,
     story,
+    { budget: getRuntimeConfig().storyContextChars },
   );
   logJob(
     job,
@@ -595,7 +596,7 @@ function logPromptProfile(job: Job): void {
   const auditor = promptVersionInfo("auditor");
   logJob(
     job,
-    `提示词与模型：写作 ${writer.promptVersion}，审校 ${auditor.promptVersion}；模型 ${runtime.model}，温度 ${runtime.temperature}，单次最多 ${runtime.maxTokens} tokens。`,
+    `提示词与模型：写作 ${writer.promptVersion}，审校 ${auditor.promptVersion}；模型 ${runtime.model}，温度 ${runtime.temperature}，单次最多 ${runtime.maxTokens} tokens，剧情上下文 ${runtime.storyContextChars} 字符。`,
   );
 }
 
@@ -715,6 +716,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
     input.chapter,
     input.memory,
     input.story,
+    { budget: getRuntimeConfig().storyContextChars },
   ).text;
   const previousChapters = input.project.chapters
     .filter(
@@ -1049,6 +1051,7 @@ async function verifyDraftChapter(
     input.chapter,
     input.memory,
     input.story,
+    { budget: getRuntimeConfig().storyContextChars },
   ).text;
   const previousChapters = input.project.chapters
     .filter(
@@ -1177,15 +1180,21 @@ async function verifyDraftChapter(
         `第 ${input.chapter.index} 章基于最新审校问题尝试定点修复（第 ${nextRound} 轮）…`,
       );
     }
-    const collected = collectRepairEvidence({
+    const stagedIssues = withIssueIds(blocking);
+    // 逐个问题重做修复时仍沿用整组问题的证据范围：单条问题缺少证据锚点时也能落在授权段落内。
+    const roundAnchors = stagedIssues
+      .flatMap((issue) => [issue.evidence, issue.sourceEvidence ?? ""])
+      .map((anchor) => anchor.trim())
+      .filter(Boolean);
+    const allEvidence = collectRepairEvidence({
       project: input.project,
       chapter: input.chapter,
-      issues: blocking,
+      issues: stagedIssues,
       characters: input.characters,
       canon: auditCanon,
       story: input.story,
-    });
-    evidenceContext = collected.text;
+    }).text;
+    evidenceContext = allEvidence;
     const missingRefs = missingReferencedChapters(
       input.project,
       input.chapter.index,
@@ -1202,14 +1211,23 @@ async function verifyDraftChapter(
       );
       return false;
     }
-    try {
-      const stagedIssues = withIssueIds(blocking);
-      const crossIndexes = Object.keys(crossTexts).map(Number);
+    type PlanResult = {
+      text: string;
+      cross: Record<number, string>;
+      regressionScope: string;
+      causalBaselines: CausalBaseline[];
+    };
+    const applyPlan = async (
+      issues: ContinuityIssue[],
+      text: string,
+      chaptersForCall: Record<number, string>,
+      evidence: string,
+    ): Promise<PlanResult> => {
       const plan = await repairChapterPatches(
         input.meta,
         input.chapter,
-        currentText,
-        stagedIssues,
+        text,
+        issues,
         auditCanon,
         input.previousEnding,
         input.nextOpening,
@@ -1217,41 +1235,143 @@ async function verifyDraftChapter(
         "",
         {
           draftRepair: true,
-          evidenceContext,
+          evidenceContext: evidence,
           authorDirective: input.authorDirective,
           crossChapterContext: input.crossChapterContext,
-          affectedChapters: [input.chapter.index, ...crossIndexes],
+          affectedChapters: [
+            input.chapter.index,
+            ...Object.keys(chaptersForCall).map(Number),
+          ],
         },
       );
       const patchChapters: PatchChapter[] = [
         {
           index: input.chapter.index,
-          text: currentText,
-          extraAuthorizedAnchors: plan.authorizedAnchors,
+          text,
+          extraAuthorizedAnchors: [...roundAnchors, ...(plan.authorizedAnchors ?? [])],
         },
-        ...crossIndexes.map((index) => ({
-          index,
-          text: crossTexts[index],
-          extraAuthorizedAnchors: input.crossAnchors?.[index],
-        })),
+        ...Object.keys(chaptersForCall).map((key) => {
+          const index = Number(key);
+          return {
+            index,
+            text: chaptersForCall[index],
+            extraAuthorizedAnchors: input.crossAnchors?.[index],
+          };
+        }),
       ];
       const batches = applyRepairPatchesAcross({
         chapters: patchChapters,
         targetIndex: input.chapter.index,
         patches: plan.patches,
-        issues: stagedIssues,
+        issues,
       });
+      let nextText = text;
+      const nextCross = { ...chaptersForCall };
       for (const batch of batches) {
         logPatchBatch(input.job, batch.chapterIndex, batch);
         if (batch.chapterIndex === input.chapter.index) {
-          currentText = batch.text;
+          nextText = batch.text;
         } else {
-          crossTexts = { ...crossTexts, [batch.chapterIndex]: batch.text };
+          nextCross[batch.chapterIndex] = batch.text;
         }
       }
-      if (plan.regressionScope) regressionScope = plan.regressionScope;
+      return {
+        text: nextText,
+        cross: nextCross,
+        regressionScope: plan.regressionScope ?? "",
+        causalBaselines: plan.causalBaselines ?? [],
+      };
+    };
+    try {
+      let result: PlanResult;
+      try {
+        result = await applyPlan(stagedIssues, currentText, crossTexts, allEvidence);
+      } catch (error) {
+        // 模型一次给出的多个补丁修改区域重叠时，改为逐个问题修复：
+        // 先应用前一个问题的补丁，再基于改后的稿子定位后一个问题，避免整批被拒。
+        if (
+          error instanceof RepairPatchError &&
+          error.code === "OVERLAP" &&
+          stagedIssues.length > 1
+        ) {
+          logJob(
+            input.job,
+            `第 ${input.chapter.index} 章多个问题的补丁修改区域重叠，改为逐个问题修复：先改前面的问题，再基于改后的稿子重新定位后面的修改…`,
+          );
+          let seqText = currentText;
+          let seqCross = { ...crossTexts };
+          let seqScope = "";
+          const seqBaselines: CausalBaseline[] = [];
+          for (const [index, issue] of stagedIssues.entries()) {
+            // 前面的修复可能已经把后面的问题一并改写掉了；旧证据找不到时不再套用过期的修改，
+            // 交给本轮结束后的审校按新稿重新判断。
+            const evidence = issue.evidence.trim();
+            if (evidence && !seqText.includes(evidence)) {
+              logJob(
+                input.job,
+                `第 ${input.chapter.index} 章第 ${nextRound} 轮待修问题 ${issue.id} 的原文证据已被前面的修复改写，跳过旧补丁，交由后续审校按新稿判断…`,
+              );
+              continue;
+            }
+            const issueEvidence = collectRepairEvidence({
+              project: input.project,
+              chapter: input.chapter,
+              issues: [issue],
+              characters: input.characters,
+              canon: auditCanon,
+              story: input.story,
+            }).text;
+            let one: PlanResult;
+            try {
+              one = await applyPlan([issue], seqText, seqCross, issueEvidence);
+            } catch (error) {
+              if (error instanceof JobCancelledError) throw error;
+              if (error instanceof RepairNeedsAuthorDecisionError) throw error;
+              // 单个问题的补丁或方案没通过校验时只跳过该问题，其他问题继续修；
+              // 本轮改完后的审校会给出最终结论。
+              if (
+                error instanceof RepairPatchError ||
+                error instanceof RepairPlanRejectedError
+              ) {
+                logJob(
+                  input.job,
+                  `第 ${input.chapter.index} 章第 ${nextRound} 轮问题 ${issue.id} 的修改未通过校验，跳过并继续处理其他问题：${error.message}`,
+                );
+                continue;
+              }
+              throw error;
+            }
+            logJob(
+              input.job,
+              `第 ${input.chapter.index} 章第 ${nextRound} 轮已按顺序修复第 ${
+                index + 1
+              }/${stagedIssues.length} 个问题（${issue.id}），继续在改后的稿子上定位后续修改…`,
+            );
+            seqText = one.text;
+            seqCross = one.cross;
+            if (one.regressionScope) {
+              seqScope = [seqScope, one.regressionScope].filter(Boolean).join("；");
+            }
+            seqBaselines.push(...one.causalBaselines);
+            throwIfCancelled(input.job);
+          }
+          result = {
+            text: seqText,
+            cross: seqCross,
+            regressionScope: seqScope,
+            causalBaselines: seqBaselines,
+          };
+        } else {
+          throw error;
+        }
+      }
+      currentText = result.text;
+      crossTexts = result.cross;
+      if (result.regressionScope) regressionScope = result.regressionScope;
       // 多轮修复时只保留第一轮的原始结构，后续轮次是在已修改稿上继续修。
-      if (!causalBaselines.length) causalBaselines = plan.causalBaselines ?? [];
+      if (!causalBaselines.length && result.causalBaselines.length) {
+        causalBaselines = result.causalBaselines;
+      }
       repairCalls = nextRound;
       throwIfCancelled(input.job);
       return true;
@@ -1593,7 +1713,9 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
     logJob(job, `开始写第 ${chapter.index} 章《${chapter.title}》…`);
     const retrieval = buildMemoryContext(detail, chapterPlan, memory);
     logMemoryRetrieval(job, chapter.index, retrieval);
-    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
+    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story, {
+      budget: getRuntimeConfig().storyContextChars,
+    });
     logStoryRetrieval(job, chapter.index, storyRetrieval);
     const planContext = formatPlanContext(planLedger, chapterPlan);
     logJob(
@@ -1837,7 +1959,9 @@ async function runRewrite(
     }
     const retrieval = buildMemoryContext(detail, chapterPlan, memory);
     logMemoryRetrieval(job, target.index, retrieval);
-    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story);
+    const storyRetrieval = buildStoryContext(detail, chapterPlan, memory, story, {
+      budget: getRuntimeConfig().storyContextChars,
+    });
     logStoryRetrieval(job, target.index, storyRetrieval);
     const planContext = formatPlanContext(planLedger, chapterPlan);
     let text = await writeChapter(
@@ -4289,6 +4413,7 @@ async function runAudit(job: Job): Promise<void> {
       chapterPlan,
       auditMemory,
       auditStory,
+      { budget: getRuntimeConfig().storyContextChars },
     ).text;
     const previousChapters = written
       .slice(Math.max(0, i - 3), i)

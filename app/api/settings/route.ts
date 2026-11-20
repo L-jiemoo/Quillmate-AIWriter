@@ -14,6 +14,10 @@ import {
   writeSettings,
 } from "@/lib/settings";
 import type { SavedSettings } from "@/lib/settings";
+import {
+  DEFAULT_STORY_CONTEXT_CHARS,
+  normalizeStoryContextChars,
+} from "@/lib/story-context-tiers";
 import { DEFAULT_OUTPUT_TOKENS, normalizeOutputTokens } from "@/lib/token-tiers";
 
 export const runtime = "nodejs";
@@ -32,6 +36,10 @@ function envDefaults(): SavedSettings {
     apiKey: process.env.LLM_API_KEY?.trim() || "",
     temperature: Number.isFinite(temperature) ? temperature : 0.85,
     maxTokens: normalizeOutputTokens(maxTokens, DEFAULT_OUTPUT_TOKENS),
+    storyContextChars: normalizeStoryContextChars(
+      process.env.STORY_CONTEXT_CHARS,
+      DEFAULT_STORY_CONTEXT_CHARS,
+    ),
   };
 }
 
@@ -63,6 +71,7 @@ async function snapshot() {
       model: effective.model,
       temperature: effective.temperature,
       maxTokens: effective.maxTokens,
+      storyContextChars: effective.storyContextChars,
       apiKeySet: Boolean(effective.apiKey),
       apiKeyPreview: previewKey(effective.apiKey),
     },
@@ -85,6 +94,7 @@ export async function PUT(request: Request) {
       apiKey?: string;
       temperature?: number;
       maxTokens?: number;
+      storyContextChars?: number;
       clearApiKey?: boolean;
     }>(request);
 
@@ -124,6 +134,10 @@ export async function PUT(request: Request) {
       temperature: clamp(body.temperature, current.temperature, 0, 2),
       // 后端只接受三档；旧客户端或手填的其他数值安全归一化到最近档位。
       maxTokens: normalizeOutputTokens(body.maxTokens, current.maxTokens),
+      storyContextChars: normalizeStoryContextChars(
+        body.storyContextChars,
+        current.storyContextChars,
+      ),
     });
 
     return noStoreJson(await snapshot());
