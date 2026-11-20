@@ -2,21 +2,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  confirmRepairDecision,
-  createRepairDecision,
-  getPendingRepairDecision,
-  getRepairDecision,
-} from "@/lib/repair-decision";
 
 let dataDir: string;
 let store: typeof import("@/lib/store");
+let decisions: typeof import("@/lib/repair-decision");
 
 beforeEach(async () => {
   dataDir = await mkdtemp(path.join(tmpdir(), "quillmate-decision-"));
   process.env.QUILLMATE_DATA_DIR = dataDir;
   vi.resetModules();
   store = await import("@/lib/store");
+  // 必须在设置 QUILLMATE_DATA_DIR 之后再加载，否则模块会缓存真实 data/projects。
+  decisions = await import("@/lib/repair-decision");
 });
 
 afterEach(async () => {
@@ -65,49 +62,49 @@ function input(slug: string) {
 describe("修复决策持久化", () => {
   it("创建后成为待确认决策，确认后不再出现在待确认列表", async () => {
     const slug = await makeSlug();
-    const decision = await createRepairDecision(input(slug));
+    const decision = await decisions.createRepairDecision(input(slug));
     expect(decision.id).toBeTruthy();
     expect(decision.options).toHaveLength(2);
 
-    const pending = await getPendingRepairDecision(slug);
+    const pending = await decisions.getPendingRepairDecision(slug);
     expect(pending?.id).toBe(decision.id);
 
-    const confirmed = await confirmRepairDecision(slug, decision.id, 1);
+    const confirmed = await decisions.confirmRepairDecision(slug, decision.id, 1);
     expect(confirmed.chosenIndex).toBe(1);
-    expect(await getPendingRepairDecision(slug)).toBeUndefined();
+    expect(await decisions.getPendingRepairDecision(slug)).toBeUndefined();
 
-    const loaded = await getRepairDecision(slug, decision.id);
+    const loaded = await decisions.getRepairDecision(slug, decision.id);
     expect(loaded?.chosenIndex).toBe(1);
     expect(loaded?.params.source).toBe("draft");
   });
 
   it("非法选项、重复确认和不存在的决策都会被拒绝", async () => {
     const slug = await makeSlug();
-    const decision = await createRepairDecision(input(slug));
-    await expect(confirmRepairDecision(slug, decision.id, 5)).rejects.toThrow(
+    const decision = await decisions.createRepairDecision(input(slug));
+    await expect(decisions.confirmRepairDecision(slug, decision.id, 5)).rejects.toThrow(
       "选择的修复方案不存在",
     );
-    await confirmRepairDecision(slug, decision.id, 0);
-    await expect(confirmRepairDecision(slug, decision.id, 1)).rejects.toThrow(
+    await decisions.confirmRepairDecision(slug, decision.id, 0);
+    await expect(decisions.confirmRepairDecision(slug, decision.id, 1)).rejects.toThrow(
       "已经确认过",
     );
-    await expect(confirmRepairDecision(slug, "missing", 0)).rejects.toThrow(
+    await expect(decisions.confirmRepairDecision(slug, "missing", 0)).rejects.toThrow(
       "不存在",
     );
   });
 
   it("同一章只保留最新一份待确认决策，已确认记录不会被覆盖", async () => {
     const slug = await makeSlug();
-    const first = await createRepairDecision(input(slug));
-    const second = await createRepairDecision(input(slug));
-    const pending = await getPendingRepairDecision(slug);
+    const first = await decisions.createRepairDecision(input(slug));
+    const second = await decisions.createRepairDecision(input(slug));
+    const pending = await decisions.getPendingRepairDecision(slug);
     expect(pending?.id).toBe(second.id);
-    expect(await getRepairDecision(slug, first.id)).toBeUndefined();
+    expect(await decisions.getRepairDecision(slug, first.id)).toBeUndefined();
 
-    await confirmRepairDecision(slug, second.id, 0);
-    const third = await createRepairDecision(input(slug));
-    expect((await getPendingRepairDecision(slug))?.id).toBe(third.id);
+    await decisions.confirmRepairDecision(slug, second.id, 0);
+    const third = await decisions.createRepairDecision(input(slug));
+    expect((await decisions.getPendingRepairDecision(slug))?.id).toBe(third.id);
     // 已确认的历史记录保留，便于追踪作者当时的选择。
-    expect((await getRepairDecision(slug, second.id))?.chosenIndex).toBe(0);
+    expect((await decisions.getRepairDecision(slug, second.id))?.chosenIndex).toBe(0);
   });
 });
