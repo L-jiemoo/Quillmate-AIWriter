@@ -23,5 +23,3 @@ next-env.d.ts
 .DS_Store
 .claude/
 BookFace/
-# 测试目录只保留在本地，不入库
-tests/
