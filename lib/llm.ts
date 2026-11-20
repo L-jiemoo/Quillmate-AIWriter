@@ -1,11 +1,13 @@
 import OpenAI from "openai";
 import { getRuntimeConfig } from "./config";
+import { extractJson } from "./model-json";
 import {
   applyPromptOverrides,
   hashPromptMessages,
   recordPromptUsage,
 } from "./prompt-store";
 import type { PromptAgent } from "./prompt-registry";
+import { errorMessage } from "./utils";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -41,24 +43,6 @@ function isRetryableError(error: unknown): boolean {
     return status === 429 || status >= 500;
   }
   return false;
-}
-
-function extractJson<T>(raw: string): T {
-  // 兼容三类常见输出：纯 JSON、```json 围栏、正文前后夹带解释。
-  // 先剥围栏，失败后再从第一个 { 截到最后一个 } 尝试解析。
-  let text = raw.trim();
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) text = fence[1].trim();
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(text.slice(start, end + 1)) as T;
-    }
-    throw new Error("模型返回的内容不是合法 JSON");
-  }
 }
 
 export class LLMClient {
@@ -199,25 +183,35 @@ export class LLMClient {
       this.config.maxTokens,
       0,
     );
+    let firstError: unknown = null;
     try {
       return extractJson<T>(raw);
-    } catch {
-      // 部分模型即使开启 json 模式也会夹带解释文字；追加一轮“只返回修正后的 JSON”
-      // 再解析一次，比直接让整个写作任务失败更稳。
-      const repaired = await this.complete(
-        [
-          ...prepared,
-          { role: "assistant", content: raw },
-          {
-            role: "user",
-            content: "上面的输出不是合法 JSON。请只输出修正后的合法 JSON，不要附加任何解释。",
-          },
-        ],
-        { ...options, json: true },
-        this.config.maxTokens,
-        0,
-      );
+    } catch (error) {
+      firstError = error;
+    }
+
+    // 部分模型即使开启 json 模式也会夹带解释文字或漏逗号；本地修复失败后，
+    // 用低温再请求一轮“只返回修正后的 JSON”，比让整个写作任务失败更稳。
+    const repaired = await this.complete(
+      [
+        ...prepared,
+        { role: "assistant", content: raw },
+        {
+          role: "user",
+          content: `上面的输出不是合法 JSON：${errorMessage(firstError)}。请重点检查错误位置附近是否漏写英文逗号、是否出现尾随逗号、字符串引号是否闭合；只输出修正后的完整 JSON，不要省略内容，也不要附加解释或 Markdown 代码围栏。`,
+        },
+      ],
+      { ...options, json: true, temperature: 0 },
+      this.config.maxTokens,
+      0,
+    );
+
+    try {
       return extractJson<T>(repaired);
+    } catch (error) {
+      throw new Error(
+        `模型连续两次返回了不合法的 JSON。${errorMessage(error)} 已自动尝试修复；请重试本任务，或在「模型设置」中换用输出更稳定的模型。`,
+      );
     }
   }
 }
