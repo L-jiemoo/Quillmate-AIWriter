@@ -232,4 +232,66 @@ describe("修复方案证据校验", () => {
     expect(normalized.needsAuthorDecision).toBe(true);
     expect(normalized.decisionReason).toBe("缺少第 4 章原文");
   });
+
+  it("修复方案只保留一个推荐项", () => {
+    const optionsOf = (recommendedFlags: (boolean | undefined)[]) =>
+      recommendedFlags.map((recommended, index) => ({
+        label: `方案 ${index + 1}`,
+        description: "说明",
+        affectedChapters: index === 0 ? [4, 5] : [5],
+        anchors: [],
+        recommended,
+      }));
+
+    const normalized = normalizeRepairPlan({
+      decisionOptions: optionsOf([false, true]),
+    });
+    expect(normalized.decisionOptions.filter((option) => option.recommended)).toHaveLength(1);
+    expect(normalized.decisionOptions[1].recommended).toBe(true);
+  });
+
+  it("不会把需要凭空新增设定的方案推荐给作者", () => {
+    const normalized = normalizeRepairPlan({
+      decisionOptions: [
+        {
+          label: "方案 A：角色甲私藏另一块玉",
+          description: "新增一包旧藏碎屑",
+          affectedChapters: [7],
+          anchors: [],
+          introducedFacts: ["角色甲私藏的关键信物"],
+          recommended: true,
+        },
+        {
+          label: "方案 B：沿用角色乙手里的半块玉",
+          description: "只改本章措辞",
+          affectedChapters: [7],
+          anchors: [],
+          introducedFacts: [],
+          recommended: false,
+        },
+      ],
+    });
+    expect(normalized.decisionOptions[0].recommended).toBe(false);
+    expect(normalized.decisionOptions[1].recommended).toBe(true);
+    expect(normalized.decisionOptions[0].introducedFacts).toEqual([
+      "角色甲私藏的关键信物",
+    ]);
+  });
+
+  it("模型没标推荐或多标时按改动范围最小兜底", () => {
+    const options = (flags: (boolean | undefined)[]) =>
+      flags.map((recommended, index) => ({
+        label: `方案 ${index + 1}`,
+        description: "说明",
+        affectedChapters: index === 0 ? [4, 5, 6] : [5],
+        anchors: [],
+        recommended,
+      }));
+
+    const none = normalizeRepairPlan({ decision_options: options([false, false]) });
+    expect(none.decisionOptions[1].recommended).toBe(true);
+
+    const many = normalizeRepairPlan({ decision_options: options([true, false, true]) });
+    expect(many.decisionOptions.filter((option) => option.recommended)).toHaveLength(1);
+  });
 });

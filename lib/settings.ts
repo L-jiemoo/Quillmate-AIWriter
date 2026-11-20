@@ -21,6 +21,8 @@ export interface SavedSettings {
   temperature: number;
   maxTokens: number;
   storyContextChars: number;
+  // 修复 Agent 单独使用的模型；留空表示沿用主模型。
+  repairModel: string;
 }
 
 export interface PublicSettings {
@@ -30,6 +32,7 @@ export interface PublicSettings {
   temperature: number;
   maxTokens: number;
   storyContextChars: number;
+  repairModel: string;
   apiKeySet: boolean;
   apiKeyPreview: string;
 }
@@ -63,6 +66,7 @@ function normalize(raw: unknown): SavedSettings | null {
       record.storyContextChars,
       DEFAULT_STORY_CONTEXT_CHARS,
     ),
+    repairModel: typeof record.repairModel === "string" ? record.repairModel.trim() : "",
   };
 }
 
@@ -102,6 +106,7 @@ export async function writeSettings(settings: SavedSettings): Promise<void> {
       settings.storyContextChars,
       DEFAULT_STORY_CONTEXT_CHARS,
     ),
+    repairModel: settings.repairModel.trim(),
   };
   // 文件里有明文 API Key，尽量收紧为仅当前用户可读写；
   // Windows 对 mode 的支持有限，所以同时依赖 .gitignore 防止误提交。
@@ -128,6 +133,7 @@ export function toPublicSettings(settings: SavedSettings): PublicSettings {
     temperature: settings.temperature,
     maxTokens: settings.maxTokens,
     storyContextChars: settings.storyContextChars,
+    repairModel: settings.repairModel,
     apiKeySet: Boolean(settings.apiKey),
     apiKeyPreview: previewKey(settings.apiKey),
   };

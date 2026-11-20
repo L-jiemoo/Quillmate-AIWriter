@@ -28,6 +28,7 @@ describe("敏感设置存储", () => {
       temperature: 0.5,
       maxTokens: 4096,
       storyContextChars: 3200,
+      repairModel: "",
     });
 
     const file = path.join(dataDir, "settings.json");
@@ -48,6 +49,7 @@ describe("敏感设置存储", () => {
       temperature: 0.5,
       maxTokens: 4096,
       storyContextChars: 3200,
+      repairModel: "",
     };
     const publicSettings = settings.toPublicSettings(raw);
     const serialized = JSON.stringify(publicSettings);

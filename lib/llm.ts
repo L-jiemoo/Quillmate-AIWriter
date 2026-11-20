@@ -36,6 +36,8 @@ export interface LLMCallOptions {
   chapter?: number;
   // 任务级输出预算；不能超过用户在设置中选择的档位。
   maxTokens?: number;
+  // 仅本次调用使用的模型；用于给修复阶段单独指定更强的模型。
+  model?: string;
   onProgress?: (event: LLMProgressEvent) => void;
 }
 
@@ -117,6 +119,21 @@ function isTokenLimitRejection(error: unknown): boolean {
   );
 }
 
+function isJsonModeUnsupported(error: unknown): boolean {
+  if (!(error instanceof OpenAI.APIError)) return false;
+  if (error.status !== 400 && error.status !== 422) return false;
+  return /response_format|json_object|json mode/i.test(error.message);
+}
+
+function isTemperatureUnsupported(error: unknown): boolean {
+  if (!(error instanceof OpenAI.APIError)) return false;
+  if (error.status !== 400 && error.status !== 422) return false;
+  return (
+    /temperature/i.test(error.message) &&
+    /unsupported|not support|does not support|invalid/i.test(error.message)
+  );
+}
+
 export class LLMClient {
   // 每次创建实例时读取运行时配置，所以设置页保存后，新任务会立即使用新模型；
   // 同一个实例内复用 client，避免一章生成过程中反复建立连接。
@@ -144,6 +161,10 @@ export class LLMClient {
     return agent ? applyPromptOverrides(agent, messages) : messages;
   }
 
+  private modelFor(options: LLMCallOptions): string {
+    return options.model?.trim() || this.config.model;
+  }
+
   private budget(options: LLMCallOptions): number {
     const configured = normalizeOutputTokens(this.config.maxTokens);
     const requested = Number(options.maxTokens);
@@ -160,7 +181,7 @@ export class LLMClient {
     await recordPromptUsage({
       agent: options.agent,
       promptHash: hashPromptMessages(messages),
-      model: this.config.model,
+      model: this.modelFor(options),
       provider: this.config.provider,
       temperature: options.temperature ?? this.config.temperature,
       maxTokens,
@@ -173,7 +194,7 @@ export class LLMClient {
     options: LLMCallOptions,
     event: Omit<LLMProgressEvent, "model">,
   ): void {
-    options.onProgress?.({ ...event, model: this.config.model });
+    options.onProgress?.({ ...event, model: this.modelFor(options) });
   }
 
   async chat(
@@ -203,16 +224,48 @@ export class LLMClient {
     await this.recordUsage(messages, options, maxTokens);
     // 长任务里一次瞬时断连就会毁掉整章；这里对连接错误做带退避的重试。
     const maxAttempts = 4;
+    // 部分推理模型不接受 JSON 模式或 temperature；遇到一次后去掉对应参数重试，
+    // 让修复阶段可以单独切换到这类模型。
+    let jsonMode = options.json === true;
+    let sendTemperature = true;
     let response: OpenAI.Chat.Completions.ChatCompletion;
     for (let attemptNo = 1; ; attemptNo += 1) {
       try {
-        response = await this.requestCompletion(messages, options, maxTokens);
+        response = await this.requestCompletion(
+          messages,
+          options,
+          maxTokens,
+          jsonMode,
+          sendTemperature,
+        );
         break;
       } catch (error) {
         if (isTokenLimitRejection(error)) {
           throw new Error(
-            `模型「${this.config.model}」不接受 ${maxTokens} Tokens 的输出额度，请降低「单次最大 Tokens」档位或更换模型。`,
+            `模型「${this.modelFor(options)}」不接受 ${maxTokens} Tokens 的输出额度，请降低「单次最大 Tokens」档位或更换模型。`,
           );
+        }
+        if (jsonMode && isJsonModeUnsupported(error)) {
+          jsonMode = false;
+          this.report(options, {
+            type: "retrying",
+            maxTokens,
+            attempt: attemptNo,
+            message: "该模型不支持 JSON 模式，改为普通输出并在本地解析…",
+          });
+          attemptNo -= 1;
+          continue;
+        }
+        if (sendTemperature && isTemperatureUnsupported(error)) {
+          sendTemperature = false;
+          this.report(options, {
+            type: "retrying",
+            maxTokens,
+            attempt: attemptNo,
+            message: "该模型不接受 temperature 参数，去掉后重试…",
+          });
+          attemptNo -= 1;
+          continue;
         }
         if (attemptNo >= maxAttempts || !isRetryableError(error)) {
           if (error instanceof OpenAI.APIConnectionError) {
@@ -288,15 +341,19 @@ export class LLMClient {
     messages: ChatMessage[],
     options: LLMCallOptions,
     maxTokens: number,
+    jsonMode = options.json === true,
+    sendTemperature = true,
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
     return this.getClient().chat.completions.create(
       {
-        model: this.config.model,
+        model: this.modelFor(options),
         messages,
         // 事实抽取/审校需要稳定复现，允许调用方覆盖默认的高温创作参数。
-        temperature: options.temperature ?? this.config.temperature,
+        ...(sendTemperature
+          ? { temperature: options.temperature ?? this.config.temperature }
+          : {}),
         max_tokens: maxTokens,
-        ...(options.json ? { response_format: { type: "json_object" as const } } : {}),
+        ...(jsonMode ? { response_format: { type: "json_object" as const } } : {}),
       },
       { timeout: REQUEST_TIMEOUT_MS },
     );

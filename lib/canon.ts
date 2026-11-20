@@ -67,6 +67,74 @@ const GENERIC_CHARACTER_NAMES = new Set([
   "孩子",
 ]);
 
+// 通用称呼、亲属称谓和骂人话不能当人物别名：同一称呼经常同时指向多人
+// （例如“老东西”可以骂任何上年纪的角色），拿它匹配会把一个角色的事实
+// 错误合并到另一个角色名下，或让已死人物检查产生误报。
+const GENERIC_CHARACTER_ALIASES = new Set([
+  "老东西",
+  "老家伙",
+  "老小子",
+  "老鬼子",
+  "老不死的",
+  "死老头",
+  "臭小子",
+  "小子",
+  "狗东西",
+  "狗日的",
+  "混账",
+  "家伙",
+  "老道",
+  "道士",
+  "师傅",
+  "师父",
+  "爷爷",
+  "爷",
+  "你爷爷",
+  "你爷",
+  "我爷",
+  "奶奶",
+  "老奶奶",
+  "妹妹",
+  "妹",
+  "令妹",
+  "妹子",
+  "姐姐",
+  "哥哥",
+  "哥",
+  "兄弟",
+  "小兄弟",
+  "大哥",
+  "老哥",
+  "弟弟",
+  "姑娘",
+  "小姑娘",
+  "大妹子",
+  "老头",
+  "老人家",
+  "老太太",
+  "男人",
+  "女人",
+  "汉子",
+  "婆娘",
+  "媳妇",
+]);
+
+export function isReliableCharacterAlias(value: string): boolean {
+  const key = normalizeName(value);
+  if (key.length < 2) return false;
+  return !GENERIC_CHARACTER_NAMES.has(key) && !GENERIC_CHARACTER_ALIASES.has(key);
+}
+
+// 姓名可以是单字（少数民族名、绰号），但不能是“老东西”“爷爷”这类通用称呼。
+function isReliableCharacterName(value: string): boolean {
+  const key = normalizeName(value);
+  return Boolean(key) && !GENERIC_CHARACTER_NAMES.has(key) && !GENERIC_CHARACTER_ALIASES.has(key);
+}
+
+function reliableAliases(values: string[]): string[] {
+  return values.filter(isReliableCharacterAlias);
+}
+
 function uniqueStrings(values: string[], exclude = ""): string[] {
   const excluded = normalizeName(exclude);
   const seen = new Set<string>();
@@ -190,15 +258,12 @@ export function canonForChapter(
 function normalizeCanonCharacter(input: unknown): CanonCharacter | null {
   const record = (input ?? {}) as Record<string, unknown>;
   const name = str(record.name).trim();
-  if (!name || GENERIC_CHARACTER_NAMES.has(name)) return null;
+  if (!name || !isReliableCharacterName(name)) return null;
   const chapter = num(record.chapter);
   const status = normalizeStatus(record.status);
   return {
     name,
-    aliases: uniqueStrings(
-      arr(record.aliases).filter((alias) => !GENERIC_CHARACTER_NAMES.has(alias.trim())),
-      name,
-    ),
+    aliases: uniqueStrings(arr(record.aliases).filter(isReliableCharacterAlias), name),
     status,
     location: str(record.location).trim(),
     note: str(record.note).trim(),
@@ -357,13 +422,10 @@ export function validateCanon(
 function normalizeFactCharacter(input: unknown): FactCharacter | null {
   const record = (input ?? {}) as Record<string, unknown>;
   const name = str(record.name).trim();
-  if (!name || GENERIC_CHARACTER_NAMES.has(name)) return null;
+  if (!name || !isReliableCharacterName(name)) return null;
   return {
     name,
-    aliases: uniqueStrings(
-      arr(record.aliases).filter((alias) => !GENERIC_CHARACTER_NAMES.has(alias.trim())),
-      name,
-    ),
+    aliases: uniqueStrings(arr(record.aliases).filter(isReliableCharacterAlias), name),
     status: normalizeStatus(record.status),
     location: str(record.location).trim(),
     note: str(record.note).trim(),
@@ -735,11 +797,33 @@ function namesMatch(
   aliases: string[],
 ): boolean {
   const existingKeys = new Set(
-    [existing.name, ...existing.aliases].map(normalizeName).filter(Boolean),
+    [existing.name, ...reliableAliases(existing.aliases)].map(normalizeName).filter(Boolean),
   );
-  return [name, ...aliases].some((candidate) => {
+  return [name, ...reliableAliases(aliases)].some((candidate) => {
     const key = normalizeName(candidate);
     return Boolean(key) && existingKeys.has(key);
+  });
+}
+
+// 人物匹配比物品严格：别名必须在整个台账里只属于一个人，
+// 否则“老东西”“小翠”这类称呼会把事实合并到错误角色名下。
+function characterNamesMatch(
+  canon: CanonFacts,
+  existing: CanonCharacter,
+  name: string,
+  aliases: string[],
+): boolean {
+  const existingKeys = new Set(
+    [existing.name, ...reliableAliases(existing.aliases)].map(normalizeName).filter(Boolean),
+  );
+  return [name, ...reliableAliases(aliases)].some((candidate) => {
+    const key = normalizeName(candidate);
+    if (!key || !existingKeys.has(key)) return false;
+    if (key === normalizeName(existing.name)) return true;
+    const owners = canon.characters.filter((item) =>
+      [item.name, ...reliableAliases(item.aliases)].some((value) => normalizeName(value) === key),
+    );
+    return owners.length === 1 && owners[0] === existing;
   });
 }
 
@@ -752,9 +836,9 @@ function evidenceMentionsCharacter(
   // 单字别名（如“爷”）太容易误命中，只把姓名和至少两字的别名算作直接证据。
   const candidates = [
     existing.name,
-    fact.name,
-    ...existing.aliases.filter((alias) => alias.trim().length >= 2),
-    ...fact.aliases.filter((alias) => alias.trim().length >= 2),
+    isReliableCharacterName(fact.name) ? fact.name : "",
+    ...reliableAliases(existing.aliases),
+    ...reliableAliases(fact.aliases),
   ];
   return candidates.some((candidate) => {
     const key = normalizeName(candidate);
@@ -783,10 +867,7 @@ export function reconcileCanonWithChapters(
     const text = texts.get(character.statusChapter);
     if (text === undefined) continue;
 
-    const names = [
-      character.name,
-      ...character.aliases.filter((alias) => alias.trim().length >= 2),
-    ];
+    const names = [character.name, ...reliableAliases(character.aliases)];
     const appears = names.some((name) => {
       const trimmed = name.trim();
       return trimmed.length > 0 && text.includes(trimmed);
@@ -819,11 +900,13 @@ export function mergeCanon(
   const conflicts: ContinuityIssue[] = [];
 
   for (const fact of extracted.characters) {
-    const existing = canon.characters.find((item) => namesMatch(item, fact.name, fact.aliases));
+    const existing = canon.characters.find((item) =>
+      characterNamesMatch(canon, item, fact.name, fact.aliases),
+    );
     if (!existing) {
       canon.characters.push({
         name: fact.name,
-        aliases: uniqueStrings(fact.aliases, fact.name),
+        aliases: uniqueStrings(reliableAliases(fact.aliases), fact.name),
         status: fact.status,
         location: fact.location,
         note: fact.note,
@@ -854,7 +937,10 @@ export function mergeCanon(
       continue;
     }
 
-    existing.aliases = uniqueStrings([...existing.aliases, ...fact.aliases], existing.name);
+    existing.aliases = uniqueStrings(
+      [...existing.aliases, ...reliableAliases(fact.aliases)],
+      existing.name,
+    );
 
     if (fact.status !== "unknown" && !isLaterFact) {
       if (contradictsDeath) {
@@ -1066,9 +1152,8 @@ export function deadNameSuspicions(
   const issues: ContinuityIssue[] = [];
   for (const character of canon.characters) {
     if (character.status !== "dead" || character.statusChapter >= chapterIndex) continue;
-    const names = [character.name, ...character.aliases]
-      .map((name) => name.trim())
-      .filter((name) => name.length >= 2);
+    // 通用称呼不算“名字出现”，否则“这老东西”会把已死的赵四误判成复活。
+    const names = [character.name, ...reliableAliases(character.aliases)];
     const hit = names.find((name) => text.includes(name));
     if (!hit) continue;
     const at = text.indexOf(hit);

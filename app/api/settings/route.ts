@@ -40,6 +40,7 @@ function envDefaults(): SavedSettings {
       process.env.STORY_CONTEXT_CHARS,
       DEFAULT_STORY_CONTEXT_CHARS,
     ),
+    repairModel: process.env.LLM_REPAIR_MODEL?.trim() || "",
   };
 }
 
@@ -72,6 +73,7 @@ async function snapshot() {
       temperature: effective.temperature,
       maxTokens: effective.maxTokens,
       storyContextChars: effective.storyContextChars,
+      repairModel: effective.repairModel,
       apiKeySet: Boolean(effective.apiKey),
       apiKeyPreview: previewKey(effective.apiKey),
     },
@@ -95,6 +97,7 @@ export async function PUT(request: Request) {
       temperature?: number;
       maxTokens?: number;
       storyContextChars?: number;
+      repairModel?: string;
       clearApiKey?: boolean;
     }>(request);
 
@@ -138,6 +141,10 @@ export async function PUT(request: Request) {
         body.storyContextChars,
         current.storyContextChars,
       ),
+      repairModel:
+        typeof body.repairModel === "string"
+          ? body.repairModel.trim()
+          : current.repairModel,
     });
 
     return noStoreJson(await snapshot());

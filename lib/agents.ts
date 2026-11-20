@@ -77,6 +77,20 @@ import type {
 } from "./types";
 import type { GeneratedPlan } from "./mock";
 
+// 方案里的章节编号是数字数组，不能用只保留字符串的 arr() 过滤。
+function numberList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((item) => Number.isInteger(item) && item > 0);
+}
+
+// 修复阶段可以单独配置更强的模型；留空时沿用主模型。
+function repairModelOption(): { model?: string } {
+  const model = getRuntimeConfig().repairModel.trim();
+  return model ? { model } : {};
+}
+
 function str(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -1201,6 +1215,10 @@ export interface RepairDecisionOptionPlan {
   description: string;
   affectedChapters: number[];
   anchors: string[];
+  // 该方案会新增的设定/物品/来源；有新增设定的方案不能被推荐。
+  introducedFacts: string[];
+  // 只能有一个推荐项；模型给出的推荐会先接受，缺失时按改动范围最小兜底。
+  recommended: boolean;
 }
 
 export class RepairNeedsAuthorDecisionError extends Error {
@@ -1243,6 +1261,25 @@ export interface RepairPlan {
   decisionOptions: RepairDecisionOptionPlan[];
 }
 
+// 只保留一个推荐项：模型标了多个时取改动章节最少的一个；
+// 完全没标时同样按改动范围最小兜底，保证作者总能看到一个推荐。
+function markRecommendedOption(options: RepairDecisionOptionPlan[]): void {
+  if (!options.length) return;
+  // 有安全方案时，绝不推荐需要凭空新增设定的方案。
+  const safe = options.filter((option) => option.introducedFacts.length === 0);
+  const pool = safe.length ? safe : options;
+  const marked = pool.filter((option) => option.recommended);
+  const pick =
+    marked.length === 1
+      ? marked[0]
+      : [...pool].sort(
+          (left, right) =>
+            left.introducedFacts.length - right.introducedFacts.length ||
+            left.affectedChapters.length - right.affectedChapters.length,
+        )[0];
+  for (const option of options) option.recommended = option === pick;
+}
+
 export function normalizeRepairPlan(input: unknown): RepairPlan {
   const record = (input ?? {}) as Record<string, unknown>;
   const rawPlans = Array.isArray(record.issuePlans)
@@ -1277,13 +1314,24 @@ export function normalizeRepairPlan(input: unknown): RepairPlan {
       return {
         label: str(option.label).trim(),
         description: str(option.description).trim(),
-        affectedChapters: arr(option.affectedChapters ?? option.affected_chapters)
-          .map((value) => Number.parseInt(value, 10))
-          .filter((value) => Number.isInteger(value) && value > 0),
+        affectedChapters: numberList(
+          option.affectedChapters ?? option.affected_chapters,
+        ),
         anchors: arr(option.anchors),
+        introducedFacts: arr(
+          option.introducedFacts ??
+            option.introduced_facts ??
+            option.newFacts ??
+            option.new_facts,
+        ),
+        recommended:
+          option.recommended === true ||
+          option.isRecommended === true ||
+          option.is_recommended === true,
       };
     })
     .filter((option) => option.label && option.description);
+  markRecommendedOption(decisionOptions);
   return {
     issuePlans,
     needsAuthorDecision: record.needsAuthorDecision === true || record.needs_author_decision === true,
@@ -1456,7 +1504,12 @@ export async function repairChapter(
         reviewFeedback,
         options,
       ),
-      { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+      {
+        temperature: 0.1,
+        agent: "repair-editor",
+        chapter: chapter.index,
+        ...repairModelOption(),
+      },
     );
     const plan = normalizeRepairPlan(planData);
     if (plan.needsAuthorDecision) {
@@ -1482,7 +1535,12 @@ export async function repairChapter(
       reviewFeedback,
       { ...options, planText },
     ),
-    { temperature: 0.2, agent: "repair-editor", chapter: chapter.index },
+    {
+      temperature: 0.2,
+      agent: "repair-editor",
+      chapter: chapter.index,
+      ...repairModelOption(),
+    },
   );
   return stripFences(raw);
 }
@@ -1561,7 +1619,12 @@ export async function repairChapterPatches(
         reviewFeedback,
         options,
       ),
-      { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+      {
+        temperature: 0.1,
+        agent: "repair-editor",
+        chapter: chapter.index,
+        ...repairModelOption(),
+      },
     );
     const plan = normalizeRepairPlan(planData);
     if (plan.needsAuthorDecision) {

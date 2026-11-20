@@ -20,6 +20,8 @@ const agentState = vi.hoisted(() => ({
   overlapBatches: false,
   // 模拟一个问题修复时顺带改写了另一个问题的原文证据。
   siblingEvidence: "",
+  // 模拟某个问题返回“原文=替换”的空补丁，整批校验会因此失败。
+  noopEvidence: "",
   repairIssues: [] as ContinuityIssue[][],
   repairFeedback: [] as string[],
   onAudit: null as (() => void | Promise<void>) | null,
@@ -93,6 +95,9 @@ vi.mock("../lib/agents", async (importOriginal) => {
             agentState.overlapBatches && issues.length > 1
               ? anchorOf(issues[0].evidence)
               : anchorOf(issue.evidence);
+          const noop =
+            agentState.noopEvidence &&
+            issue.evidence.trim() === agentState.noopEvidence.trim();
           const edits: {
             originalText: string;
             replacement: string;
@@ -101,8 +106,10 @@ vi.mock("../lib/agents", async (importOriginal) => {
           }[] = [
             {
               originalText: anchor,
-              replacement: `${anchor}【修复${agentState.repairCalls}】`,
-              reason: "测试修复",
+              replacement: noop
+                ? anchor
+                : `${anchor}【修复${agentState.repairCalls}】`,
+              reason: noop ? "测试无效补丁" : "测试修复",
             },
           ];
           if (index === 0 && agentState.crossEdit) {
@@ -150,6 +157,7 @@ beforeEach(async () => {
   agentState.repairCalls = 0;
   agentState.overlapBatches = false;
   agentState.siblingEvidence = "";
+  agentState.noopEvidence = "";
   agentState.repairIssues = [];
   agentState.repairFeedback = [];
   agentState.onAudit = null;
@@ -322,7 +330,7 @@ describe("未采用草稿修复", () => {
     expect(agentState.repairCalls).toBe(2);
     expect(agentState.auditCalls).toBe(2);
     expect(
-      finished.logs.some((line) => line.message.includes("没有增加严重问题")),
+      finished.logs.some((line) => line.message.includes("没有变差")),
     ).toBe(true);
 
     const saved = await store.getRejectedDraftContent(slug, 1);
@@ -415,6 +423,37 @@ describe("未采用草稿修复", () => {
     expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
   });
 
+  it("单个问题补丁无效时不再拖垮整轮，其他问题照常修复", async () => {
+    const slug = await projectWithPlan("坏补丁逐个修复");
+    const textA = "角色乙在外地超市收银台旁接电话。";
+    const textB = "角色丙说角色乙早到了半天。";
+    const first = criticalIssue("时间线", textA);
+    const second = criticalIssue("人物行为", textB);
+    await saveDraft(slug, "write", `${textA}${textB}`, {
+      review: reviewWith([first, second]),
+    });
+    setAuditScript([{ critical: [] }]);
+    // 第二个问题返回空补丁，让整批校验以 UNCHANGED_EDIT 失败。
+    agentState.noopEvidence = textB;
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(
+      finished.logs.some((line) => line.message.includes("改为逐个问题修复")),
+    ).toBe(true);
+    expect(
+      finished.logs.some((line) =>
+        line.message.includes("跳过并继续处理其他问题"),
+      ),
+    ).toBe(true);
+
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.written).toBe(true);
+    expect(chapter?.content).toContain("【修复2】");
+    expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+  });
+
   it("逐个修复时前面的修改已改写后一个问题时跳过过期补丁", async () => {
     const slug = await projectWithPlan("逐个修复跳过过期问题");
     const textA = "角色乙在外地超市收银台旁接电话。";
@@ -443,6 +482,53 @@ describe("未采用草稿修复", () => {
     expect(chapter?.content).toContain("角色丙不再提那个时间。");
     expect(chapter?.content).not.toContain("【修复3】");
     expect(detail.state.rejectedDrafts[String(1)]).toBeUndefined();
+  });
+
+  it("部分审校问题过期时只沿用仍匹配的问题，不再整稿重审", async () => {
+    const slug = await projectWithPlan("过期问题忽略");
+    const content = "角色乙在外地超市收银台旁接电话。";
+    const active = criticalIssue("时间线", content);
+    const stale = criticalIssue("人物行为", "旧版本里的另一句话。");
+    await saveDraft(slug, "write", content, {
+      review: reviewWith([active, stale]),
+    });
+    setAuditScript([{ critical: [] }]);
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+    expect(agentState.repairCalls).toBe(1);
+    expect(agentState.auditCalls).toBe(1);
+    expect(
+      finished.logs.some((line) => line.message.includes("已忽略")),
+    ).toBe(true);
+    expect(agentState.repairIssues[0].map((item) => item.type)).toEqual([
+      "时间线",
+    ]);
+
+    const detail = await store.getProjectDetail(slug);
+    const chapter = detail.chapters.find((item) => item.index === 1);
+    expect(chapter?.written).toBe(true);
+    expect(chapter?.content).toContain("【修复1】");
+  });
+
+  it("修复失败时不再把已忽略的过期问题存回审校记录", async () => {
+    const slug = await projectWithPlan("失败不存过期问题");
+    const content = "角色乙在外地超市收银台旁接电话。";
+    const active = criticalIssue("时间线", content);
+    const stale = criticalIssue("人物行为", "旧版本里的另一句话。");
+    await saveDraft(slug, "write", content, {
+      review: reviewWith([active, stale]),
+    });
+    // 唯一有效问题返回空补丁，修复失败并走旧审校记录回退。
+    agentState.noopEvidence = content;
+
+    const finished = await runDraftRepair(slug);
+    expect(finished.status, finished.error).toBe("done");
+
+    const saved = await store.getRejectedDraftContent(slug, 1);
+    const types = saved?.draft.review.issues.map((item) => item.type) ?? [];
+    expect(types).not.toContain("人物行为");
+    expect(types).toContain("时间线");
   });
 
   it("严重问题严格减少且没有新增时采用修复稿", async () => {

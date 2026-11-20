@@ -26,6 +26,8 @@ export interface RuntimeConfig {
   maxTokens: number;
   // 剧情台账注入写作/审校提示词的字符预算，按三档归一化。
   storyContextChars: number;
+  // 修复 Agent 单独使用的模型；留空表示沿用 model。
+  repairModel: string;
 }
 
 export type BrowserChannel = "msedge" | "chrome" | undefined;
@@ -61,6 +63,7 @@ export function getRuntimeConfig(): RuntimeConfig {
       temperature: saved.temperature,
       maxTokens: saved.maxTokens,
       storyContextChars: saved.storyContextChars,
+      repairModel: saved.repairModel,
     };
   }
 
@@ -86,5 +89,6 @@ export function getRuntimeConfig(): RuntimeConfig {
       process.env.STORY_CONTEXT_CHARS,
       DEFAULT_STORY_CONTEXT_CHARS,
     ),
+    repairModel: process.env.LLM_REPAIR_MODEL?.trim() || "",
   };
 }

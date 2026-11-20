@@ -45,6 +45,7 @@ describe("设置页三档 Tokens 持久化", () => {
       temperature: 0.5,
       maxTokens: 4096,
       storyContextChars: 3200,
+      repairModel: "",
     });
     const saved = JSON.parse(
       await readFile(path.join(dataDir, "settings.json"), "utf8"),
@@ -106,6 +107,7 @@ describe("剧情上下文三档预算持久化", () => {
       temperature: 0.5,
       maxTokens: 16384,
       storyContextChars: 5000,
+      repairModel: "",
     });
     const saved = JSON.parse(
       await readFile(path.join(dataDir, "settings.json"), "utf8"),
@@ -123,6 +125,7 @@ describe("剧情上下文三档预算持久化", () => {
       temperature: 0.5,
       maxTokens: 16384,
       storyContextChars: 6400,
+      repairModel: "",
     });
     const config = await import("@/lib/config");
     expect(config.getRuntimeConfig().storyContextChars).toBe(6400);
@@ -152,5 +155,56 @@ describe("剧情上下文三档预算持久化", () => {
     };
     expect(data.saved.storyContextChars).toBe(4800);
     expect(data.effective.storyContextChars).toBe(4800);
+  });
+});
+
+describe("修复模型单独配置", () => {
+  it("旧配置缺少字段时留空，表示沿用主模型", async () => {
+    await writeFile(
+      path.join(dataDir, "settings.json"),
+      JSON.stringify({
+        provider: "openai-compatible",
+        baseUrl: "https://example.com/v1",
+        model: "test-model",
+        apiKey: "sk-test",
+        temperature: 0.5,
+        maxTokens: 16384,
+      }),
+      "utf8",
+    );
+    const settings = await import("@/lib/settings");
+    expect((await settings.readSettings())?.repairModel).toBe("");
+  });
+
+  it("保存后写入运行时配置，接口也会返回", async () => {
+    const settings = await import("@/lib/settings");
+    await settings.writeSettings({
+      provider: "openai-compatible",
+      baseUrl: "https://example.com/v1",
+      model: "test-model",
+      apiKey: "sk-test",
+      temperature: 0.5,
+      maxTokens: 16384,
+      storyContextChars: 3200,
+      repairModel: "deepseek-reasoner",
+    });
+    const config = await import("@/lib/config");
+    expect(config.getRuntimeConfig().repairModel).toBe("deepseek-reasoner");
+
+    const route = await import("@/app/api/settings/route");
+    const response = await route.PUT(
+      new Request("http://localhost/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repairModel: "deepseek-reasoner" }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as {
+      saved: { repairModel: string };
+      effective: { repairModel: string };
+    };
+    expect(data.saved.repairModel).toBe("deepseek-reasoner");
+    expect(data.effective.repairModel).toBe("deepseek-reasoner");
   });
 });

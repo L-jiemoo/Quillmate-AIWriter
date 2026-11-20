@@ -55,7 +55,14 @@ function input(slug: string) {
         affectedChapters: [4, 5],
         anchors: ["角色乙在外地超市收银台旁接电话。"],
       },
-    ],
+    ] as {
+      label: string;
+      description: string;
+      affectedChapters: number[];
+      anchors: string[];
+      introducedFacts?: string[];
+      recommended?: boolean;
+    }[],
   };
 }
 
@@ -65,6 +72,9 @@ describe("修复决策持久化", () => {
     const decision = await decisions.createRepairDecision(input(slug));
     expect(decision.id).toBeTruthy();
     expect(decision.options).toHaveLength(2);
+    // 输入没标推荐时，默认推荐改动章节最少的一项。
+    expect(decision.options.filter((option) => option.recommended)).toHaveLength(1);
+    expect(decision.options[0].recommended).toBe(true);
 
     const pending = await decisions.getPendingRepairDecision(slug);
     expect(pending?.id).toBe(decision.id);
@@ -76,6 +86,30 @@ describe("修复决策持久化", () => {
     const loaded = await decisions.getRepairDecision(slug, decision.id);
     expect(loaded?.chosenIndex).toBe(1);
     expect(loaded?.params.source).toBe("draft");
+  });
+
+  it("保留模型给出的推荐项", async () => {
+    const slug = await makeSlug();
+    const base = input(slug);
+    base.options[0].recommended = false;
+    base.options[1].recommended = true;
+    const decision = await decisions.createRepairDecision(base);
+    expect(decision.options[0].recommended).toBe(false);
+    expect(decision.options[1].recommended).toBe(true);
+  });
+
+  it("新增设定的方案不会被推荐", async () => {
+    const slug = await makeSlug();
+    const base = input(slug);
+    base.options[0].introducedFacts = ["角色甲私藏的关键信物"];
+    base.options[0].recommended = true;
+    base.options[1].recommended = false;
+    const decision = await decisions.createRepairDecision(base);
+    expect(decision.options[0].introducedFacts).toEqual([
+      "角色甲私藏的关键信物",
+    ]);
+    expect(decision.options[0].recommended).toBe(false);
+    expect(decision.options[1].recommended).toBe(true);
   });
 
   it("非法选项、重复确认和不存在的决策都会被拒绝", async () => {

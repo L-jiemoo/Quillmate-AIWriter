@@ -26,6 +26,7 @@ interface SettingsView {
   temperature: number;
   maxTokens: number;
   storyContextChars: number;
+  repairModel: string;
   apiKeySet: boolean;
   apiKeyPreview: string;
 }
@@ -83,6 +84,7 @@ const EMPTY_FORM = {
   temperature: "0.85",
   maxTokens: String(DEFAULT_OUTPUT_TOKENS),
   storyContextChars: String(DEFAULT_STORY_CONTEXT_CHARS),
+  repairModel: "",
 };
 
 interface TierOption {
@@ -254,6 +256,7 @@ export function SettingsPanel() {
       temperature: String(source.temperature),
       maxTokens: String(normalizeOutputTokens(source.maxTokens)),
       storyContextChars: String(normalizeStoryContextChars(source.storyContextChars)),
+      repairModel: source.repairModel ?? "",
     });
   }
 
@@ -294,6 +297,7 @@ export function SettingsPanel() {
           temperature: Number(form.temperature),
           maxTokens: Number(form.maxTokens),
           storyContextChars: Number(form.storyContextChars),
+          repairModel: form.repairModel.trim(),
           clearApiKey,
         }),
       });
@@ -424,6 +428,10 @@ export function SettingsPanel() {
                     </dd>
                   </div>
                   <div>
+                    <dt>修复模型</dt>
+                    <dd>{snapshot.effective.repairModel || "同主模型"}</dd>
+                  </div>
+                  <div>
                     <dt>配置来源</dt>
                     <dd>{SOURCE_LABELS[snapshot.source]}</dd>
                   </div>
@@ -524,6 +532,20 @@ export function SettingsPanel() {
                 />
               </label>
             </div>
+
+            <label className="field">
+              <span>修复模型（可选）</span>
+              <input
+                className="input"
+                value={form.repairModel}
+                onChange={(event) => update("repairModel", event.target.value)}
+                placeholder="留空则沿用上面的主模型，例如 deepseek-reasoner"
+                disabled={form.provider === "mock"}
+              />
+              <small className="field-hint">
+                只影响方案策划与补丁生成；写作和审校仍用主模型。换成推理模型可以提升修复时的规则一致性，但更慢、更贵。
+              </small>
+            </label>
 
             <div className="field-row-2">
               <label className="field">

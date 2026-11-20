@@ -596,7 +596,9 @@ function logPromptProfile(job: Job): void {
   const auditor = promptVersionInfo("auditor");
   logJob(
     job,
-    `提示词与模型：写作 ${writer.promptVersion}，审校 ${auditor.promptVersion}；模型 ${runtime.model}，温度 ${runtime.temperature}，单次最多 ${runtime.maxTokens} tokens，剧情上下文 ${runtime.storyContextChars} 字符。`,
+    `提示词与模型：写作 ${writer.promptVersion}，审校 ${auditor.promptVersion}；模型 ${runtime.model}${
+      runtime.repairModel ? `，修复模型 ${runtime.repairModel}` : ""
+    }，温度 ${runtime.temperature}，单次最多 ${runtime.maxTokens} tokens，剧情上下文 ${runtime.storyContextChars} 字符。`,
   );
 }
 
@@ -1287,16 +1289,17 @@ async function verifyDraftChapter(
       try {
         result = await applyPlan(stagedIssues, currentText, crossTexts, allEvidence);
       } catch (error) {
-        // 模型一次给出的多个补丁修改区域重叠时，改为逐个问题修复：
-        // 先应用前一个问题的补丁，再基于改后的稿子定位后一个问题，避免整批被拒。
+        // 整批补丁没通过校验时（重叠、无实际修改、未授权段落、证据对不上等），
+        // 改为逐个问题修复：先应用前一个问题的补丁，再基于改后的稿子定位后一个问题，
+        // 避免单个坏补丁让整轮修复白跑。
         if (
-          error instanceof RepairPatchError &&
-          error.code === "OVERLAP" &&
+          (error instanceof RepairPatchError ||
+            error instanceof RepairPlanRejectedError) &&
           stagedIssues.length > 1
         ) {
           logJob(
             input.job,
-            `第 ${input.chapter.index} 章多个问题的补丁修改区域重叠，改为逐个问题修复：先改前面的问题，再基于改后的稿子重新定位后面的修改…`,
+            `第 ${input.chapter.index} 章多个问题的补丁未通过整批校验（${error.message}），改为逐个问题修复：先改前面的问题，再基于改后的稿子重新定位后面的修改…`,
           );
           let seqText = currentText;
           let seqCross = { ...crossTexts };
@@ -1305,8 +1308,15 @@ async function verifyDraftChapter(
           for (const [index, issue] of stagedIssues.entries()) {
             // 前面的修复可能已经把后面的问题一并改写掉了；旧证据找不到时不再套用过期的修改，
             // 交给本轮结束后的审校按新稿重新判断。
-            const evidence = issue.evidence.trim();
-            if (evidence && !seqText.includes(evidence)) {
+            // 审校证据常用“……”拼接多个片段，只要有一段还能在稿子里找到就仍按有效处理。
+            const evidenceParts = issue.evidence
+              .split(/…+|\.{3,}|⋯+/u)
+              .map((part) => part.trim())
+              .filter((part) => part.length >= 2);
+            const evidenceStillPresent = evidenceParts.length
+              ? evidenceParts.some((part) => seqText.includes(part))
+              : true;
+            if (issue.evidence.trim() && !evidenceStillPresent) {
               logJob(
                 input.job,
                 `第 ${input.chapter.index} 章第 ${nextRound} 轮待修问题 ${issue.id} 的原文证据已被前面的修复改写，跳过旧补丁，交由后续审校按新稿判断…`,
@@ -1603,7 +1613,7 @@ async function verifyDraftChapter(
       } else {
         logJob(
           input.job,
-          `第 ${input.chapter.index} 章草稿修复第 1 轮没有增加严重问题：${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}；保留候选稿继续修复。`,
+          `第 ${input.chapter.index} 章草稿修复第 1 轮后仍有 ${comparison.afterCount} 个严重问题（${comparison.beforeCount}→${comparison.afterCount}，已解决 ${comparison.resolved.length}，新增 ${comparison.added.length}），没有变差，保留候选稿继续第 2 轮修复。`,
         );
       }
       if (repairCalls >= maxRepairs) {
@@ -3412,14 +3422,35 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         issue.type !== "审校失败",
     );
     const seedFilter = filterSeedIssues(seedCandidates, retrieved.content);
-    const canSeed =
-      draft.review?.extractionOk !== false &&
-      seedCandidates.length > 0 &&
-      seedFilter.active.length === seedCandidates.length;
+    // 只沿用仍能在当前草稿中落地的严重问题：过期问题直接忽略，
+    // 避免一条过期记录就丢掉全部有效问题、把整稿重新审一遍（重审会换一批新问题）。
+    const canSeed = draft.review?.extractionOk !== false && seedFilter.active.length > 0;
+    // 被忽略的过期问题不能再跟着旧审校记录存回去，否则修复失败时页面会复读已经失效的问题。
+    const staleKeys = new Set(
+      seedFilter.stale.map(
+        (issue) => `${issue.severity}|${issue.type}|${issue.detail}|${issue.evidence}`,
+      ),
+    );
+    const seedReview =
+      canSeed && draft.review && staleKeys.size
+        ? {
+            ...draft.review,
+            issues: draft.review.issues.filter(
+              (issue) =>
+                !staleKeys.has(
+                  `${issue.severity}|${issue.type}|${issue.detail}|${issue.evidence}`,
+                ),
+            ),
+          }
+        : draft.review;
     if (canSeed) {
       logJob(
         job,
-        `第 ${requestedDraft.index} 章沿用原草稿审校的 ${seedCandidates.length} 个严重问题直接修复（最多 2 轮）…`,
+        `第 ${requestedDraft.index} 章沿用原草稿审校的 ${seedFilter.active.length} 个严重问题直接修复（最多 2 轮）${
+          seedFilter.stale.length
+            ? `；另有 ${seedFilter.stale.length} 个问题与当前草稿不匹配，已忽略，修复后重新审校`
+            : ""
+        }…`,
       );
     } else if (seedCandidates.length) {
       logJob(
@@ -3540,7 +3571,7 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       rewriteInstruction: "这是未采用草稿，只修复审校指出的问题，不要重写无关段落。",
       reviewFeedback: "",
       seedIssues: canSeed ? seedFilter.active : [],
-      seedReview: draft.review,
+      seedReview,
       maxRepairs: 2,
       authorDirective,
       crossChapters,

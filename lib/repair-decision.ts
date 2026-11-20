@@ -10,6 +10,10 @@ export interface RepairDecisionOption {
   affectedChapters: number[];
   // 方案明确依赖的原文锚点，用于校验根因章节的补丁落在正确位置。
   anchors: string[];
+  // 该方案会新增的设定；旧决策记录可能没有该字段。
+  introducedFacts?: string[];
+  // 旧决策记录可能没有该字段；界面按“无推荐等价于第一项”处理。
+  recommended?: boolean;
 }
 
 export interface RepairDecision {
@@ -94,8 +98,24 @@ export async function createRepairDecision(input: {
         ),
       ],
       anchors: option.anchors.map((anchor) => anchor.trim()).filter(Boolean),
+      introducedFacts: (option.introducedFacts ?? [])
+        .map((fact) => fact.trim())
+        .filter(Boolean),
+      recommended: option.recommended === true,
     })),
   };
+  // 兜底：优先推荐不新增设定的方案；只有都新增时才选新增最少、改动章节最少的。
+  const safe = decision.options.filter((option) => !option.introducedFacts?.length);
+  const pool = safe.length ? safe : decision.options;
+  const marked = pool.filter((option) => option.recommended);
+  if (marked.length !== 1) {
+    const pick = [...pool].sort(
+      (left, right) =>
+        (left.introducedFacts?.length ?? 0) - (right.introducedFacts?.length ?? 0) ||
+        left.affectedChapters.length - right.affectedChapters.length,
+    )[0];
+    for (const option of decision.options) option.recommended = option === pick;
+  }
   await saveDecisions(input.slug, [...filtered, decision]);
   return decision;
 }

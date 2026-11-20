@@ -26,7 +26,17 @@ interface RepairDecisionView {
     label: string;
     description: string;
     affectedChapters: number[];
+    introducedFacts?: string[];
+    recommended?: boolean;
   }[];
+}
+
+const DEFAULT_RECOMMENDED_KEY = "quillmate-default-recommended";
+
+function preferredChoice(decision: RepairDecisionView, useRecommended: boolean): number {
+  if (!useRecommended) return 0;
+  const index = decision.options.findIndex((option) => option.recommended);
+  return index >= 0 ? index : 0;
 }
 
 const TYPE_LABEL: Record<Job["type"], string> = {
@@ -86,9 +96,26 @@ export function JobPanel({
   const [decisionChoice, setDecisionChoice] = useState(0);
   const [decisionError, setDecisionError] = useState("");
   const [decisionDismissed, setDecisionDismissed] = useState(false);
+  const [defaultRecommended, setDefaultRecommended] = useState(true);
+  const defaultRecommendedRef = useRef(true);
   const decisionIdRef = useRef<string | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
   const slug = detail.meta.slug;
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(DEFAULT_RECOMMENDED_KEY);
+      if (saved === "0" || saved === "1") {
+        const enabled = saved === "1";
+        defaultRecommendedRef.current = enabled;
+        // 启动时同步一次本地偏好，之后由复选框控制。
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setDefaultRecommended(enabled);
+      }
+    } catch {
+      // 本地偏好不可用时保持默认开启。
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +131,9 @@ export function JobPanel({
           if (next?.id !== decisionIdRef.current) {
             decisionIdRef.current = next?.id ?? null;
             setDecisionDismissed(false);
-            setDecisionChoice(0);
+            setDecisionChoice(
+              next ? preferredChoice(next, defaultRecommendedRef.current) : 0,
+            );
           }
           setDecision(next);
         }
@@ -116,6 +145,19 @@ export function JobPanel({
       cancelled = true;
     };
   }, [slug, job?.status]);
+
+  function toggleDefaultRecommended(enabled: boolean) {
+    setDefaultRecommended(enabled);
+    defaultRecommendedRef.current = enabled;
+    try {
+      localStorage.setItem(DEFAULT_RECOMMENDED_KEY, enabled ? "1" : "0");
+    } catch {
+      // 本地存储不可用时只影响本次会话。
+    }
+    if (enabled && decision) {
+      setDecisionChoice(preferredChoice(decision, true));
+    }
+  }
 
   async function confirmDecision() {
     if (!decision) return;
@@ -532,12 +574,20 @@ export function JobPanel({
               第 {decision.chapterIndex} 章需要你确认修复方向
             </h3>
             <p className="repair-decision-reason">{decision.reason}</p>
+            <label className="repair-decision-default">
+              <input
+                type="checkbox"
+                checked={defaultRecommended}
+                onChange={(event) => toggleDefaultRecommended(event.target.checked)}
+              />{" "}
+              默认选择推荐项
+            </label>
             {decision.options.map((option, index) => (
               <label
                 key={`${decision.id}-${index}`}
                 className={`repair-decision-option ${
                   decisionChoice === index ? "selected" : ""
-                }`}
+                } ${option.recommended ? "recommended" : ""}`}
               >
                 <input
                   type="radio"
@@ -547,10 +597,18 @@ export function JobPanel({
                   disabled={running}
                 />{" "}
                 <strong>{option.label}</strong>
+                {option.recommended ? (
+                  <span className="repair-decision-recommend">推荐</span>
+                ) : null}
                 <span>{option.description}</span>
                 {option.affectedChapters.length ? (
                   <span className="repair-decision-chapters">
                     涉及修改：第 {option.affectedChapters.join("、")} 章
+                  </span>
+                ) : null}
+                {option.introducedFacts?.length ? (
+                  <span className="repair-decision-new">
+                    新增设定：{option.introducedFacts.join("；")}
                   </span>
                 ) : null}
               </label>

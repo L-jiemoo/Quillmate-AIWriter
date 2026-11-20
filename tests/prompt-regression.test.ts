@@ -84,6 +84,8 @@ describe("典型小说审校提示词回归", () => {
     );
 
     expect(text).toContain("不做文风警察");
+    expect(text).toContain("不要硬抠字眼");
+    expect(text).toContain("只有当字面差异改变了事实");
     expect(text).toContain("不要为了完成审校清单而强行生成问题");
     expect(text).toContain("同一根本原因导致的多个表现应尽量合并");
     expect(text).toContain("合理悬念");
