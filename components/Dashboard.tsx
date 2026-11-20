@@ -82,7 +82,7 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
     <main className="shell">
       <section className="hero">
         <div className="hero-copy">
-          <div className="hero-eyebrow">本地稿房 · 长篇连载</div>
+          <div className="hero-eyebrow">本地稿房，长篇连载</div>
           <h1 className="hero-title">
             把一句创意，
             <br />
@@ -154,7 +154,7 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
                           更新于{" "}
                           {new Date(project.updatedAt).toLocaleString("zh-CN", { hour12: false })}
                         </span>
-                        <span className="project-open">进入工作台 →</span>
+                        <span className="project-open">打开工作台</span>
                       </div>
                     </Link>
                     <div className="project-tools">
@@ -163,6 +163,7 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
                         className="project-delete"
                         onClick={() => handleDelete(project)}
                         disabled={deleting === project.slug}
+                        aria-label={`删除作品《${project.title}》`}
                       >
                         {deleting === project.slug ? "删除中…" : "删除作品"}
                       </button>
@@ -176,7 +177,7 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
               <p className="empty-mark">稿</p>
               <h3>还没有作品</h3>
               <p className="muted">
-                在右侧填一句创意，创建第一部小说。未配置模型时会用 mock 示例数据跑通全流程。
+                在新建作品表单里填一句创意，创建第一部小说。未配置模型时会用 mock 示例数据跑通全流程。
               </p>
             </div>
           )}
@@ -262,7 +263,7 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
                 />
               </label>
               <label className="field">
-                <span>slug</span>
+                <span>网址标识 slug</span>
                 <input
                   className="input"
                   value={form.slug}

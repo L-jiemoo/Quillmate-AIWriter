@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { BusyLabel, SkeletonLines } from "@/components/ui/Loading";
 import { diffLines } from "@/lib/text-diff";
 import type {
   ChapterVersion,
@@ -156,7 +157,7 @@ export function ChaptersTab({
     return (
       <section className="panel">
         <div className="panel-body empty-inline">
-          尚无章节细纲。先在右侧点击「生成架构与角色」。
+          尚无章节细纲。先在「AI 任务台」点击「生成架构与角色」。
         </div>
       </section>
     );
@@ -363,6 +364,7 @@ export function ChaptersTab({
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="章节标题"
+            aria-label="章节标题"
           />
           <div className="editor-head-tools">
             <span className="muted small">
@@ -448,6 +450,7 @@ export function ChaptersTab({
               }
             }}
             placeholder="在这里编辑章节正文，或让 AI 自动生成……"
+            aria-label="章节正文"
           />
           {error ? <p className="form-error">{error}</p> : null}
           {selectedReview ? (
@@ -513,7 +516,7 @@ export function ChaptersTab({
                 AI 重写本章
               </button>
               <button className="btn btn-primary" onClick={save} disabled={saving}>
-                {saving ? "保存中…" : "保存章节"}
+                {saving ? <BusyLabel>保存中…</BusyLabel> : "保存章节"}
               </button>
             </div>
           </div>
@@ -531,7 +534,7 @@ export function ChaptersTab({
                 onClick={loadVersions}
                 disabled={versionsLoading}
               >
-                {versionsLoading ? "加载中…" : "刷新"}
+                {versionsLoading ? <BusyLabel>加载中…</BusyLabel> : "刷新"}
               </button>
               <button
                 className="btn btn-ghost btn-sm"
@@ -586,14 +589,21 @@ export function ChaptersTab({
                         onClick={() => restoreVersion(item.version)}
                         disabled={disabled || restoringVersion !== null}
                       >
-                        {restoringVersion === item.version ? "恢复中…" : "恢复此版本"}
+                        {restoringVersion === item.version ? (
+                          <BusyLabel>恢复中…</BusyLabel>
+                        ) : (
+                          "恢复此版本"
+                        )}
                       </button>
                     </div>
                   </li>
                 ))}
               </ul>
             ) : versionsLoading ? (
-              <p className="muted">正在读取版本…</p>
+              <div className="skeleton-panel" aria-busy="true">
+                <p className="skeleton-label">正在读取版本…</p>
+                <SkeletonLines lines={3} />
+              </div>
             ) : (
               <p className="muted">还没有历史版本。之后的保存、重写或修复会自动记录。</p>
             )}

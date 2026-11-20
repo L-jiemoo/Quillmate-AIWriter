@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { buddyFor, logFace } from "@/components/ui/ai-buddy";
+import { AiProgress, SkeletonLines } from "@/components/ui/Loading";
 import type { Job, ProjectDetail, StartJobFn } from "@/lib/types";
 
 const STATUS_LABEL: Record<Job["status"], string> = {
@@ -144,6 +146,7 @@ export function JobPanel({
 
   const running = Boolean(job && (job.status === "queued" || job.status === "running"));
   const pending = detail.chapters.filter((chapter) => !chapter.written).length;
+  const hasArchitecture = detail.plan.chapters.length > 0;
   const writtenIndexes = new Set(
     detail.chapters
       .filter((chapter) => chapter.written && chapter.content.trim())
@@ -245,9 +248,11 @@ export function JobPanel({
       ? `${TYPE_LABEL[job.type]} · ${STATUS_LABEL[job.status]}`
       : STATUS_LABEL[job.status]
     : "待命";
+  const buddy = buddyFor(job);
+  const logs = job?.logs ?? [];
 
   return (
-    <div className="job-panel panel">
+    <div className="job-panel panel" aria-busy={running}>
       <div className="panel-head">
         <h2 className="panel-title">AI 任务台</h2>
         <span
@@ -262,10 +267,17 @@ export function JobPanel({
                 : "ok"
           }`}
         >
+          <span className={`status-dot ${running ? "running" : ""}`} aria-hidden="true" />
           {statusText}
         </span>
       </div>
       <div className="panel-body">
+        {running && job ? (
+          <AiProgress
+            label={`${TYPE_LABEL[job.type]}进行中`}
+            detail={job.status === "queued" ? "排队中" : "模型正在生成"}
+          />
+        ) : null}
         {decision && decisionDismissed ? (
           <button
             className="btn btn-block"
@@ -274,6 +286,77 @@ export function JobPanel({
             有待确认的修复方向（第 {decision.chapterIndex} 章），点此查看
           </button>
         ) : null}
+        <div className={`job-output ${running ? "running" : ""}`}>
+          <div className="job-output-head">
+            <span
+              key={buddy.emoji}
+              className="job-output-face"
+              aria-hidden="true"
+            >
+              {buddy.emoji}
+            </span>
+            <span className="job-output-copy">
+              <strong>AI 输出</strong>
+              <span>
+                {running
+                  ? "正在一条条发送…"
+                  : job
+                    ? "最近一次任务记录"
+                    : "待命中"}
+              </span>
+            </span>
+          </div>
+          <div
+            className={`job-log ${running ? "running" : ""}`}
+            ref={consoleRef}
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions"
+          >
+            {logs.length ? (
+              logs.map((line, index) => {
+                // 最近几条依次入场；更早的历史记录直接呈现，避免刷屏等待。
+                const delay =
+                  Math.min(Math.max(0, index - (logs.length - 6)), 5) * 55;
+                return (
+                  <div
+                    className="job-log-line"
+                    key={`${line.time}-${index}`}
+                    style={{ animationDelay: `${delay}ms` }}
+                  >
+                    <span className="job-log-face" aria-hidden="true">
+                      {logFace(line.message)}
+                    </span>
+                    <span className="job-bubble">
+                      <span className="job-bubble-text">{line.message}</span>
+                      <span className="job-time">
+                        {new Date(line.time).toLocaleTimeString("zh-CN", {
+                          hour12: false,
+                        })}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })
+            ) : running ? (
+              <SkeletonLines lines={4} />
+            ) : (
+              <p className="job-log-empty">任务日志会在这里一条条出现。</p>
+            )}
+            {running && logs.length ? (
+              <div className="job-log-line job-log-typing" aria-hidden="true">
+                <span className="job-log-face">{buddy.emoji}</span>
+                <span className="job-bubble job-bubble-typing">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              </div>
+            ) : null}
+          </div>
+          {job?.error ? <p className="form-error">{job.error}</p> : null}
+        </div>
+
         <div className="job-actions">
           {running && job?.type === "repair" ? (
             <button
@@ -307,9 +390,16 @@ export function JobPanel({
             </button>
           ) : null}
 
-          <button className="btn btn-primary btn-block" onClick={startPlan} disabled={running}>
-            生成架构与角色
-          </button>
+          <p className="job-section-label">写作</p>
+          {!hasArchitecture ? (
+            <button
+              className="btn btn-primary btn-block"
+              onClick={startPlan}
+              disabled={running}
+            >
+              生成架构与角色
+            </button>
+          ) : null}
           <div className="job-input-row">
             <input
               className="input"
@@ -318,9 +408,10 @@ export function JobPanel({
               max={50}
               value={count}
               onChange={(event) => setCount(event.target.value)}
+              aria-label="自动写作章节数"
             />
             <button
-              className="btn btn-block"
+              className={`btn btn-block ${hasArchitecture && pending > 0 ? "btn-primary" : ""}`}
               onClick={startWrite}
               disabled={running || pending === 0}
             >
@@ -334,8 +425,14 @@ export function JobPanel({
                 ? "大纲章节已全部写完。"
                 : "先生成架构与角色。"}
           </p>
+          {hasArchitecture ? (
+            <button className="btn btn-block" onClick={startPlan} disabled={running}>
+              重新生成架构与角色
+            </button>
+          ) : null}
 
           <div className="job-divider" />
+          <p className="job-section-label">续排</p>
 
           <p className="hint">
             {detail.plan.chapters.length
@@ -362,6 +459,7 @@ export function JobPanel({
           </div>
 
           <div className="job-divider" />
+          <p className="job-section-label">改稿</p>
 
           <p className="hint">
             重写只修改本地正文，不会自动发布；支持单个、多个或范围，如 3、5、8-10。
@@ -395,6 +493,7 @@ export function JobPanel({
           />
           <label className="checkbox-row job-review-toggle">
             <input
+              className="switch"
               type="checkbox"
               checked={useReview}
               onChange={(event) => setUseReview(event.target.checked)}
@@ -405,6 +504,7 @@ export function JobPanel({
           {rewriteError ? <p className="form-error">{rewriteError}</p> : null}
 
           <div className="job-divider" />
+          <p className="job-section-label">审校</p>
 
           <p className="hint">
             总体审校会逐章抽取事实并以“截至上一章”的台账检查全书，只读不改稿；章节越多耗时越长。
@@ -418,21 +518,6 @@ export function JobPanel({
           </button>
         </div>
 
-        <div className="job-log" ref={consoleRef}>
-          {job?.logs.length ? (
-            job.logs.map((line, index) => (
-              <div key={`${line.time}-${index}`} className="job-log-line">
-                <span className="job-time">
-                  {new Date(line.time).toLocaleTimeString("zh-CN", { hour12: false })}
-                </span>
-                <span>{line.message}</span>
-              </div>
-            ))
-          ) : (
-            <p className="job-log-empty">任务日志会显示在这里。</p>
-          )}
-        </div>
-        {job?.error ? <p className="form-error">{job.error}</p> : null}
       </div>
 
       {decision && !decisionDismissed ? (

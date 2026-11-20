@@ -178,7 +178,7 @@ export function OverviewTab({
               {detail.plan.logline ? (
                 <blockquote className="logline">{detail.plan.logline}</blockquote>
               ) : (
-                <p className="muted">还没有架构。点击右侧「生成架构与角色」开始。</p>
+                <p className="muted">还没有架构。在「AI 任务台」点击「生成架构与角色」开始。</p>
               )}
               {detail.plan.tags.length ? (
                 <div className="tag-list">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { BusyLabel } from "@/components/ui/Loading";
 import { matchesPublishWork } from "@/lib/publish-ledger";
 import type { ProjectDetail, StartJobFn } from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
@@ -234,6 +235,7 @@ export function PublishTab({
 
             <label className="checkbox-row">
               <input
+                className="switch"
                 type="checkbox"
                 checked={autoSubmit}
                 onChange={(event) => setAutoSubmit(event.target.checked)}
@@ -242,6 +244,7 @@ export function PublishTab({
             </label>
             <label className="checkbox-row">
               <input
+                className="switch"
                 type="checkbox"
                 checked={headless}
                 onChange={(event) => setHeadless(event.target.checked)}
@@ -315,7 +318,7 @@ export function PublishTab({
               onClick={handleRefreshHistory}
               disabled={refreshing}
             >
-              {refreshing ? "刷新中…" : "刷新"}
+              {refreshing ? <BusyLabel>刷新中…</BusyLabel> : "刷新"}
             </button>
             <button
               className="btn btn-ghost btn-sm danger-text"
@@ -354,7 +357,11 @@ export function PublishTab({
                           onClick={() => handleResolve(entry.chapter, true)}
                           disabled={resolving !== null || disabled}
                         >
-                          {resolving === entry.chapter ? "处理中…" : "标记已发布"}
+                          {resolving === entry.chapter ? (
+                            <BusyLabel>处理中…</BusyLabel>
+                          ) : (
+                            "标记已发布"
+                          )}
                         </button>
                         <button
                           className="btn btn-ghost btn-sm danger-text"

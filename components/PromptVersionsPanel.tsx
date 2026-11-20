@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { BusyLabel } from "@/components/ui/Loading";
 import { PROMPT_AGENTS, PROMPT_CATALOG } from "@/lib/prompt-registry";
 import type { PromptAgent } from "@/lib/prompt-registry";
 import { errorMessage } from "@/lib/utils";
@@ -264,7 +265,7 @@ export function PromptVersionsPanel() {
               onClick={() => void saveVersion()}
               disabled={busy || loading || !instructions.trim()}
             >
-              {busy ? "保存中…" : "保存并启用新版本"}
+              {busy ? <BusyLabel>保存中…</BusyLabel> : "保存并启用新版本"}
             </button>
           </div>
         </div>

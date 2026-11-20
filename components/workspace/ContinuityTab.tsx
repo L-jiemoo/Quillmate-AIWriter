@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Markdown } from "@/components/Markdown";
+import { BusyLabel, SkeletonLines } from "@/components/ui/Loading";
 import type {
   AuditChapterResult,
   AuditResult,
@@ -1292,7 +1293,7 @@ export function ContinuityTab({
                 onClick={() => void loadAudit()}
                 disabled={auditLoading}
               >
-                {auditLoading ? "读取中…" : "刷新"}
+                {auditLoading ? <BusyLabel>读取中…</BusyLabel> : "刷新"}
               </button>
             </div>
           </div>
@@ -1355,6 +1356,7 @@ export function ContinuityTab({
                 </p>
                 <label className="checkbox-row audit-auto-continue">
                   <input
+                    className="switch"
                     type="checkbox"
                     checked={autoContinueRepair}
                     onChange={(event) => setAutoContinueRepair(event.target.checked)}
@@ -1366,7 +1368,10 @@ export function ContinuityTab({
             ) : null}
             {auditError ? <p className="form-error">{auditError}</p> : null}
             {auditLoading && !auditResult && !auditContent ? (
-              <p className="muted small">正在读取总体审校记录…</p>
+              <div className="skeleton-panel" aria-busy="true">
+                <p className="skeleton-label">正在读取总体审校记录…</p>
+                <SkeletonLines lines={5} />
+              </div>
             ) : auditChapters.length ? (
               !shownAudit.length ? (
                 <p className="empty-inline">
@@ -1451,7 +1456,7 @@ export function ContinuityTab({
               </div>
             ) : (
               <p className="empty-inline">
-                还没有总体审校记录。到右侧「AI 任务台」点击「总体审校全书」，完成后会按章节显示在这里。
+                还没有总体审校记录。到「AI 任务台」点击「总体审校全书」，完成后会按章节显示在这里。
               </p>
             )}
           </div>

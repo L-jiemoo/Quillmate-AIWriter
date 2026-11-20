@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PanelSkeleton } from "@/components/ui/Loading";
 import type {
   CharacterRelation,
   CharacterState,
@@ -357,7 +358,7 @@ export function StoryTab({
   }
 
   if (loading && !story) {
-    return <div className="panel"><div className="panel-body muted">正在读取剧情台账…</div></div>;
+    return <PanelSkeleton label="正在读取剧情台账…" lines={6} />;
   }
 
   return (

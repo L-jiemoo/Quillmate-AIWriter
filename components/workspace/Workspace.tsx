@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { buddyFor, latestLogText } from "@/components/ui/ai-buddy";
 import type { Job, ProjectDetail, StartJobFn } from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
 import { ChaptersTab } from "./ChaptersTab";
@@ -133,6 +134,16 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
   };
 
   const running = Boolean(job && (job.status === "queued" || job.status === "running"));
+  const buddy = buddyFor(job);
+  const latestLog = latestLogText(job);
+  const buddyLine =
+    latestLog && latestLog !== buddy.label
+      ? latestLog
+      : running
+        ? "正在输入…"
+        : job
+          ? "这一轮结束了，可以安排下一项。"
+          : "有新任务时，我会在这里冒泡。";
 
   async function pauseJob() {
     if (!job) return;
@@ -202,13 +213,18 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
               </span>
             </div>
           </div>
-          <div className="workspace-side-note">
-            <span className="live-dot" />
-            {detail.pendingChapters > 0
-              ? `还有 ${detail.pendingChapters} 章待写`
-              : detail.chapters.length
-                ? "大纲章节已写完"
-                : "等待生成架构"}
+          <div className="workspace-head-actions">
+            <div className="workspace-side-note">
+              <span className="live-dot" />
+              {detail.pendingChapters > 0
+                ? `还有 ${detail.pendingChapters} 章待写`
+                : detail.chapters.length
+                  ? "大纲章节已写完"
+                  : "等待生成架构"}
+            </div>
+            <a className="workspace-job-jump" href="#job-panel">
+              AI 任务台
+            </a>
           </div>
         </div>
       </section>
@@ -234,59 +250,80 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
               <span>{item.label}</span>
             </button>
           ))}
+          <a
+            className={`workspace-buddy mood-${buddy.mood}`}
+            href="#job-panel"
+            aria-label={`${buddy.label}，前往 AI 任务台`}
+          >
+            <span
+              key={buddy.emoji}
+              className="workspace-buddy-face"
+              aria-hidden="true"
+            >
+              {buddy.emoji}
+            </span>
+            <span className="workspace-buddy-copy">
+              <strong>{buddy.label}</strong>
+              <span>{buddyLine}</span>
+            </span>
+          </a>
         </nav>
 
         <section className="main-column">
-          {tab === "overview" ? (
-            <OverviewTab detail={detail} onRefresh={refresh} />
-          ) : null}
-          {tab === "characters" ? <CharactersTab detail={detail} onRefresh={refresh} /> : null}
-          {tab === "chapters" ? (
-            <ChaptersTab
-              detail={detail}
-              onRefresh={refresh}
-              onWrite={(count) => startJob("write", { count })}
-              onRewrite={(indices, instruction) => {
-                void startJob("rewrite", { indices, instruction });
-              }}
-              disabled={running}
-            />
-          ) : null}
-          {tab === "continuity" ? (
-            <ContinuityTab
-              detail={detail}
-              onStartJob={startJob}
-              onRefresh={refresh}
-              disabled={running}
-            />
-          ) : null}
-          {tab === "memory" ? (
-            <MemoryTab
-              detail={detail}
-              onStartJob={startJob}
-              onRefresh={refresh}
-              disabled={running}
-            />
-          ) : null}
-          {tab === "story" ? (
-            <StoryTab
-              detail={detail}
-              onStartJob={startJob}
-              onRefresh={refresh}
-              disabled={running}
-            />
-          ) : null}
-          {tab === "publish" ? (
-            <PublishTab
-              detail={detail}
-              onStartJob={startJob}
-              onRefresh={refresh}
-              disabled={running}
-            />
-          ) : null}
+          <div key={tab} className="tab-panel">
+            {tab === "overview" ? (
+              <OverviewTab detail={detail} onRefresh={refresh} />
+            ) : null}
+            {tab === "characters" ? (
+              <CharactersTab detail={detail} onRefresh={refresh} />
+            ) : null}
+            {tab === "chapters" ? (
+              <ChaptersTab
+                detail={detail}
+                onRefresh={refresh}
+                onWrite={(count) => startJob("write", { count })}
+                onRewrite={(indices, instruction) => {
+                  void startJob("rewrite", { indices, instruction });
+                }}
+                disabled={running}
+              />
+            ) : null}
+            {tab === "continuity" ? (
+              <ContinuityTab
+                detail={detail}
+                onStartJob={startJob}
+                onRefresh={refresh}
+                disabled={running}
+              />
+            ) : null}
+            {tab === "memory" ? (
+              <MemoryTab
+                detail={detail}
+                onStartJob={startJob}
+                onRefresh={refresh}
+                disabled={running}
+              />
+            ) : null}
+            {tab === "story" ? (
+              <StoryTab
+                detail={detail}
+                onStartJob={startJob}
+                onRefresh={refresh}
+                disabled={running}
+              />
+            ) : null}
+            {tab === "publish" ? (
+              <PublishTab
+                detail={detail}
+                onStartJob={startJob}
+                onRefresh={refresh}
+                disabled={running}
+              />
+            ) : null}
+          </div>
         </section>
 
-        <aside className="side-column">
+        <aside className="side-column" id="job-panel">
           <JobPanel
             detail={detail}
             job={job}

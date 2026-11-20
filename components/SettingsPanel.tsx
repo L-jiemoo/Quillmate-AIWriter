@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { PromptVersionsPanel } from "@/components/PromptVersionsPanel";
+import { BusyLabel, SkeletonLines } from "@/components/ui/Loading";
 import type { LLMProvider } from "@/lib/config";
 import { errorMessage } from "@/lib/utils";
 
@@ -261,7 +262,10 @@ export function SettingsPanel() {
                 ) : null}
               </>
             ) : (
-              <p className="muted">读取中…</p>
+              <div className="skeleton-panel" aria-busy="true">
+                <p className="skeleton-label">正在读取模型配置…</p>
+                <SkeletonLines lines={4} />
+              </div>
             )}
           </div>
         </section>
@@ -387,14 +391,14 @@ export function SettingsPanel() {
                 onClick={testConnection}
                 disabled={testing || saving}
               >
-                {testing ? "测试中…" : "测试连接"}
+                {testing ? <BusyLabel>测试中…</BusyLabel> : "测试连接"}
               </button>
               <button
                 type="submit"
                 className="btn btn-primary"
                 disabled={saving || testing || !snapshot}
               >
-                {saving ? "保存中…" : "保存并热切换"}
+                {saving ? <BusyLabel>保存中…</BusyLabel> : "保存并热切换"}
               </button>
             </div>
 

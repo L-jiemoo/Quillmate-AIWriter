@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PanelSkeleton } from "@/components/ui/Loading";
 import type {
   BookMemory,
   ChapterMemory,
@@ -274,7 +275,7 @@ export function MemoryTab({
   }
 
   if (loading) {
-    return <div className="panel"><div className="panel-body muted">正在读取长期记忆…</div></div>;
+    return <PanelSkeleton label="正在读取长期记忆…" lines={6} />;
   }
 
   return (
