@@ -72,6 +72,9 @@ const FACT_CONFLICT_TYPES = new Set([
 
 const EXPRESSION_HINTS =
   /(表达|修辞|文风|用词|措辞|语言|语感|节奏|描写|风格|建议|润色|行文)/u;
+// 类型里带“建议”不代表是表达建议，例如“时间线建议”仍然是事实类警告。
+const FACT_HINTS =
+  /(冲突|矛盾|不一致|时间线|生死|死亡|人物状态|物品|归属|伏笔|因果|规则|世界观|人物关系|台账|连续性)/u;
 
 export type IssueClass = "fact" | "expression" | "unknown";
 
@@ -79,7 +82,9 @@ export function classifyIssue(issue: ContinuityIssue): IssueClass {
   const category = issue.conflictCategory?.trim();
   if (category && category !== "other") return "fact";
   if (category === "other") return "unknown";
-  if (FACT_CONFLICT_TYPES.has(issue.type.trim())) return "fact";
+  if (FACT_CONFLICT_TYPES.has(issue.type.trim()) || FACT_HINTS.test(issue.type)) {
+    return "fact";
+  }
   if (EXPRESSION_HINTS.test(issue.type)) return "expression";
   return "unknown";
 }

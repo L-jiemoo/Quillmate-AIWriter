@@ -180,6 +180,31 @@ function issueKey(issue: ContinuityIssue): string {
   return `${issue.severity}|${issue.type}|${issue.evidence}|${issue.detail}`;
 }
 
+// 同类型、同来源章节、证据高度重合的问题，通常是同一根因的换一种说法；
+// 只用于统计“新增严重问题”，避免同一个根因被算成多个新增。
+export function collapseRelatedIssues(
+  issues: ContinuityIssue[],
+): ContinuityIssue[] {
+  const result: ContinuityIssue[] = [];
+  for (const issue of issues) {
+    const related = result.find((existing) => {
+      if (normalizeIssueText(existing.type) !== normalizeIssueText(issue.type)) {
+        return false;
+      }
+      if ((existing.sourceChapter ?? 0) !== (issue.sourceChapter ?? 0)) {
+        return false;
+      }
+      const left = normalizeIssueText(existing.evidence);
+      const right = normalizeIssueText(issue.evidence);
+      if (!left || !right) return false;
+      if (left.includes(right) || right.includes(left)) return true;
+      return dice(bigrams(left), bigrams(right)) >= 0.75;
+    });
+    if (!related) result.push(issue);
+  }
+  return result;
+}
+
 function uniqueIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
   const seen = new Set<string>();
   return issues.filter((issue) => {
@@ -375,7 +400,9 @@ function compareBySeverity(
 
   const resolved = beforeCritical.filter((_, index) => !matchedBefore.has(index));
   const remaining = beforeCritical.filter((_, index) => matchedBefore.has(index));
-  const added = afterCritical.filter((_, index) => !matchedAfter.has(index));
+  const added = collapseRelatedIssues(
+    afterCritical.filter((_, index) => !matchedAfter.has(index)),
+  );
   return {
     beforeCount: beforeCritical.length,
     afterCount: afterCritical.length,

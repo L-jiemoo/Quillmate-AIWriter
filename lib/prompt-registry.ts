@@ -48,12 +48,12 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   auditor: {
     label: "连续性与质量审校",
-    version: "2026.11.21-p11",
+    version: "2026.11.21-p13",
     description: "检查人物、时间线、规则、因果、伏笔和章节重复。",
   },
   "repair-editor": {
     label: "定点修复",
-    version: "2026.11.21-p9",
+    version: "2026.11.21-p13",
     description: "只修改与审校问题直接相关的正文段落。",
   },
 };

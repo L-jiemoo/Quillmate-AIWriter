@@ -33,9 +33,12 @@ import {
 } from "./prompts";
 import {
   normalizeRepairPatches,
+  paragraphsMatchingAnchors,
   type RepairPatch,
 } from "./repair-patch";
+import { structuralRepairIssues } from "./repair-routing";
 import {
+  causalVerificationComplete,
   formatCausalBaseline,
   isCausalBaselineComplete,
   normalizeCausalBaseline,
@@ -77,12 +80,35 @@ import type {
 } from "./types";
 import type { GeneratedPlan } from "./mock";
 
-// 方案里的章节编号是数字数组，不能用只保留字符串的 arr() 过滤。
+// 方案里的章节编号是数字数组，不能用只保留字符串的 arr() 过滤；
+// 模型偶尔会写“第4章”，也要能解析出数字。
 function numberList(value: unknown): number[] {
   if (!Array.isArray(value)) return [];
   return value
-    .map((item) => Number.parseInt(String(item), 10))
+    .map((item) => {
+      const match = String(item).match(/\d+/u);
+      return match ? Number.parseInt(match[0], 10) : Number.NaN;
+    })
     .filter((item) => Number.isInteger(item) && item > 0);
+}
+
+// 模型偶尔把数组字段写成单个字符串；按需拆分，避免整段设定被静默丢弃。
+function stringList(value: unknown, splitLines = false): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return splitLines
+      ? value
+          .split(/[；;\n]/u)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [value.trim()];
+  }
+  return [];
 }
 
 // 修复阶段可以单独配置更强的模型；留空时沿用主模型。
@@ -1068,6 +1094,7 @@ export async function auditChapter(
   nextContext: string,
   storyContext: string,
   evidenceContext = "",
+  unifiedLedger = "",
 ): Promise<ReviewResult> {
   if (isMock()) return mockReview(chapter);
 
@@ -1084,6 +1111,7 @@ export async function auditChapter(
       nextContext,
       storyContext,
       evidenceContext,
+      unifiedLedger,
     ),
     { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
@@ -1141,7 +1169,12 @@ export async function auditRepairRegression(
   return {
     ...normalizeReviewResult(data, chapter.summary),
     causalChanges: causal.changes,
-    causalVerified: causal.verified,
+    causalVerified: causalVerificationComplete(
+      causal.changes,
+      causal.verified,
+      causalBaselines.length,
+      data.causalVerified ?? data.causal_verified,
+    ),
   };
 }
 
@@ -1293,9 +1326,12 @@ export function normalizeRepairPlan(input: unknown): RepairPlan {
       issueIndex: Number.parseInt(String(plan.issueIndex ?? plan.issue_index ?? ""), 10),
       rootCause: str(plan.rootCause ?? plan.root_cause).trim(),
       evidence: str(plan.evidence).trim(),
-      locations: arr(plan.locations),
+      locations: stringList(plan.locations, true),
       strategy: str(plan.strategy).trim(),
-      affectedFacts: arr(plan.affectedFacts ?? plan.affected_facts),
+      affectedFacts: stringList(
+        plan.affectedFacts ?? plan.affected_facts,
+        true,
+      ),
       sideEffects: str(plan.sideEffects ?? plan.side_effects).trim(),
       regressionScope: str(plan.regressionScope ?? plan.regression_scope).trim(),
       causalBaseline: normalizeCausalBaseline(
@@ -1317,12 +1353,13 @@ export function normalizeRepairPlan(input: unknown): RepairPlan {
         affectedChapters: numberList(
           option.affectedChapters ?? option.affected_chapters,
         ),
-        anchors: arr(option.anchors),
-        introducedFacts: arr(
+        anchors: stringList(option.anchors),
+        introducedFacts: stringList(
           option.introducedFacts ??
             option.introduced_facts ??
             option.newFacts ??
             option.new_facts,
+          true,
         ),
         recommended:
           option.recommended === true ||
@@ -1355,15 +1392,25 @@ function originalEvidenceSection(context: string): string {
 }
 
 function containsEvidence(haystack: string, needle: string): boolean {
-  const compactNeedle = compactEvidence(needle);
-  if (compactNeedle.length < 4) return false;
   const compactHaystack = compactEvidence(haystack);
-  if (compactHaystack.includes(compactNeedle)) return true;
-  // 长证据可能被模型截断；只比较前 60 个有效字符，避免整段比对失败。
-  if (compactNeedle.length > 60) {
-    return compactHaystack.includes(compactNeedle.slice(0, 60));
-  }
-  return false;
+  const matchPart = (part: string): boolean => {
+    const compactNeedle = compactEvidence(part);
+    if (compactNeedle.length < 4) return false;
+    if (compactHaystack.includes(compactNeedle)) return true;
+    // 长证据可能被模型截断；只比较前 60 个有效字符，避免整段比对失败。
+    return (
+      compactNeedle.length > 60 &&
+      compactHaystack.includes(compactNeedle.slice(0, 60))
+    );
+  };
+  // 审校证据常用“……”或“／”拼接多个位置的原文；
+  // 整串拼接后不可能在正文中连续出现，必须逐段核对。
+  const parts = needle
+    .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length > 1) return parts.some(matchPart);
+  return matchPart(needle);
 }
 
 export function validateRepairPlan(
@@ -1605,6 +1652,24 @@ export async function repairChapterPatches(
   let causalBaselines: CausalBaseline[] = [];
   let authorizedAnchors: string[] = [];
   let affectedChapters = options.affectedChapters ?? [];
+  const structural = structuralRepairIssues(issues);
+  // 作者已确认方向时不拦；否则结构问题必须回归作者决策，不再打补丁。
+  const forceAuthorDecision = structural.length > 0 && !options.authorDirective;
+  const structuralNote = structural.length
+    ? [
+        "【程序判定：以下问题属于跨章或细纲结构冲突，不得用局部补丁硬修】",
+        ...structural.slice(0, 6).map((issue) => `- [${issue.type}] ${issue.detail.slice(0, 160)}`),
+        "必须把 needsAuthorDecision 设为 true，并给出 2-4 个互斥方案；不要输出可直接执行的补丁。",
+      ].join("\n")
+    : "";
+  const planOptions = structuralNote
+    ? {
+        ...options,
+        authorDirective: [options.authorDirective, structuralNote]
+          .filter(Boolean)
+          .join("\n\n"),
+      }
+    : options;
   if (options.twoStage !== false) {
     const planData = await llm.json<Record<string, unknown>>(
       chapterRepairPlanMessages(
@@ -1617,7 +1682,7 @@ export async function repairChapterPatches(
         nextOpening,
         rewriteInstruction,
         reviewFeedback,
-        options,
+        planOptions,
       ),
       {
         temperature: 0.1,
@@ -1627,6 +1692,15 @@ export async function repairChapterPatches(
       },
     );
     const plan = normalizeRepairPlan(planData);
+    if (forceAuthorDecision && !plan.needsAuthorDecision) {
+      throw new RepairNeedsAuthorDecisionError(
+        plan.decisionReason ||
+          `以下问题属于跨章或细纲结构冲突，无法用本章局部补丁安全修复：${structural
+            .map((issue) => issue.type)
+            .join("、")}`,
+        plan.decisionOptions,
+      );
+    }
     if (plan.needsAuthorDecision) {
       if (options.authorDirective) {
         throw new RepairPlanRejectedError(
@@ -1653,16 +1727,21 @@ export async function repairChapterPatches(
       .flatMap((item) => item.locations)
       .map((location) => location.trim())
       .filter(Boolean);
-    const plannedChapters = plan.decisionOptions.flatMap(
-      (option) => option.affectedChapters,
-    );
-    if (plannedChapters.length) {
-      affectedChapters = [
-        ...new Set([...affectedChapters, ...plannedChapters]),
-      ];
-    }
+    // 决策选项只在等待作者确认时生效；作者确认的章节范围由调用方传入。
+    // 不能因为模型随手返回 decisionOptions 就扩大补丁授权章节。
   }
 
+  if (forceAuthorDecision) {
+    throw new RepairNeedsAuthorDecisionError(
+      `以下问题属于跨章或细纲结构冲突，无法用本章局部补丁安全修复：${structural
+        .map((issue) => issue.type)
+        .join("、")}`,
+    );
+  }
+  const authorizedParagraphs = paragraphsMatchingAnchors(chapterText, [
+    ...issues.flatMap((issue) => [issue.evidence, issue.sourceEvidence ?? ""]),
+    ...authorizedAnchors,
+  ]);
   const data = await llm.json<Record<string, unknown>>(
     chapterRepairPatchMessages(
       meta,
@@ -1674,9 +1753,20 @@ export async function repairChapterPatches(
       nextOpening,
       rewriteInstruction,
       reviewFeedback,
-      { ...options, planText, affectedChapters },
+      {
+        ...options,
+        planText,
+        affectedChapters,
+        authorizedAnchors,
+        authorizedParagraphs,
+      },
     ),
-    { temperature: 0.1, agent: "repair-editor", chapter: chapter.index },
+    {
+      temperature: 0.1,
+      agent: "repair-editor",
+      chapter: chapter.index,
+      ...repairModelOption(),
+    },
   );
   return {
     patches: normalizeRepairPatches(data),

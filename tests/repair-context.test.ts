@@ -72,6 +72,30 @@ describe("修复原文证据检索", () => {
     expect(evidence.text).toContain("（原文）");
   });
 
+  it("问题证据用省略号拼接多段时，能分别检索到对应章节", () => {
+    const project = detail([
+      chapter(2, "前文留下过一枚旧铜牌。"),
+      chapter(3, "第三章：无关内容。"),
+      chapter(5, "后文又找到了同一枚旧铜牌。"),
+      chapter(8, "本章正文。"),
+    ]);
+    const multi: ContinuityIssue = {
+      severity: "critical",
+      type: "物品归属",
+      evidence: "前文留下过一枚旧铜牌。……后文又找到了同一枚旧铜牌。",
+      detail: "铜牌出现两次，归属需要确认。",
+    };
+
+    const evidence = collectRepairEvidence({
+      project,
+      chapter: plan,
+      issues: [multi],
+    });
+
+    expect(evidence.snippets.some((item) => item.chapter === 2)).toBe(true);
+    expect(evidence.snippets.some((item) => item.chapter === 5)).toBe(true);
+  });
+
   it("问题未写章节时按涉及人物检索原文", () => {
     const project = detail([
       chapter(2, "角色乙在电话里说自己在外地。"),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateRepair } from "@/lib/repair-acceptance";
 import {
+  collapseRelatedIssues,
   compareCriticalIssues,
   filterSeedIssues,
   normalizeIssueText,
@@ -568,5 +569,16 @@ describe("全严重度严格验收", () => {
       scopeViolation: true,
     });
     expect(result.status).toBe("REJECTED_SCOPE_VIOLATION");
+  });
+});
+
+describe("新增问题按根因合并", () => {
+  it("同类型、同来源、证据高度重合只算一个", () => {
+    const collapsed = collapseRelatedIssues([
+      issue("物品归属", "角色乙把旧铜牌收进怀里。", "同一根因"),
+      issue("物品归属", "角色乙把旧铜牌收进怀里，动作很快。", "同一根因的另一种说法"),
+      issue("时间线", "角色乙把旧铜牌收进怀里。", "不同根因"),
+    ]);
+    expect(collapsed).toHaveLength(2);
   });
 });

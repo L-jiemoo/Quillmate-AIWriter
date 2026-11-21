@@ -109,6 +109,18 @@ describe("分类与修复验收", () => {
     expect(result.leftovers.join("")).toContain("解释不足");
   });
 
+  it("大纲偏离不能判 critical", () => {
+    const [issue] = normalizeIssues([
+      {
+        severity: "critical",
+        type: "大纲偏离",
+        evidence: "正文写成了另一条路线。",
+        detail: "细纲要求走另一条路线。",
+      },
+    ]);
+    expect(issue.severity).toBe("warning");
+  });
+
   it("新增明确矛盾或无语义类别时仍然拒绝", () => {
     const contradiction = evaluateRepair({
       before: [critical("角色乙上午被绑走。")],
@@ -136,6 +148,19 @@ describe("分类与修复验收", () => {
       ],
     });
     expect(unclassified.status).toBe("REJECTED_NEW_WARNING");
+
+    const factHint = evaluateRepair({
+      before: [critical("角色乙上午被绑走。")],
+      after: [
+        {
+          severity: "warning",
+          type: "时间线建议",
+          evidence: "角色乙又出现在外地。",
+          detail: "与第 4 章时间线不一致。",
+        },
+      ],
+    });
+    expect(factHint.status).toBe("REJECTED_NEW_WARNING");
   });
 });
 

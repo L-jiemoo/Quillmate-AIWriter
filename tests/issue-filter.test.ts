@@ -69,6 +69,41 @@ describe("审校问题自相否定过滤", () => {
     expect(review.issues[0].severity).toBe("critical");
   });
 
+  it("真实冲突描述里引用了“不是问题”仍然保留", () => {
+    const review = normalizeReviewResult({
+      summary: "摘要",
+      issues: [
+        {
+          severity: "critical",
+          type: "时间线",
+          evidence: "角色甲同一时刻出现在城东和城西。",
+          detail:
+            "角色乙说“这不是问题”，但与第 3 章明确冲突：同一时刻角色甲还在城西，两地相隔一日路程。",
+        },
+      ],
+    });
+    expect(review.issues).toHaveLength(1);
+    expect(review.issues[0].severity).toBe("critical");
+  });
+
+  it("问题超过上限时优先保留严重问题", () => {
+    const issues = Array.from({ length: 44 }, (_, index) => ({
+      severity: "warning",
+      type: "表达",
+      evidence: `第${index + 1}条表达建议。`,
+      detail: "建议润色。",
+    }));
+    issues.push({
+      severity: "critical",
+      type: "时间线",
+      evidence: "角色甲同一时刻出现在城东和城西。",
+      detail: "与第 3 章明确冲突。",
+    });
+    const review = normalizeReviewResult({ summary: "摘要", issues });
+    expect(review.issues).toHaveLength(40);
+    expect(review.issues.some((issue) => issue.severity === "critical")).toBe(true);
+  });
+
   it("警告级别的确认类提示保留", () => {
     const review = normalizeReviewResult({
       summary: "摘要",

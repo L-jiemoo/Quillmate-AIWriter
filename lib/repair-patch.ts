@@ -152,15 +152,162 @@ function paragraphsOf(text: string): Paragraph[] {
   return result;
 }
 
+const QUOTE_CHARS = new Set(["“", "”", "‘", "’", "\"", "'", "「", "」", "『", "』"]);
+const COMPACT_NOISE = /[\s，。！？；：、“”‘’（）()《》【】〔〕…—\-·,.!?;:'"\\/\[\]{}<>|]/u;
+const COMPACT_NOISE_GLOBAL = /[\s，。！？；：、“”‘’（）()《》【】〔〕…—\-·,.!?;:'"\\/\[\]{}<>|]/gu;
+
+function isQuoteChar(value: string | undefined): boolean {
+  return Boolean(value) && QUOTE_CHARS.has(value as string);
+}
+
+// 审校证据常把正文片段连同引文外层引号一起返回，这对引号不一定属于正文。
+export function stripOuterQuotes(value: string): string {
+  let result = value.trim();
+  while (
+    result.length >= 2 &&
+    isQuoteChar(result[0]) &&
+    isQuoteChar(result[result.length - 1])
+  ) {
+    result = result.slice(1, -1).trim();
+  }
+  return result;
+}
+
+function compactAnchor(value: string): string {
+  return value.normalize("NFKC").replace(COMPACT_NOISE_GLOBAL, "").toLowerCase();
+}
+
+function compactWithMap(value: string): { text: string; map: number[] } {
+  let text = "";
+  const map: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    for (const char of value[index].normalize("NFKC")) {
+      if (COMPACT_NOISE.test(char)) continue;
+      text += char.toLowerCase();
+      map.push(index);
+    }
+  }
+  return { text, map };
+}
+
 function compact(value: string): string {
   return value.replace(/\s+/gu, "");
+}
+
+interface AnchorLocation {
+  start: number;
+  end: number;
+  text: string;
+  normalized: boolean;
+}
+
+function locateAnchor(
+  text: string,
+  anchor: string,
+): { location?: AnchorLocation; occurrences: number } {
+  const trimmed = anchor.trim();
+  if (!trimmed) return { occurrences: 0 };
+  const stripped = stripOuterQuotes(trimmed);
+  const candidates = stripped !== trimmed ? [trimmed, stripped] : [trimmed];
+  for (const candidate of candidates) {
+    const occurrences = countOccurrences(text, candidate);
+    if (occurrences > 1) return { occurrences };
+    if (occurrences === 1) {
+      const start = text.indexOf(candidate);
+      return {
+        location: {
+          start,
+          end: start + candidate.length,
+          text: candidate,
+          normalized: candidate !== trimmed,
+        },
+        occurrences,
+      };
+    }
+  }
+
+  // 模型偶尔会改写少量标点或空白；按有效字符唯一命中时仍可安全定位。
+  const compactedAnchor = compactAnchor(stripped);
+  if (compactedAnchor.length >= 4) {
+    const compacted = compactWithMap(text);
+    const positions: number[] = [];
+    let position = compacted.text.indexOf(compactedAnchor);
+    while (position >= 0) {
+      positions.push(position);
+      position = compacted.text.indexOf(compactedAnchor, position + 1);
+    }
+    if (positions.length > 1) return { occurrences: positions.length };
+    if (positions.length === 1) {
+      const start = compacted.map[positions[0]];
+      const end = compacted.map[positions[0] + compactedAnchor.length - 1] + 1;
+      return {
+        location: { start, end, text: text.slice(start, end), normalized: true },
+        occurrences: 1,
+      };
+    }
+  }
+  return { occurrences: 0 };
+}
+
+export function textContainsAnchor(text: string, anchor: string): boolean {
+  return locateAnchor(text, anchor).occurrences > 0;
+}
+
+// 给补丁模型直接展示“可以改哪些段落”的原文，避免它猜错段落或自造锚点。
+export function paragraphsMatchingAnchors(
+  text: string,
+  anchors: string[],
+): string[] {
+  const fragments = anchors
+    .filter(Boolean)
+    .flatMap((anchor) => [anchor, ...evidenceFragments(anchor)]);
+  const result: string[] = [];
+  for (const paragraph of paragraphsOf(text)) {
+    const trimmed = paragraph.text.trim();
+    if (
+      trimmed &&
+      !result.includes(trimmed) &&
+      fragments.some((fragment) => anchorMatchesParagraph(fragment, paragraph.text))
+    ) {
+      result.push(trimmed);
+    }
+  }
+  return result;
+}
+
+// 锚点被归一化（去掉证据外层引号或忽略标点）时，替换文本也要对称处理，
+// 否则会在正文里留下重复的引号。
+function normalizeMatchedReplacement(
+  text: string,
+  location: AnchorLocation,
+  originalAnchor: string,
+  replacement: string,
+): string {
+  const trimmed = originalAnchor.trim();
+  const stripped = stripOuterQuotes(trimmed);
+  let result = replacement;
+  if (stripped !== trimmed && location.normalized) {
+    result = stripOuterQuotes(result);
+  }
+  if (result && isQuoteChar(result[0]) && isQuoteChar(text[location.start - 1])) {
+    result = result.slice(1);
+  }
+  if (
+    result &&
+    isQuoteChar(result[result.length - 1]) &&
+    isQuoteChar(text[location.end])
+  ) {
+    result = result.slice(0, -1);
+  }
+  return result;
 }
 
 function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
   const trimmed = anchor.trim();
   if (trimmed.length < 2) return false;
-  if (paragraph.includes(trimmed)) return true;
-  const compactAnchor = compact(trimmed);
+  if (textContainsAnchor(paragraph, trimmed)) return true;
+  const stripped = stripOuterQuotes(trimmed);
+  const compactAnchor = compact(stripped);
   if (compactAnchor.length < 4) return false;
   const compactParagraph = compact(paragraph);
   if (compactParagraph.includes(compactAnchor)) return true;
@@ -172,7 +319,7 @@ function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
 function evidenceFragments(anchor: string): string[] {
   return anchor
     .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
-    .map((part) => part.trim())
+    .map((part) => stripOuterQuotes(part))
     .filter((part) => part.length >= 2);
 }
 
@@ -267,26 +414,41 @@ export function applyRepairPatchesAcross(input: {
       if (edit.replacement === edit.originalText) {
         throw new RepairPatchError("UNCHANGED_EDIT", `问题 ${issueId} 的补丁没有实际修改内容`);
       }
-      const occurrences = countOccurrences(chapter.text, edit.originalText);
-      if (!occurrences) {
+      const anchor = locateAnchor(chapter.text, edit.originalText);
+      if (!anchor.location) {
+        if (anchor.occurrences > 1) {
+          throw new RepairPatchError(
+            "ANCHOR_NOT_UNIQUE",
+            `问题 ${issueId} 的原文锚点在第 ${chapterIndex} 章中出现 ${anchor.occurrences} 次，无法唯一匹配`,
+          );
+        }
         throw new RepairPatchError(
           "ANCHOR_NOT_FOUND",
           `问题 ${issueId} 的原文锚点在第 ${chapterIndex} 章中不存在：${edit.originalText.slice(0, 40)}`,
         );
       }
-      if (occurrences > 1) {
+      const replacement = normalizeMatchedReplacement(
+        chapter.text,
+        anchor.location,
+        edit.originalText,
+        edit.replacement,
+      );
+      if (replacement === anchor.location.text) {
         throw new RepairPatchError(
-          "ANCHOR_NOT_UNIQUE",
-          `问题 ${issueId} 的原文锚点在第 ${chapterIndex} 章中出现 ${occurrences} 次，无法唯一匹配`,
+          "UNCHANGED_EDIT",
+          `问题 ${issueId} 的补丁没有实际修改内容`,
         );
       }
-      const start = chapter.text.indexOf(edit.originalText);
       located.push({
         issueId,
         chapterIndex,
-        start,
-        end: start + edit.originalText.length,
-        edit,
+        start: anchor.location.start,
+        end: anchor.location.end,
+        edit: {
+          ...edit,
+          originalText: anchor.location.text,
+          replacement,
+        },
       });
       editedIssues.add(issueId);
     }

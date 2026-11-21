@@ -253,15 +253,20 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
   const writtenSet = new Set(state.written);
 
   const chapters: ChapterContent[] = [];
+  const staleChapters: number[] = [];
   for (const chapter of plan.chapters) {
     const content = await readText(await chapterPath(slug, chapter.index));
     const stateRow = chapterStates.get(chapter.index);
+    const written = writtenSet.has(chapter.index) || Boolean(stateRow?.written);
+    if (written && stateRow?.contentHash && sha256(content) !== stateRow.contentHash) {
+      staleChapters.push(chapter.index);
+    }
     chapters.push({
       index: chapter.index,
       title: chapter.title,
       content,
       words: countWords(content),
-      written: writtenSet.has(chapter.index) || Boolean(stateRow?.written),
+      written,
     });
   }
 
@@ -278,6 +283,7 @@ export async function getProjectDetail(slug: string): Promise<ProjectDetail> {
     publish: file.publish,
     publishLedger,
     pendingChapters: chapters.filter((chapter) => !chapter.written).length,
+    staleChapters,
   };
 }
 

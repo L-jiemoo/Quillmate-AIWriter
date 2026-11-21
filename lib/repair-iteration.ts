@@ -1,5 +1,5 @@
 import { hashText, withIssueIds } from "./repair-patch";
-import { compareCriticalIssues } from "./repair-compare";
+import { compareCriticalIssues, normalizeIssueText } from "./repair-compare";
 import type { CausalBaseline } from "./repair-causal";
 import type { ContinuityIssue, ReviewResult } from "./types";
 
@@ -135,20 +135,20 @@ export function normalizeRegressionVerdict(value: unknown): RegressionVerdict {
   return VERDICT_ALIASES[verdictKey(value)] ?? "uncertain";
 }
 
-function compact(value: string): string {
-  return value.replace(/\s+/gu, "").toLowerCase();
-}
-
 // 规则兜底：原文中已经存在的证据不能算本次修复新增；无法判断的一律 uncertain。
 export function classifyRegressionByEvidence(
   issue: ContinuityIssue,
   baseline: RepairBaseline,
   candidateText: string,
 ): RegressionConfirmation {
-  const evidence = compact(issue.evidence);
-  const original = compact(baseline.originalText);
-  const candidate = compact(candidateText);
-  if (!evidence) {
+  const evidenceParts = issue.evidence
+    .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
+    .map(normalizeIssueText)
+    .filter((part) => part.length >= 6);
+  const evidenceWhole = normalizeIssueText(issue.evidence);
+  const original = normalizeIssueText(baseline.originalText);
+  const candidate = normalizeIssueText(candidateText);
+  if (!evidenceWhole) {
     return {
       issue,
       verdict: "uncertain",
@@ -156,7 +156,11 @@ export function classifyRegressionByEvidence(
       schemeLevelFailure: false,
     };
   }
-  if (evidence.length >= 6 && original.includes(evidence)) {
+  const presentIn = (text: string): boolean =>
+    evidenceParts.length
+      ? evidenceParts.every((part) => text.includes(part))
+      : evidenceWhole.length >= 6 && text.includes(evidenceWhole);
+  if (presentIn(original)) {
     return {
       issue,
       verdict: "pre_existing",
@@ -169,10 +173,9 @@ export function classifyRegressionByEvidence(
   return {
     issue,
     verdict: "uncertain",
-    explanation:
-      evidence.length >= 6 && !candidate.includes(evidence)
-        ? "候选稿中找不到该证据，无法确认问题是否成立。"
-        : "需要独立确认该问题是否由本次修复引入。",
+    explanation: !presentIn(candidate)
+      ? "候选稿中找不到该证据，无法确认问题是否成立。"
+      : "需要独立确认该问题是否由本次修复引入。",
     schemeLevelFailure: false,
   };
 }

@@ -63,6 +63,27 @@ describe("两轮修复分组与确认", () => {
     expect(result.verdict).toBe("pre_existing");
   });
 
+  it("省略号拼接的证据也能判断为 pre_existing", () => {
+    const text = [
+      "角色乙在办公室接电话。",
+      "中间叙述。",
+      "角色甲在门口等他。",
+    ].join("\n");
+    const evidence = "角色乙在办公室接电话。……角色甲在门口等他。";
+    const baseline = buildRepairBaseline({
+      jobId: "job-1",
+      chapterIndex: 1,
+      text,
+      issues: [issue(evidence)],
+    });
+    const result = classifyRegressionByEvidence(
+      issue(evidence),
+      baseline,
+      `${text}\n【修复】`,
+    );
+    expect(result.verdict).toBe("pre_existing");
+  });
+
   it("无法核实的证据归为 uncertain，不擅自放行", () => {
     const baseline = buildRepairBaseline({
       jobId: "job-1",

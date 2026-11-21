@@ -4,6 +4,7 @@ import {
   applyRepairPatchesAcross,
   hashText,
   normalizeRepairPatches,
+  paragraphsMatchingAnchors,
   RepairPatchError,
   withIssueIds,
   type RepairPatch,
@@ -70,6 +71,35 @@ describe("修复补角色丁应用", () => {
         }),
       ),
     ).toBe("ANCHOR_NOT_FOUND");
+  });
+
+  it("证据外层引号不属于正文时仍能唯一定位并去掉替换文本的重复引号", () => {
+    const text =
+      "角色丙说：“要紧的是缓存已经清了。缓存一清，旧令牌就撑不过一刻钟——顶多半刻钟。”";
+    const evidence = "“缓存一清，旧令牌就撑不过一刻钟——顶多半刻钟。”";
+    const batch = applyRepairPatches({
+      originalText: text,
+      issues: [issue(evidence)],
+      patches: [
+        patch("issue-1", evidence, "“缓存一清，旧令牌只能再撑半刻钟。”"),
+      ],
+    });
+    expect(batch.text).toBe(
+      "角色丙说：“要紧的是缓存已经清了。缓存一清，旧令牌只能再撑半刻钟。”",
+    );
+    expect(batch.text).not.toContain("””");
+  });
+
+  it("锚点只差标点或空白时仍能唯一定位", () => {
+    const text = "角色丙说：今晚提交，别误了截止时间。";
+    const batch = applyRepairPatches({
+      originalText: text,
+      issues: [issue("今晚提交，别误了截止时间。")],
+      patches: [
+        patch("issue-1", "今晚提交 别误了截止时间", "今晚就交，别误了截止时间"),
+      ],
+    });
+    expect(batch.text).toContain("今晚就交，别误了截止时间");
   });
 
   it("原文锚点匹配多处时拒绝自动应用", () => {
@@ -146,6 +176,17 @@ describe("修复补角色丁应用", () => {
         }),
       ),
     ).toBe("UNAUTHORIZED_SCOPE");
+  });
+
+  it("补丁提示词能拿到包含授权锚点的完整段落", () => {
+    const text = [
+      "第一段无关内容。",
+      "角色乙在办公室里接电话，背景有收银机声音。",
+      "第三段无关内容。",
+    ].join("\n");
+    expect(
+      paragraphsMatchingAnchors(text, ["角色乙在办公室里接电话"]),
+    ).toEqual(["角色乙在办公室里接电话，背景有收银机声音。"]);
   });
 
   it("证据用省略号跨段引用时，被引用的每个段落都可修改", () => {

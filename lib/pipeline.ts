@@ -22,6 +22,7 @@ import {
   groundExtractedFacts,
   isCanonEmpty,
   mergeCanon,
+  mergeChapterExtractions,
   mergeIssues,
   reconcileCanonWithChapters,
   validateCanon,
@@ -61,6 +62,8 @@ import { loginFanqie, publishFanqie } from "./publishers/fanqie";
 import { describeAcceptance, evaluateRepair } from "./repair-acceptance";
 import type { CausalBaseline } from "./repair-causal";
 import { compareCriticalIssues, filterSeedIssues } from "./repair-compare";
+import { validateRepairDecisionOption } from "./repair-routing";
+import { buildUnifiedLedger } from "./unified-ledger";
 import type { IssueComparison } from "./repair-compare";
 import { collectRepairEvidence } from "./repair-context";
 import {
@@ -79,6 +82,7 @@ import {
   describePatchBatch,
   hashText,
   RepairPatchError,
+  textContainsAnchor,
   withIssueIds,
   type AppliedChapterBatch,
   type AppliedPatchBatch,
@@ -607,6 +611,12 @@ function clipRecord(value: string, size = 60): string {
   return compact.length > size ? `${compact.slice(0, size)}…` : compact;
 }
 
+function describeIssueBriefs(issues: ContinuityIssue[]): string {
+  return issues
+    .map((issue) => `[${issue.type}] ${clipRecord(issue.detail || issue.evidence, 100)}`)
+    .join("；");
+}
+
 // 记录每一处补丁修改，方便事后审查；正文版本与备份仍保留完整差异。
 function logPatchBatch(job: Job, index: number, batch: AppliedPatchBatch): void {
   logJob(job, `第 ${index} 章补丁校验通过：${describePatchBatch(batch)}。`);
@@ -621,6 +631,28 @@ function logPatchBatch(job: Job, index: number, batch: AppliedPatchBatch): void 
 }
 
 // 问题明确引用、但当前没有正文可用于核对的此前章节：证据不足，不能自动改稿。
+// 跨章修复写回台账：从修复前台账出发，按章节顺序重新合并所有被改章节的抽取结果。
+// 不能拿某一章的完整台账快照覆盖其他章，否则目标章或中间章的新事实会丢失。
+function canonAfterRepair(
+  base: CanonFacts,
+  targetIndex: number,
+  targetResult: VerifyChapterResult,
+  crossResults: Map<number, VerifyChapterResult>,
+): CanonFacts {
+  const updates: { index: number; extracted: ExtractedFacts }[] = [];
+  for (const [index, audited] of crossResults) {
+    if (audited.extracted) {
+      updates.push({ index, extracted: audited.extracted });
+    }
+  }
+  if (targetResult.extracted) {
+    updates.push({ index: targetIndex, extracted: targetResult.extracted });
+  }
+  return updates.length
+    ? mergeChapterExtractions(base, updates, "rewrite")
+    : targetResult.canon;
+}
+
 function missingReferencedChapters(
   detail: ProjectDetail,
   currentIndex: number,
@@ -696,6 +728,8 @@ interface VerifyChapterResult {
   factConflicts?: ContinuityIssue[];
   // Repair Agent 证据不足，要求作者决定。
   needsAuthorDecision?: boolean;
+  // 本轮正文的抽取结果；跨章修复写回时用于按章重新合并台账。
+  extracted?: ExtractedFacts;
 }
 
 async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterResult> {
@@ -720,6 +754,18 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
     input.story,
     { budget: getRuntimeConfig().storyContextChars },
   ).text;
+  const unifiedLedger = buildUnifiedLedger(
+    auditCanon,
+    storyContext,
+    input.story,
+    input.chapter.index,
+  );
+  if (unifiedLedger.conflicts.length) {
+    logJob(
+      input.job,
+      `第 ${input.chapter.index} 章事实台账与剧情台账存在 ${unifiedLedger.conflicts.length} 处冲突，已按事实台账优先归并，剧情台账不再作为硬约束。`,
+    );
+  }
   const previousChapters = input.project.chapters
     .filter(
       (chapter) =>
@@ -765,18 +811,33 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         input.job,
         `第 ${input.chapter.index} 章事实抽取失败，本章不进入审校；草稿将保留，台账不更新。`,
       );
+      const extractionIssue: ContinuityIssue = {
+        severity: "critical",
+        type: "事实抽取失败",
+        evidence: "",
+        detail: `事实抽取连续 ${EXTRACTION_MAX_ATTEMPTS} 次失败，本章未经完整事实检查，不能通过：${message}`,
+      };
+      // 多轮修复后抽取失败时，currentText 是尚未审校的修复稿；
+      // 必须退回此前已验证的最佳稿，不能把未审校文本当成结果。
+      if (best) {
+        return {
+          ...best,
+          passed: false,
+          review: {
+            ...best.review,
+            continuityOk: false,
+            issues: [...best.review.issues, extractionIssue],
+            extractionOk: false,
+            extractionError: message,
+            extractionAttempts: EXTRACTION_MAX_ATTEMPTS,
+          },
+        };
+      }
       return {
         text: currentText,
         review: {
           summary: input.chapter.summary,
-          issues: [
-            {
-              severity: "critical",
-              type: "事实抽取失败",
-              evidence: "",
-              detail: `事实抽取连续 ${EXTRACTION_MAX_ATTEMPTS} 次失败，本章未经完整事实检查，不能通过：${message}`,
-            },
-          ],
+          issues: [extractionIssue],
           continuityOk: false,
           repaired: attempt > 0,
           repairAttempts: attempt,
@@ -821,6 +882,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         nextContext,
         storyContext,
         evidenceContext,
+        unifiedLedger.text,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -873,7 +935,12 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
     // 普通自动线索只作为审校提示；数据级严重矛盾（如伏笔先回收后埋设）强制保留。
-    const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
+    const issues = mergeIssues(
+      audit.issues,
+      merged.conflicts,
+      checks.hardIssues,
+      unifiedLedger.conflicts,
+    );
     const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
       (issue) => issue.severity === "critical",
     );
@@ -907,6 +974,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         memory,
         story: extracted.story,
         factConflicts,
+        extracted,
       };
     }
 
@@ -1035,18 +1103,14 @@ interface VerifyDraftChapterResult extends VerifyChapterResult {
 async function verifyDraftChapter(
   input: VerifyDraftChapterInput,
 ): Promise<VerifyDraftChapterResult> {
-  const previousContext = [
-    input.previousEnding ? `上一章结尾：\n${input.previousEnding}` : "",
-    ...input.previousSummaries.map((summary, index) => `前情摘要 ${index + 1}：${summary}`),
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  const nextContext = [
-    input.nextOpening ? `下一章开头：\n${input.nextOpening}` : "",
-    input.nextSummary ? `下一章摘要：${input.nextSummary}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const takeEnding = (text: string): string => {
+    const trimmed = text.trim();
+    return trimmed.length > 1500 ? `……${trimmed.slice(-1500)}` : trimmed;
+  };
+  const takeOpening = (text: string): string => {
+    const trimmed = text.trim();
+    return trimmed.length > 800 ? `${trimmed.slice(0, 800)}……` : trimmed;
+  };
   const auditCanon = canonForChapter(input.canon, input.chapter.index);
   const storyContext = buildStoryContext(
     input.project,
@@ -1055,6 +1119,18 @@ async function verifyDraftChapter(
     input.story,
     { budget: getRuntimeConfig().storyContextChars },
   ).text;
+  const unifiedLedger = buildUnifiedLedger(
+    auditCanon,
+    storyContext,
+    input.story,
+    input.chapter.index,
+  );
+  if (unifiedLedger.conflicts.length) {
+    logJob(
+      input.job,
+      `第 ${input.chapter.index} 章事实台账与剧情台账存在 ${unifiedLedger.conflicts.length} 处冲突，已按事实台账优先归并，剧情台账不再作为硬约束。`,
+    );
+  }
   const previousChapters = input.project.chapters
     .filter(
       (chapter) =>
@@ -1088,12 +1164,102 @@ async function verifyDraftChapter(
   let regressionScope = "";
   let causalBaselines: CausalBaseline[] = [];
   let crossTexts: Record<number, string> = { ...(input.crossChapters ?? {}) };
+
+  // 跨章修复后，相邻章正文可能已经改写；审校和补丁必须使用最新版本。
+  const liveTextAt = (
+    index: number,
+    currentText: string,
+    cross: Record<number, string>,
+  ): string => {
+    if (index === input.chapter.index) return currentText;
+    if (cross[index] !== undefined) return cross[index];
+    const chapter = input.project.chapters.find(
+      (item) => item.index === index && item.written,
+    );
+    return chapter ? chapter.content : "";
+  };
+  const neighborContextFor = (
+    currentText: string,
+    cross: Record<number, string>,
+  ) => {
+    const indices = new Set<number>();
+    for (const chapter of input.project.chapters) {
+      if (chapter.written && chapter.content.trim()) {
+        indices.add(chapter.index);
+      }
+    }
+    for (const key of Object.keys(cross)) indices.add(Number(key));
+    const previousIndex = [...indices]
+      .filter(
+        (item) => item < input.chapter.index && liveTextAt(item, currentText, cross).trim(),
+      )
+      .sort((left, right) => right - left)[0];
+    const nextIndex = [...indices]
+      .filter(
+        (item) => item > input.chapter.index && liveTextAt(item, currentText, cross).trim(),
+      )
+      .sort((left, right) => left - right)[0];
+    return {
+      previousEnding:
+        previousIndex === undefined
+          ? input.previousEnding
+          : takeEnding(liveTextAt(previousIndex, currentText, cross)) ||
+            input.previousEnding,
+      nextOpening:
+        nextIndex === undefined
+          ? input.nextOpening
+          : takeOpening(liveTextAt(nextIndex, currentText, cross)) ||
+            input.nextOpening,
+    };
+  };
+  const previousContextFor = (
+    currentText: string,
+    cross: Record<number, string>,
+  ): string => {
+    const { previousEnding } = neighborContextFor(currentText, cross);
+    return [
+      previousEnding ? `上一章结尾：\n${previousEnding}` : "",
+      ...input.previousSummaries.map(
+        (summary, index) => `前情摘要 ${index + 1}：${summary}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  };
+  const nextContextFor = (
+    currentText: string,
+    cross: Record<number, string>,
+  ): string => {
+    const { nextOpening } = neighborContextFor(currentText, cross);
+    return [
+      nextOpening ? `下一章开头：\n${nextOpening}` : "",
+      input.nextSummary ? `下一章摘要：${input.nextSummary}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  };
   let decisionReason: string | undefined;
   let decisionOptions: RepairDecisionOptionPlan[] | undefined;
   let stopReason: DraftStopReason = "max-repairs";
   let initialIssues: ContinuityIssue[] = seedIssues;
   let initialCriticalCount = countCritical(seedIssues);
   let finalCriticalCount = initialCriticalCount;
+
+  // 跨章修复的后续轮次必须用改后的正文收集证据，不能继续引用旧原文。
+  const withLiveCrossTexts = (
+    project: VerifyDraftChapterInput["project"],
+    cross: Record<number, string>,
+  ) =>
+    Object.keys(cross).length
+      ? {
+          ...project,
+          chapters: project.chapters.map((chapter) =>
+            cross[chapter.index] !== undefined
+              ? { ...chapter, content: cross[chapter.index] }
+              : chapter,
+          ),
+        }
+      : project;
 
   const fallback = (): VerifyDraftChapterResult => {
     const review =
@@ -1166,7 +1332,11 @@ async function verifyDraftChapter(
     if (comparison) {
       logJob(
         input.job,
-        `第 ${input.chapter.index} 章修复对比：严重问题 ${comparison.beforeCount}→${comparison.afterCount}（已解决 ${comparison.resolved.length}，仍存在 ${comparison.remaining.length}，新增 ${comparison.added.length}）；${stopReason === "increased" ? "问题数量增加" : stopReason === "new-critical" ? "出现新的严重问题" : "没有取得改善"}，保留最佳草稿并停止自动修复。`,
+        `第 ${input.chapter.index} 章修复对比：严重问题 ${comparison.beforeCount}→${comparison.afterCount}（已解决 ${comparison.resolved.length}，仍存在 ${comparison.remaining.length}，新增 ${comparison.added.length}）${
+          comparison.added.length
+            ? `；新增严重问题：${describeIssueBriefs(comparison.added)}`
+            : ""
+        }；${stopReason === "increased" ? "问题数量增加" : stopReason === "new-critical" ? "出现新的严重问题" : "没有取得改善"}，保留最佳草稿并停止自动修复。`,
       );
     }
   };
@@ -1189,7 +1359,7 @@ async function verifyDraftChapter(
       .map((anchor) => anchor.trim())
       .filter(Boolean);
     const allEvidence = collectRepairEvidence({
-      project: input.project,
+      project: withLiveCrossTexts(input.project, crossTexts),
       chapter: input.chapter,
       issues: stagedIssues,
       characters: input.characters,
@@ -1219,27 +1389,65 @@ async function verifyDraftChapter(
       regressionScope: string;
       causalBaselines: CausalBaseline[];
     };
+    const liveCrossContext = (chapters: Record<number, string>): string =>
+      Object.keys(chapters).length
+        ? Object.entries(chapters)
+            .map(([index, text]) => `第 ${index} 章：\n${text.slice(0, 6000)}`)
+            .join("\n\n")
+        : input.crossChapterContext ?? "";
+    // 前一轮可能已经改写了方案锚点；后续轮次不能再把旧锚点喂给模型。
+    const refreshAuthorDirective = (
+      directive: string | undefined,
+      text: string,
+      chapters: Record<number, string>,
+    ): string | undefined => {
+      if (!directive) return undefined;
+      const liveTexts = [text, ...Object.values(chapters)];
+      let dropped = false;
+      const lines = directive.split("\n").filter((line) => {
+        const match = /^-\s*(.+)$/u.exec(line.trim());
+        if (!match) return true;
+        const anchor = match[1].trim();
+        if (!anchor || liveTexts.some((item) => textContainsAnchor(item, anchor))) {
+          return true;
+        }
+        dropped = true;
+        return false;
+      });
+      if (dropped) {
+        lines.push(
+          "注意：方案原始锚点若已不在当前正文中，说明前序修改已改写它；必须从当前正文逐字重新选择锚点，不得继续使用旧锚点。",
+        );
+      }
+      return lines.join("\n");
+    };
     const applyPlan = async (
       issues: ContinuityIssue[],
       text: string,
       chaptersForCall: Record<number, string>,
       evidence: string,
+      feedback = "",
     ): Promise<PlanResult> => {
+      const planContext = neighborContextFor(text, chaptersForCall);
       const plan = await repairChapterPatches(
         input.meta,
         input.chapter,
         text,
         issues,
         auditCanon,
-        input.previousEnding,
-        input.nextOpening,
+        planContext.previousEnding,
+        planContext.nextOpening,
         input.rewriteInstruction,
-        "",
+        feedback,
         {
           draftRepair: true,
           evidenceContext: evidence,
-          authorDirective: input.authorDirective,
-          crossChapterContext: input.crossChapterContext,
+          authorDirective: refreshAuthorDirective(
+            input.authorDirective,
+            text,
+            chaptersForCall,
+          ),
+          crossChapterContext: liveCrossContext(chaptersForCall),
           affectedChapters: [
             input.chapter.index,
             ...Object.keys(chaptersForCall).map(Number),
@@ -1310,11 +1518,11 @@ async function verifyDraftChapter(
             // 交给本轮结束后的审校按新稿重新判断。
             // 审校证据常用“……”拼接多个片段，只要有一段还能在稿子里找到就仍按有效处理。
             const evidenceParts = issue.evidence
-              .split(/…+|\.{3,}|⋯+/u)
+              .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
               .map((part) => part.trim())
               .filter((part) => part.length >= 2);
             const evidenceStillPresent = evidenceParts.length
-              ? evidenceParts.some((part) => seqText.includes(part))
+              ? evidenceParts.some((part) => textContainsAnchor(seqText, part))
               : true;
             if (issue.evidence.trim() && !evidenceStillPresent) {
               logJob(
@@ -1324,7 +1532,7 @@ async function verifyDraftChapter(
               continue;
             }
             const issueEvidence = collectRepairEvidence({
-              project: input.project,
+              project: withLiveCrossTexts(input.project, seqCross),
               chapter: input.chapter,
               issues: [issue],
               characters: input.characters,
@@ -1337,19 +1545,44 @@ async function verifyDraftChapter(
             } catch (error) {
               if (error instanceof JobCancelledError) throw error;
               if (error instanceof RepairNeedsAuthorDecisionError) throw error;
-              // 单个问题的补丁或方案没通过校验时只跳过该问题，其他问题继续修；
-              // 本轮改完后的审校会给出最终结论。
+              // 单个问题的补丁或方案没通过校验时，带着失败原因重试一次；
+              // 仍失败才跳过该问题，其他问题继续修。
               if (
                 error instanceof RepairPatchError ||
                 error instanceof RepairPlanRejectedError
               ) {
                 logJob(
                   input.job,
-                  `第 ${input.chapter.index} 章第 ${nextRound} 轮问题 ${issue.id} 的修改未通过校验，跳过并继续处理其他问题：${error.message}`,
+                  `第 ${input.chapter.index} 章第 ${nextRound} 轮问题 ${issue.id} 的修改未通过校验，携带校验错误重试一次：${error.message}`,
                 );
-                continue;
+                try {
+                  one = await applyPlan(
+                    [issue],
+                    seqText,
+                    seqCross,
+                    issueEvidence,
+                    `上一版修复未通过程序校验：${error.message}\n请严格只修改授权段落，锚点必须逐字复制当前正文，不要新增设定或改写无关内容。`,
+                  );
+                } catch (retryError) {
+                  if (retryError instanceof JobCancelledError) throw retryError;
+                  if (retryError instanceof RepairNeedsAuthorDecisionError) {
+                    throw retryError;
+                  }
+                  if (
+                    retryError instanceof RepairPatchError ||
+                    retryError instanceof RepairPlanRejectedError
+                  ) {
+                    logJob(
+                      input.job,
+                      `第 ${input.chapter.index} 章第 ${nextRound} 轮问题 ${issue.id} 的重试仍未通过校验，跳过并继续处理其他问题：${retryError.message}`,
+                    );
+                    continue;
+                  }
+                  throw retryError;
+                }
+              } else {
+                throw error;
               }
-              throw error;
             }
             logJob(
               input.job,
@@ -1475,6 +1708,7 @@ async function verifyDraftChapter(
       extracted,
       "ai",
     );
+    const liveNeighbor = neighborContextFor(currentText, crossTexts);
     const checks = reviewSuspicions({
       project: input.project,
       chapter: input.chapter,
@@ -1482,7 +1716,7 @@ async function verifyDraftChapter(
       canon: auditCanon,
       memory: input.memory,
       story: input.story,
-      previousEnding: input.previousEnding,
+      previousEnding: liveNeighbor.previousEnding,
       previousChapters,
       extracted: extracted.story,
       chapterMemory,
@@ -1496,11 +1730,12 @@ async function verifyDraftChapter(
         input.project.characters,
         input.chapter,
         currentText,
-        previousContext,
+        previousContextFor(currentText, crossTexts),
         checks.suspicions,
-        nextContext,
+        nextContextFor(currentText, crossTexts),
         storyContext,
         evidenceContext,
+        unifiedLedger.text,
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -1529,7 +1764,12 @@ async function verifyDraftChapter(
       auditCanon === input.canon
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
-    const issues = mergeIssues(audit.issues, merged.conflicts, checks.hardIssues);
+    const issues = mergeIssues(
+      audit.issues,
+      merged.conflicts,
+      checks.hardIssues,
+      unifiedLedger.conflicts,
+    );
     const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
       (issue) => issue.severity === "critical",
     );
@@ -2125,6 +2365,15 @@ async function runRepair(
   source: "audit" | "review" = "audit",
 ): Promise<boolean> {
   const detail = await getProjectDetail(job.slug);
+  const staleChapters = [...(detail.staleChapters ?? [])].sort((a, b) => a - b);
+  if (staleChapters.length) {
+    job.result = `已暂停：第 ${staleChapters.join("、")} 章正文被手动修改，台账/记忆可能过期`;
+    logJob(
+      job,
+      `检测到第 ${staleChapters.join("、")} 章正文与入库哈希不一致（可能被手动修改）；旧审校、决策、台账和记忆都不可信，未执行修复。请先重建事实台账/剧情记忆，或通过页面重新保存这些章节后再修复。`,
+    );
+    return true;
+  }
   const requestedSet = new Set(requested);
   const targets = detail.chapters
     .filter(
@@ -2362,12 +2611,29 @@ async function runRepair(
       continue;
     }
 
-    const decisionOption =
+    let decisionOption =
       decision &&
       decision.chapterIndex === target.index &&
       decision.chosenIndex !== undefined
         ? decision.options[decision.chosenIndex]
         : undefined;
+    if (decisionOption) {
+      const optionErrors = validateRepairDecisionOption(
+        decisionOption,
+        target.index,
+        detail.chapters.map((chapter) => ({
+          index: chapter.index,
+          content: chapter.content,
+        })),
+      );
+      if (optionErrors.length) {
+        logJob(
+          job,
+          `第 ${target.index} 章的已确认方案不可执行，已作废：${optionErrors.join("；")}`,
+        );
+        decisionOption = undefined;
+      }
+    }
     if (decisionOption) {
       logJob(
         job,
@@ -2547,6 +2813,9 @@ async function runRepair(
           );
         }
         for (const batch of batches) {
+          if (batch.chapterIndex !== target.index) {
+            crossChapters[batch.chapterIndex] = batch.text;
+          }
           logPatchBatch(job, batch.chapterIndex, batch);
         }
         changedChapters.push(...batches);
@@ -2602,8 +2871,44 @@ async function runRepair(
     }
     if (!text.trim()) throw new Error(`第 ${target.index} 章定点修复返回空正文`);
 
+    // 跨章补丁可能改写相邻章；审校必须使用改后的上一章结尾/下一章开头。
+    const liveTextAt = (index: number, currentText: string): string => {
+      if (index === target.index) return currentText;
+      if (crossChapters[index] !== undefined) return crossChapters[index];
+      const chapter = detail.chapters.find(
+        (item) => item.index === index && item.written,
+      );
+      return chapter ? contentOf(chapter) : "";
+    };
+    const neighborContext = (index: number, currentText: string) => {
+      const indices = new Set<number>();
+      for (const chapter of detail.chapters) {
+        if (chapter.written && contentOf(chapter).trim()) {
+          indices.add(chapter.index);
+        }
+      }
+      for (const key of Object.keys(crossChapters)) indices.add(Number(key));
+      const previousIndex = [...indices]
+        .filter((item) => item < index && liveTextAt(item, currentText).trim())
+        .sort((left, right) => right - left)[0];
+      const nextIndex = [...indices]
+        .filter((item) => item > index && liveTextAt(item, currentText).trim())
+        .sort((left, right) => left - right)[0];
+      return {
+        previousEnding:
+          previousIndex === undefined
+            ? ""
+            : takeEnding(liveTextAt(previousIndex, currentText)),
+        nextOpening:
+          nextIndex === undefined
+            ? ""
+            : takeOpening(liveTextAt(nextIndex, currentText)),
+      };
+    };
+
     // 3) 独立审校候选稿：只审校，不再自动续修，确保写回的正是被验收的文本。
     logJob(job, `第 ${target.index} 章候选稿完成，开始独立审校…`);
+    const targetContext = neighborContext(target.index, text);
     const result = await verifyChapter({
       job,
       project: detail,
@@ -2615,9 +2920,9 @@ async function runRepair(
       canon,
       memory,
       story,
-      previousEnding,
+      previousEnding: targetContext.previousEnding,
       previousSummaries: priorSummaries.slice(-2),
-      nextOpening,
+      nextOpening: targetContext.nextOpening,
       nextSummary,
       mode: "rewrite",
       rewriteInstruction: `根据${sourceLabel}做定点修复。`,
@@ -2748,7 +3053,7 @@ async function runRepair(
               .map((issue) => issue.id)
               .join("、")}；不得重新处理已解决的原问题：${
               protectedIds.join("、") || "无"
-            }；不得修改第一轮授权锚点之外的段落。`,
+            }；只有与新增问题直接相关、且能在当前正文中唯一定位的段落可以修改，不要重做已解决的原问题。`,
           ]
             .filter(Boolean)
             .join("\n");
@@ -2814,6 +3119,7 @@ async function runRepair(
             continue;
           }
           logJob(job, `第 ${target.index} 章第二轮候选稿完成，重新独立审校…`);
+          const secondContext = neighborContext(target.index, candidateText);
           const second = await verifyChapter({
             job,
             project: detail,
@@ -2825,9 +3131,9 @@ async function runRepair(
             canon,
             memory,
             story,
-            previousEnding,
+            previousEnding: secondContext.previousEnding,
             previousSummaries: priorSummaries.slice(-2),
-            nextOpening,
+            nextOpening: secondContext.nextOpening,
             nextSummary,
             mode: "rewrite",
             rewriteInstruction: "第二轮定点修复后的独立审校。",
@@ -2963,6 +3269,7 @@ async function runRepair(
         job,
         `第 ${target.index} 章按方案修改了第 ${batch.chapterIndex} 章，开始独立审校…`,
       );
+      const crossContext = neighborContext(batch.chapterIndex, candidateText);
       const audited = await verifyChapter({
         job,
         project: detail,
@@ -2974,9 +3281,9 @@ async function runRepair(
         canon,
         memory,
         story,
-        previousEnding: "",
+        previousEnding: crossContext.previousEnding,
         previousSummaries: [],
-        nextOpening: "",
+        nextOpening: crossContext.nextOpening,
         nextSummary: "",
         mode: "rewrite",
         rewriteInstruction: "跨章根因修复后的独立审校。",
@@ -3002,14 +3309,56 @@ async function runRepair(
         crossRejected = true;
         break;
       }
+      // 跨章章也必须做因果回归，不能只做普通审校。
+      let crossRegression: RegressionAuditResult;
+      try {
+        crossRegression = await auditRepairRegression(
+          detail.meta,
+          canonForChapter(canon, batch.chapterIndex),
+          detail.characters,
+          crossPlan,
+          sourceChapter.content,
+          batch.text,
+          evidence.text,
+          crossContext.previousEnding,
+          crossContext.nextOpening,
+          regressionScope,
+          causalBaselines,
+        );
+      } catch (error) {
+        if (error instanceof JobCancelledError) throw error;
+        const draft = await saveRejectedDraft(job.slug, {
+          index: target.index,
+          content: candidateText,
+          mode: "rewrite",
+          reason: `跨章修改第 ${batch.chapterIndex} 章后回归审校失败，未采用任何修改`,
+          review: result.review,
+        });
+        paused = true;
+        job.result = `已暂停：第 ${batch.chapterIndex} 章跨章回归审校未完成`;
+        logJob(
+          job,
+          `第 ${batch.chapterIndex} 章跨章修改后的回归审校失败（不是正文问题），所有正文未改动；候选稿保存在 ${draft.path}，已暂停。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      const crossRegressionCritical = crossRegression.issues.filter(
+        (issue) => issue.severity === "critical",
+      );
       const crossAcceptance = evaluateRepair({
         before: crossBaselines.get(batch.chapterIndex) ?? [],
-        after: audited.review.issues,
+        after: [...audited.review.issues, ...crossRegressionCritical],
         characters: detail.characters,
         extractionOk: true,
         auditFailed: false,
-        factConflicts: audited.factConflicts,
+        factConflicts: [
+          ...(audited.factConflicts ?? []),
+          ...crossRegressionCritical,
+        ],
         allowNoBaseline: true,
+        causalChanges: crossRegression.causalChanges,
+        causalVerified: crossRegression.causalVerified,
       });
       if (!crossAcceptance.accepted) {
         const draft = await saveRejectedDraft(job.slug, {
@@ -3036,6 +3385,7 @@ async function runRepair(
 
     // 5) 修复后回归审校：来源章节因果、相邻章节、人物时间线和伏笔生命周期。
     logJob(job, `第 ${target.index} 章通过问题验收，执行修复后回归审校…`);
+    const regressionContext = neighborContext(target.index, candidateText);
     let regression: RegressionAuditResult;
     try {
       regression = await auditRepairRegression(
@@ -3046,8 +3396,8 @@ async function runRepair(
         target.content,
         candidateText,
         evidence.text,
-        previousEnding,
-        nextOpening,
+        regressionContext.previousEnding,
+        regressionContext.nextOpening,
         regressionScope,
         causalBaselines,
       );
@@ -3179,6 +3529,17 @@ async function runRepair(
     if (crossHashConflict) continue;
 
     // 7) 只有通过统一验收、回归审校和哈希校验才备份并写回正式正文。
+    // 状态标记推迟到台账/记忆/计划全部保存成功之后，避免中途失败时先删掉草稿。
+    const pendingMarks: Array<{
+      index: number;
+      text: string;
+      summary: string;
+      review: ReviewResult;
+      backupPath: string;
+      cross: boolean;
+      originalText: string;
+      title: string;
+    }> = [];
     for (const batch of changedCross) {
       const sourceChapter = detail.chapters.find(
         (item) => item.index === batch.chapterIndex,
@@ -3204,23 +3565,16 @@ async function runRepair(
         note: "跨章根因修复（作者确认方案）",
       });
       repaired.set(batch.chapterIndex, batch.text);
-      await markChapterWritten(
-        job.slug,
-        batch.chapterIndex,
-        audited.review.summary,
-        audited.review,
-      );
-      await markChapterRepaired(job.slug, batch.chapterIndex);
-      markDetailChapterWritten(
-        detail,
-        batch.chapterIndex,
-        batch.text,
-        audited.review.summary,
-      );
-      logJob(
-        job,
-        `第 ${batch.chapterIndex} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${crossBackup}。`,
-      );
+      pendingMarks.push({
+        index: batch.chapterIndex,
+        text: batch.text,
+        summary: audited.review.summary,
+        review: audited.review,
+        backupPath: crossBackup,
+        cross: true,
+        originalText: sourceChapter.content,
+        title: crossPlan.title,
+      });
     }
     const backupPath = await saveRepairBackup(job.slug, target.index, target.content);
 
@@ -3231,15 +3585,24 @@ async function runRepair(
       note: `定点修复（${sourceLabel}）`,
     });
     repaired.set(target.index, candidateText);
-    await markChapterWritten(job.slug, target.index, result.review.summary, result.review);
-    await markChapterRepaired(job.slug, target.index);
-    markDetailChapterWritten(detail, target.index, candidateText, result.review.summary);
+    pendingMarks.push({
+      index: target.index,
+      text: candidateText,
+      summary: result.review.summary,
+      review: result.review,
+      backupPath,
+      cross: false,
+      originalText: target.content,
+      title: chapterPlan.title,
+    });
 
-    let candidateCanon = result.canon;
-    for (const batch of changedCross) {
-      const audited = crossResults.get(batch.chapterIndex);
-      if (audited) candidateCanon = audited.canon;
-    }
+    try {
+    const candidateCanon = canonAfterRepair(
+      canon,
+      target.index,
+      result,
+      crossResults,
+    );
     const reconciled = reconcileCanonWithChapters(candidateCanon, [
       ...changedCross.map((batch) => ({
         index: batch.chapterIndex,
@@ -3285,6 +3648,33 @@ async function runRepair(
       planLedger = planReconciled.ledger;
     }
     await savePlanLedger(job.slug, planLedger);
+    } catch (error) {
+      // 台账/记忆/计划保存失败时，把已写入的正文恢复原样，避免正文与台账不一致。
+      for (const item of pendingMarks) {
+        try {
+          await writeChapterFile(job.slug, item.index, item.originalText, {
+            source: "ai-repair",
+            title: item.title,
+            summary: item.summary,
+            note: "写回失败回滚",
+          });
+        } catch {
+          // 回滚失败时保留原始错误，由任务层报告。
+        }
+      }
+      throw error;
+    }
+    for (const item of pendingMarks) {
+      await markChapterWritten(job.slug, item.index, item.summary, item.review);
+      await markChapterRepaired(job.slug, item.index);
+      markDetailChapterWritten(detail, item.index, item.text, item.summary);
+      logJob(
+        job,
+        item.cross
+          ? `第 ${item.index} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${item.backupPath}。`
+          : `第 ${item.index} 章候选稿通过验收并写回，原稿备份在 ${item.backupPath}。`,
+      );
+    }
     remainingCritical += countCritical(result.review.issues);
     repairedCount += 1;
     logJob(
@@ -3323,6 +3713,16 @@ async function runRepair(
 async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
   const detail = await getProjectDetail(job.slug);
   const requestedSet = new Set(requested);
+  const staleChapters = new Set(detail.staleChapters ?? []);
+  if (staleChapters.size) {
+    const stale = [...staleChapters].sort((a, b) => a - b);
+    job.result = `已暂停：第 ${stale.join("、")} 章正文被手动修改，台账/记忆可能过期`;
+    logJob(
+      job,
+      `检测到第 ${stale.join("、")} 章正文与入库哈希不一致（可能被手动修改）；旧审校、决策、台账和记忆都不可信，未执行修复。请先重建事实台账/剧情记忆，或通过页面重新保存这些章节后再修复。`,
+    );
+    return true;
+  }
   const drafts = Object.values(detail.state.rejectedDrafts ?? {})
     .filter((draft) => requestedSet.has(draft.index))
     .sort((a, b) => a.index - b.index);
@@ -3422,9 +3822,27 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         issue.type !== "审校失败",
     );
     const seedFilter = filterSeedIssues(seedCandidates, retrieved.content);
+    // 旧审校引用了被手动改过的章节时，整条种子都不可信，必须重新审校。
+    const seedReferencesStale = savedIssues.some((issue) => {
+      if (issue.sourceChapter && staleChapters.has(issue.sourceChapter)) return true;
+      const text = `${issue.detail} ${issue.evidence} ${issue.sourceEvidence ?? ""}`;
+      return [...text.matchAll(/第\s*(\d+)\s*章/gu)].some((match) =>
+        staleChapters.has(Number.parseInt(match[1], 10)),
+      );
+    });
     // 只沿用仍能在当前草稿中落地的严重问题：过期问题直接忽略，
     // 避免一条过期记录就丢掉全部有效问题、把整稿重新审一遍（重审会换一批新问题）。
-    const canSeed = draft.review?.extractionOk !== false && seedFilter.active.length > 0;
+    const canSeed =
+      !seedReferencesStale &&
+      !staleChapters.has(requestedDraft.index) &&
+      draft.review?.extractionOk !== false &&
+      seedFilter.active.length > 0;
+    if (seedReferencesStale) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章旧审校引用了已被手动修改的章节，旧问题全部作废，先基于当前正文重新审校。`,
+      );
+    }
     // 被忽略的过期问题不能再跟着旧审校记录存回去，否则修复失败时页面会复读已经失效的问题。
     const staleKeys = new Set(
       seedFilter.stale.map(
@@ -3467,12 +3885,42 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
     const decision = job.params.decisionId
       ? await getRepairDecision(job.slug, job.params.decisionId)
       : undefined;
-    const decisionOption =
+    let decisionOption =
       decision &&
       decision.chapterIndex === requestedDraft.index &&
       decision.chosenIndex !== undefined
         ? decision.options[decision.chosenIndex]
         : undefined;
+    if (
+      decisionOption &&
+      decisionOption.affectedChapters.some((index) => staleChapters.has(index))
+    ) {
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章的已确认方案引用了被手动修改的章节，旧方案作废，重新审校后再决定。`,
+      );
+      decisionOption = undefined;
+    }
+    if (decisionOption) {
+      const optionErrors = validateRepairDecisionOption(
+        decisionOption,
+        requestedDraft.index,
+        [
+          ...detail.chapters.map((chapter) => ({
+            index: chapter.index,
+            content: chapter.content,
+          })),
+          { index: requestedDraft.index, content: retrieved.content },
+        ],
+      );
+      if (optionErrors.length) {
+        logJob(
+          job,
+          `第 ${requestedDraft.index} 章的已确认方案不可执行，已作废：${optionErrors.join("；")}`,
+        );
+        decisionOption = undefined;
+      }
+    }
     const crossChapters: Record<number, string> = {};
     const crossAnchors: Record<number, string[]> = {};
     const crossBaselines = new Map<number, ContinuityIssue[]>();
@@ -3646,7 +4094,11 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       const critical = countCritical(result.review.issues);
       // 迭代过程的“最后对比”和最终文本的验收对比可能不同，两者都要保留。
       const comparisonText = result.comparison
-        ? `严重问题 ${result.initialCriticalCount}→${result.finalCriticalCount}；最后对比：已解决 ${result.comparison.resolved.length}，仍存在 ${result.comparison.remaining.length}，新增 ${result.comparison.added.length}`
+        ? `严重问题 ${result.initialCriticalCount}→${result.finalCriticalCount}；最后对比：已解决 ${result.comparison.resolved.length}，仍存在 ${result.comparison.remaining.length}，新增 ${result.comparison.added.length}${
+            result.comparison.added.length
+              ? `；新增严重问题：${describeIssueBriefs(result.comparison.added)}`
+              : ""
+          }`
         : `仍有 ${critical} 个严重问题`;
       const reason = result.needsAuthorDecision
         ? `自动修复暂停：修复证据不足，需要作者决定（${comparisonText}）`
@@ -3676,6 +4128,44 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       continue;
     }
 
+    // 跨章修复后，相邻章正文可能已经改写；后续审校必须使用最新版本。
+    const liveTextAt = (index: number, currentText: string): string => {
+      if (index === requestedDraft.index) return currentText;
+      if (result.crossTexts[index] !== undefined) return result.crossTexts[index];
+      const chapter = detail.chapters.find(
+        (item) => item.index === index && item.written,
+      );
+      return chapter ? chapter.content : "";
+    };
+    const neighborContext = (index: number, currentText: string) => {
+      const indices = new Set<number>();
+      for (const chapter of detail.chapters) {
+        if (chapter.written && chapter.content.trim()) {
+          indices.add(chapter.index);
+        }
+      }
+      for (const key of Object.keys(result.crossTexts)) {
+        indices.add(Number(key));
+      }
+      const previousIndex = [...indices]
+        .filter((item) => item < index && liveTextAt(item, currentText).trim())
+        .sort((left, right) => right - left)[0];
+      const nextIndex = [...indices]
+        .filter((item) => item > index && liveTextAt(item, currentText).trim())
+        .sort((left, right) => left - right)[0];
+      return {
+        previousEnding:
+          previousIndex === undefined
+            ? previousEnding
+            : takeEnding(liveTextAt(previousIndex, currentText)) || previousEnding,
+        nextOpening:
+          nextIndex === undefined
+            ? nextOpening
+            : takeOpening(liveTextAt(nextIndex, currentText)) || nextOpening,
+      };
+    };
+    const regressionContext = neighborContext(requestedDraft.index, result.text);
+
     // 修复后回归审校：不能只看修改段落，还要核对来源章节因果、相邻章节、时间线与伏笔。
     logJob(job, `第 ${requestedDraft.index} 章草稿通过问题验收，执行修复后回归审校…`);
     const regressionEvidence = collectRepairEvidence({
@@ -3696,8 +4186,8 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         retrieved.content,
         result.text,
         regressionEvidence.text,
-        previousEnding,
-        nextOpening,
+        regressionContext.previousEnding,
+        regressionContext.nextOpening,
         result.regressionScope,
         result.causalBaselines,
       );
@@ -3798,6 +4288,7 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         job,
         `第 ${requestedDraft.index} 章按方案修改了第 ${index} 章，开始独立审校…`,
       );
+      const crossContext = neighborContext(index, result.text);
       const audited = await verifyChapter({
         job,
         project: detail,
@@ -3809,9 +4300,9 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         canon,
         memory,
         story,
-        previousEnding: "",
+        previousEnding: crossContext.previousEnding,
         previousSummaries: [],
-        nextOpening: "",
+        nextOpening: crossContext.nextOpening,
         nextSummary: "",
         mode: "rewrite",
         rewriteInstruction: "跨章根因修复后的独立审校。",
@@ -3838,14 +4329,56 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         crossRejected = true;
         break;
       }
+      let crossRegression: RegressionAuditResult;
+      try {
+        crossRegression = await auditRepairRegression(
+          detail.meta,
+          canonForChapter(canon, index),
+          detail.characters,
+          crossPlan,
+          sourceChapter.content,
+          candidateText,
+          regressionEvidence.text,
+          crossContext.previousEnding,
+          crossContext.nextOpening,
+          result.regressionScope,
+          result.causalBaselines,
+        );
+      } catch (error) {
+        if (error instanceof JobCancelledError) throw error;
+        paused = true;
+        const updated = await saveRejectedDraft(job.slug, {
+          index: requestedDraft.index,
+          content: result.text,
+          mode: draft.mode,
+          reason: `跨章修改第 ${index} 章后回归审校失败，未采用任何修改`,
+          review: result.review,
+        });
+        detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+        job.result = `已暂停：第 ${index} 章跨章回归审校未完成`;
+        logJob(
+          job,
+          `第 ${index} 章跨章修改后的回归审校失败（不是正文问题），草稿与所有正文均未改动；已暂停。`,
+        );
+        crossRejected = true;
+        break;
+      }
+      const crossRegressionCritical = crossRegression.issues.filter(
+        (issue) => issue.severity === "critical",
+      );
       const crossAcceptance = evaluateRepair({
         before: crossBaselines.get(index) ?? [],
-        after: audited.review.issues,
+        after: [...audited.review.issues, ...crossRegressionCritical],
         characters: detail.characters,
         extractionOk: true,
         auditFailed: false,
-        factConflicts: audited.factConflicts,
+        factConflicts: [
+          ...(audited.factConflicts ?? []),
+          ...crossRegressionCritical,
+        ],
         allowNoBaseline: true,
+        causalChanges: crossRegression.causalChanges,
+        causalVerified: crossRegression.causalVerified,
       });
       if (!crossAcceptance.accepted) {
         const updated = await saveRejectedDraft(job.slug, {
@@ -3893,6 +4426,35 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       );
       continue;
     }
+    // 草稿本身也可能在修复期间被重新生成或手改；采用前必须确认仍是同一份内容。
+    let latestDraft: Awaited<ReturnType<typeof getRejectedDraftContent>>;
+    try {
+      latestDraft = await getRejectedDraftContent(
+        job.slug,
+        requestedDraft.index,
+      );
+    } catch {
+      latestDraft = null;
+    }
+    if (
+      !latestDraft ||
+      hashText(latestDraft.content) !== hashText(retrieved.content)
+    ) {
+      const updated = await saveRejectedDraft(job.slug, {
+        index: requestedDraft.index,
+        content: result.text,
+        mode: draft.mode,
+        reason: "修复期间草稿已被修改或替换，未采用这次修复结果；请基于最新草稿重新处理",
+        review: result.review,
+      });
+      detail.state.rejectedDrafts[String(requestedDraft.index)] = updated;
+      failed += 1;
+      logJob(
+        job,
+        `第 ${requestedDraft.index} 章修复期间草稿已被修改或替换，未采用这次修复结果；最新修复稿保存在 ${updated.path}。`,
+      );
+      continue;
+    }
     let crossHashConflict = false;
     for (const index of changedCross) {
       const live = latest.chapters.find((chapter) => chapter.index === index);
@@ -3917,6 +4479,17 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
     if (crossHashConflict) continue;
 
     // 跨章修改先写回根因章节，再写回目标章节。
+    // 状态标记和草稿删除推迟到台账/记忆/计划全部保存成功之后。
+    const pendingMarks: Array<{
+      index: number;
+      text: string;
+      summary: string;
+      review: ReviewResult;
+      backupPath: string;
+      cross: boolean;
+      originalText: string;
+      title: string;
+    }> = [];
     for (const index of changedCross) {
       const sourceChapter = detail.chapters.find((item) => item.index === index);
       const audited = crossResults.get(index);
@@ -3935,13 +4508,16 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
         summary: audited.review.summary,
         note: "跨章根因修复（作者确认方案）",
       });
-      await markChapterWritten(job.slug, index, audited.review.summary, audited.review);
-      await markChapterRepaired(job.slug, index);
-      markDetailChapterWritten(detail, index, result.crossTexts[index], audited.review.summary);
-      logJob(
-        job,
-        `第 ${index} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${crossBackup}。`,
-      );
+      pendingMarks.push({
+        index,
+        text: result.crossTexts[index],
+        summary: audited.review.summary,
+        review: audited.review,
+        backupPath: crossBackup,
+        cross: true,
+        originalText: sourceChapter.content,
+        title: crossPlan.title,
+      });
     }
 
     const wasWritten = Boolean(existing?.written && existing.content.trim());
@@ -3954,25 +4530,24 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       summary: result.review.summary,
       note: "从未采用草稿修复",
     });
-    await markChapterWritten(
-      job.slug,
-      requestedDraft.index,
-      result.review.summary,
-      result.review,
-    );
-    markDetailChapterWritten(
-      detail,
-      requestedDraft.index,
-      result.text,
-      result.review.summary,
-    );
-    delete detail.state.rejectedDrafts[String(requestedDraft.index)];
+    pendingMarks.push({
+      index: requestedDraft.index,
+      text: result.text,
+      summary: result.review.summary,
+      review: result.review,
+      backupPath,
+      cross: false,
+      originalText: existing?.content ?? "",
+      title: chapterPlan.title,
+    });
 
-    let candidateCanon = result.canon;
-    for (const index of changedCross) {
-      const audited = crossResults.get(index);
-      if (audited) candidateCanon = audited.canon;
-    }
+    try {
+    const candidateCanon = canonAfterRepair(
+      canon,
+      requestedDraft.index,
+      result,
+      crossResults,
+    );
     const changedContents = [
       ...changedCross.map((index) => ({
         index,
@@ -4025,6 +4600,35 @@ async function runDraftRepair(job: Job, requested: number[]): Promise<boolean> {
       planLedger = planReconciled.ledger;
     }
     await savePlanLedger(job.slug, planLedger);
+    } catch (error) {
+      for (const item of pendingMarks) {
+        try {
+          await writeChapterFile(job.slug, item.index, item.originalText, {
+            source: "ai-repair",
+            title: item.title,
+            summary: item.summary,
+            note: "写回失败回滚",
+          });
+        } catch {
+          // 回滚失败时保留原始错误，由任务层报告。
+        }
+      }
+      throw error;
+    }
+    for (const item of pendingMarks) {
+      await markChapterWritten(job.slug, item.index, item.summary, item.review);
+      await markChapterRepaired(job.slug, item.index);
+      markDetailChapterWritten(detail, item.index, item.text, item.summary);
+      logJob(
+        job,
+        item.cross
+          ? `第 ${item.index} 章按作者确认方案完成跨章修复并写回，原稿备份在 ${item.backupPath}。`
+          : `第 ${item.index} 章草稿修复采用后已写回${
+              item.backupPath ? `，原正文备份在 ${item.backupPath}` : ""
+            }。`,
+      );
+    }
+    delete detail.state.rejectedDrafts[String(requestedDraft.index)];
 
     adopted += 1;
     const repairedNote = result.review.repaired

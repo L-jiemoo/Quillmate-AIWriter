@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateRepair } from "@/lib/repair-acceptance";
 import {
+  causalVerificationComplete,
   evaluateCausalChanges,
   isCausalBaselineComplete,
   normalizeCausalBaseline,
@@ -126,5 +127,17 @@ describe("因果分类与统一验收", () => {
     const expansion = accept([change("CAUSAL_EXPANSION")], true);
     expect(expansion.status).toBe("ACCEPTED");
     expect(expansion.leftovers.join("")).toContain("因果细节");
+  });
+});
+
+describe("因果验证完整性", () => {
+  it("有基线时，空数组只有模型明确确认才算完成", () => {
+    expect(causalVerificationComplete([], true, 1, undefined)).toBe(false);
+    expect(causalVerificationComplete([], true, 0, undefined)).toBe(true);
+    expect(causalVerificationComplete([], true, 1, true)).toBe(true);
+    expect(causalVerificationComplete([], false, 0, true)).toBe(false);
+    expect(
+      causalVerificationComplete([change("SAFE_REPHRASE")], true, 1, undefined),
+    ).toBe(true);
   });
 });

@@ -693,6 +693,8 @@ export interface ProjectDetail {
   publish: ProjectPublish;
   publishLedger: PublishLedger;
   pendingChapters: number;
+  // 正文文件哈希与入库时不一致：说明被手动改过，派生台账/记忆/审校可能过期。
+  staleChapters?: number[];
 }
 
 export interface ProjectSummary {

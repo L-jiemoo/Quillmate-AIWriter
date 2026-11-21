@@ -1,3 +1,4 @@
+import { stripOuterQuotes } from "./repair-patch";
 import type {
   CanonFacts,
   ChapterPlan,
@@ -293,12 +294,23 @@ export function collectRepairEvidence(input: {
   addCandidate(input.chapter.index + 1, "下一章衔接", []);
 
   // 5. 其他包含问题证据片段的章节。
+  // 审校证据常用“……”拼接多个位置的原文，不能把整串当成一句去找。
   for (const issue of input.issues) {
-    const evidence = (issue.sourceEvidence || issue.evidence).trim();
-    if (evidence.length < 6) continue;
+    const fragments = (issue.sourceEvidence || issue.evidence)
+      .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
+      .map((part) => stripOuterQuotes(part))
+      .filter((part) => part.length >= 4);
+    const candidatesForIssue = fragments.length
+      ? fragments
+      : [stripOuterQuotes((issue.sourceEvidence || issue.evidence).trim())].filter(
+          (part) => part.length >= 6,
+        );
     for (const chapter of written.values()) {
-      if (chapter.content.includes(evidence)) {
-        addCandidate(chapter.index, "包含问题原文片段", [evidence]);
+      const matched = candidatesForIssue.find((part) =>
+        chapter.content.includes(part),
+      );
+      if (matched) {
+        addCandidate(chapter.index, "包含问题原文片段", [matched]);
       }
     }
   }

@@ -210,6 +210,34 @@ describe("修复方案证据校验", () => {
     expect(message).toContain("不存在的问题编号");
   });
 
+  it("问题证据用省略号跨段拼接时也能落到正文", () => {
+    const chapter = [
+      "第一段。",
+      "角色乙在办公室里接电话。",
+      "中间叙述。",
+      "角色甲在门口等他。",
+      "结尾。",
+    ].join("\n");
+    const issue: ContinuityIssue = {
+      severity: "critical",
+      type: "时间线",
+      evidence: "角色乙在办公室里接电话。……角色甲在门口等他。",
+      detail: "与第 4 章冲突。",
+    };
+    expect(() =>
+      validateRepairPlan(
+        plan(
+          planIssue({
+            evidence: "事实台账：状态完整",
+            locations: ["角色乙在办公室里接电话。"],
+          }),
+        ),
+        1,
+        { chapterText: chapter, evidenceContext: "", issues: [issue] },
+      ),
+    ).not.toThrow();
+  });
+
   it("规范化模型输出并识别需要作者决定", () => {
     const normalized = normalizeRepairPlan({
       issue_plans: [
@@ -231,6 +259,38 @@ describe("修复方案证据校验", () => {
     expect(normalized.issuePlans[0].regressionScope).toBe("第 4 章");
     expect(normalized.needsAuthorDecision).toBe(true);
     expect(normalized.decisionReason).toBe("缺少第 4 章原文");
+  });
+
+  it("兼容字符串字段与“第N章”编号", () => {
+    const normalized = normalizeRepairPlan({
+      issuePlans: [
+        {
+          issueIndex: 1,
+          evidence: "角色乙接电话。",
+          locations: "角色乙接电话。",
+          strategy: "改写",
+          affectedFacts: "电话；时间",
+          regressionScope: "第 4 章",
+        },
+      ],
+      decisionOptions: [
+        {
+          label: "方案 A",
+          description: "保留录音来源",
+          affectedChapters: ["第4章", 5],
+          anchors: "角色乙接电话。",
+          introducedFacts: "新增录音来源；改期",
+        },
+      ],
+    });
+    expect(normalized.issuePlans[0].locations).toEqual(["角色乙接电话。"]);
+    expect(normalized.issuePlans[0].affectedFacts).toEqual(["电话", "时间"]);
+    expect(normalized.decisionOptions[0].affectedChapters).toEqual([4, 5]);
+    expect(normalized.decisionOptions[0].anchors).toEqual(["角色乙接电话。"]);
+    expect(normalized.decisionOptions[0].introducedFacts).toEqual([
+      "新增录音来源",
+      "改期",
+    ]);
   });
 
   it("修复方案只保留一个推荐项", () => {

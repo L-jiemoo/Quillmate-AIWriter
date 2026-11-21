@@ -687,6 +687,7 @@ export function auditMessages(
   nextContext: string,
   storyContext: string,
   evidenceContext = "",
+  unifiedLedger = "",
 ): ChatMessage[] {
   return [
     {
@@ -697,14 +698,9 @@ export function auditMessages(
       role: "user",
       content: `请审校《${meta.title}》第 ${chapter.index} 章《${chapter.title}》。
 
-【事实台账（含每条事实确立的章节号）】
-${formatCanonForPrompt(canon, { includeChapters: true })}
-
+${unifiedLedger ? `【统一台账（事实优先；剧情台账仅作补充，冲突时不得否定事实台账）】\n${clip(unifiedLedger, 9000)}\n` : `【事实台账（含每条事实确立的章节号）】\n${formatCanonForPrompt(canon, { includeChapters: true })}\n\n【剧情台账（人物状态/关系/事件/伏笔，来自已写章节）】\n${clip(storyContext || "（未检索到剧情台账）", 4000)}\n`}
 【核心人物档案（用于人物性格与行为一致性）】
 ${formatCharacterProfiles(characters)}
-
-【剧情台账（人物状态/关系/事件/伏笔，来自已写章节）】
-${clip(storyContext || "（未检索到剧情台账）", 4000)}
 
 ${evidenceContext ? `【相关原文证据（按当前问题检索；原文与台账已分开标注，不要混用）】\n${clip(evidenceContext, 6000)}\n\n` : ""}【前文衔接（上一章结尾与最近摘要）】
 ${clip(previousContext || "（无）", 4000)}
@@ -746,7 +742,7 @@ ${clip(chapterText, 16000)}
 1. 人物行为合理性：行动是否符合处境、能力、目标和已知信息。
 2. 人物性格一致性：言行是否与人物卡和既有塑造一致。
 3. 时间线连续性：日期、天数、期限、事件先后。
-4. 地点连续性：同一时间的位置关系、移动是否可能。
+4. 地点连续性：同一时间的位置关系、移动是否可能；跨地点的声音、视线、气味等感知是否有距离、遮挡或既有设定依据，不能只看距离。
 5. 人物生死状态：已死人物是否被错误地写成活人行动。
 6. 物品归属：关键物品的持有人、形态、来历是否被改写。
 7. 世界观规则冲突：是否违反已确立的硬性规则。
@@ -798,7 +794,8 @@ ${clip(chapterText, 16000)}
 - 不要用“傍晚/夜里/子时前”这类宽泛时间词互相挑错；只有具体时刻导致人物无法到达、同一时间出现在两地或错过明确死线时，才算时间线冲突。
 - 人物台词、转述和角色推断不是客观事实。像“大约早到了半天”这类人物估测属于 CHARACTER_BELIEF，不能当作精确时刻；除非它与独立旁白直接冲突，否则不能据此判 critical。
 - 作者已经在正文中明确写出解释（如“电话是伪造的”）时，不要因为缺少进一步铺垫、途中细节或读者可能追问就判 critical；确实无法理解事件如何发生时才标 CLARITY_GAP，且只记录不阻断。
-- 区分承载物与被收纳对象：既有规则只禁止某种实体进入某物时，不能直接推断该实体的衍生形态不能作为独立对象被收纳；自定义状态词（如“已清除”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。`,
+- 区分承载物与被收纳对象：既有规则只禁止某种实体进入某物时，不能直接推断该实体的衍生形态不能作为独立对象被收纳；自定义状态词（如“已清除”）是否违反既有定义需单独审查，不能把整段情节一并判为严重矛盾。
+- 跨地点感官可行性：先区分客观旁白与人物台词/推断。距离、楼层、遮挡只算疑点，不能单独判 critical；要核对已有设定里是否有法器共鸣、超凡感知、传声媒介、环境巨响等解释。若正文明确写某个声音没有发生，而人物声称听见，优先按人物撒谎、试探或认知错误处理，不要直接判成地点/因果硬冲突。只有客观旁白或既有硬规则明确否定这种感知，且正文把它当客观事实推动剧情时，才判 critical；只是缺少机制说明、仍有解释空间时，标 CLARITY_GAP 或 warning，要求补充依据。`,
     },
   ];
 }
@@ -924,6 +921,7 @@ ${clip(repairedText, 16000)}
       "explanation": "为什么属于该分类"
     }
   ],
+  "causalVerified": true,
   "continuityOk": true
 }
 
@@ -934,15 +932,16 @@ ${clip(repairedText, 16000)}
 4. 是否破坏人物状态（生死、身份、所在位置、掌握的信息）。
 5. 是否破坏人物关系（关系类型、亲疏、敌对/同盟是否被改写）。
 6. 是否破坏时间线（同一时间是否出现在多个地点、事件先后是否颠倒）。
-7. 是否破坏地点连续性（人物转场是否有依据、地点描写是否与前文冲突）。
+7. 是否破坏地点连续性（人物转场是否有依据、地点描写是否与前文冲突；跨地点声音/视线/气味是否有距离、遮挡或既有设定依据，不能只看距离）。
 8. 是否改变已经确立的事件因果（原因、经过、结果或影响是否被替换）。
 9. 是否破坏伏笔生命周期（不能未埋先收、提前回收、删掉埋设或改写回收内容）。
 10. 是否通过删除或改写原文证据来规避矛盾。
 11. 是否修改了问题授权范围之外的段落，或顺带润色无关内容。
 12. 是否与上一章结尾、下一章开头或来源章节产生新的冲突。
 问题分类规则与章节审校相同：只有 ESTABLISHED_CONTRADICTION 才能判 critical；RULE_EXTENSION 和 CLARITY_GAP 按 warning 记录，不得为了回归通过而判 critical；“以前没出现”“与常见设定不同”不构成 critical 证据。
+跨地点感知规则也与章节审校相同：距离、楼层、遮挡只算疑点；人物台词不等于客观事实；正文明确没发生的声音不能被人物一句“我听见了”当成客观事实。没有机制依据时最多按 CLARITY_GAP/warning 记录；只有客观旁白或既有硬规则明确否定这种感知时，才判 critical。
 
-因果结构对比（必须逐项执行，并始终返回 causalChanges 数组；没有变化时返回空数组）：
+因果结构对比（必须逐项执行，并始终返回 causalChanges 数组；没有变化时返回空数组，但仍必须把 causalVerified 设为 true；只有真正完成逐项对比才能设为 true）：
 1. 动作的执行者是否被替换或拆分？
 2. 动作的直接作用对象是否改变？
 3. 被记录/改变/处理的对象与最终结果是否仍然对应？例如在记录类载体中，被记录对象与记录位置的归属是否错位？
@@ -1110,6 +1109,7 @@ ${clip(chapterText, 12000)}
 - 不得通过否定既有规则来制造紧迫感；紧迫感应来自既有的封僵条件、期限、物品归属或人物目标。
 - decisionOptions 必须恰好有一个方案标 "recommended": true，优先推荐对已写正文改动最少、与既定事实冲突最小、后续章节最容易衔接的方案；其余方案标 false。
 - 不得用原文和台账里不存在的人物、物品、来源或规则来解题（例如“某某其实私藏了另一块玉”）。如果方案确实必须新增设定，必须逐条写进 introducedFacts，并在 label 开头标明“新增设定”；有新增设定的方案不能标 recommended，除非所有方案都不得不新增设定。
+- 修复“谁知道/怎么知道”这类信息发现问题时，不得把一种未建立的感知来源替换成另一种未建立的感知来源（例如把“听见”改成“看见”却不交代视线、身份和时机）；优先使用已有设定、已有目击者，或明确写成诈/试探；无法确定时要求作者决定，不要自行发明新的监听或感知机制。
 - 优先给出只改本章、或只改最少章节且不新增设定的方案；没有安全方案时应明确说明，而不是编造新设定。
 - 如果【作者已确认的修复方向】已给出，必须按该方向制定方案，不得再要求作者决定；affectedChapters 只能包含当前章和该方向涉及的此前章节。
 - decisionOptions 只能包含对正文的修改（当前章或允许的此前章节）。不得提出只修改细纲、大纲或事实台账的方案，修复 Agent 无法执行这类修改；如果唯一解法是改细纲或台账，请在 decisionReason 中说明并让作者手动处理，不要生成方案。
@@ -1145,6 +1145,8 @@ export function chapterRepairPatchMessages(
     crossChapterContext?: string;
     authorDirective?: string;
     affectedChapters?: number[];
+    authorizedAnchors?: string[];
+    authorizedParagraphs?: string[];
   } = {},
 ): ChatMessage[] {
   const crossChapters = (options.affectedChapters ?? []).filter(
@@ -1165,7 +1167,15 @@ ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问
 【不可违背的事实台账（不是原文，不得当作补丁锚点）】
 ${formatCanonForPrompt(canon)}
 
-${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}${options.authorDirective ? `【作者已确认的修复方向（必须严格遵守）】\n${clip(options.authorDirective, 2000)}\n\n` : ""}${options.crossChapterContext ? `【允许修改的此前章节原文（只读锚点来源）】\n${clip(options.crossChapterContext, 8000)}\n\n` : ""}${crossChapters.length ? `【跨章修改许可】允许修改的章节：当前第 ${chapter.index} 章，以及第 ${crossChapters.join("、")} 章。其他章节一律禁止修改。\n\n` : ""}【上一章结尾】
+${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}${options.authorizedAnchors?.length ? `【本次授权修改的原文位置（只能落在包含以下片段的段落）】\n${options.authorizedAnchors
+  .map((anchor, index) => `${index + 1}. ${anchor}`)
+  .slice(0, 20)
+  .join("\n")}\n\n` : ""}${options.authorizedParagraphs?.length ? `【本次真正允许修改的段落（逐字原文；只能在这些段落内改，不得改动其他段落）】\n${clip(
+  options.authorizedParagraphs
+    .map((paragraph, index) => `${index + 1}. ${paragraph}`)
+    .join("\n"),
+  6000,
+)}\n\n` : ""}${options.authorDirective ? `【作者已确认的修复方向（必须严格遵守）】\n${clip(options.authorDirective, 2000)}\n\n` : ""}${options.crossChapterContext ? `【允许修改的此前章节原文（只读锚点来源）】\n${clip(options.crossChapterContext, 8000)}\n\n` : ""}${crossChapters.length ? `【跨章修改许可】允许修改的章节：当前第 ${chapter.index} 章，以及第 ${crossChapters.join("、")} 章。其他章节一律禁止修改。\n\n` : ""}【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
 
 ${nextOpening ? `【下一章开头】\n${clip(nextOpening, 800)}\n` : ""}${rewriteInstruction ? `【本次修复要求】\n${rewriteInstruction}\n\n` : ""}【当前章节正文（补丁锚点必须逐字来自这里）】
@@ -1192,7 +1202,8 @@ ${clip(chapterText, 16000)}
 - 每个待修问题都必须至少有一个 edit；没有把握安全修改时不要编造锚点。
 - chapterIndex 默认当前章 ${chapter.index}${crossChapters.length ? `；只有本次允许的第 ${crossChapters.join("、")} 章可以例外` : "；本次不允许修改其他章节"}。
 - originalText 必须逐字存在于对应 chapterIndex 的章节正文且只出现一次；不能用台账、摘要、上一版或推断文本作为锚点。
-- 只允许修改包含问题证据或方案位置的段落；不得修改未授权段落，不得顺带润色无关内容。
+- 审校证据里包住整段引文的“…”可能只是引用标记，并不属于正文；如果正文中没有这对引号，不要把外层引号写进 originalText 或 replacement。
+- 只允许修改包含问题证据、方案位置或“授权修改的原文位置”的段落；不得修改授权列表之外的段落，不得顺带润色无关内容。
 - 不同 edit 的原文锚点不得重叠；同一段落内多处修改请分别给出互不重叠的锚点。
 - replacement 必须保留原段落中与问题无关的内容，不得删除关键证据来规避矛盾。
 - 不得新增人物、事件、设定、物品、能力或伏笔；不得改变已确认的事实、时间线和伏笔生命周期。

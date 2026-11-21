@@ -116,6 +116,19 @@ export function normalizeCausalChanges(input: unknown): {
   return { changes, verified: true };
 }
 
+// 有因果基线时，空数组不能直接当作“已验证”：
+// 只有模型明确返回 causalVerified=true，或确实返回了逐项对比，才允许验收。
+export function causalVerificationComplete(
+  changes: CausalChange[],
+  verified: boolean,
+  baselineCount: number,
+  explicit: unknown,
+): boolean {
+  if (!verified) return false;
+  if (explicit === true) return true;
+  return baselineCount === 0 || changes.length > 0;
+}
+
 export function formatCausalBaseline(baseline: CausalBaseline): string {
   const head = baseline.issueIndex ? `问题 ${baseline.issueIndex}：\n` : "";
   return head + [

@@ -155,9 +155,11 @@ function uniqueIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(issue);
-    if (result.length >= 40) break;
   }
-  return result;
+  if (result.length <= 40) return result;
+  const rank = (issue: ContinuityIssue): number =>
+    issue.severity === "critical" ? 2 : issue.severity === "warning" ? 1 : 0;
+  return [...result].sort((left, right) => rank(right) - rank(left)).slice(0, 40);
 }
 
 // 审校前的确定性检查：高置信度数据矛盾会作为 hardIssues 强制保留，

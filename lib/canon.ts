@@ -561,7 +561,14 @@ export function isDiscardableIssue(issue: ContinuityIssue): boolean {
   if (issue.type === "章首重复" && MECHANICAL_OPENING_REPEAT.test(detail)) {
     return true;
   }
-  if (SELF_NEGATING_ISSUE.test(text)) return true;
+  // “不是问题/可以忽略”也可能出现在真实冲突描述里（引述人物台词或“但 B 确实冲突”）；
+  // 只有整条问题没有指出真实矛盾时才丢弃。
+  if (
+    SELF_NEGATING_ISSUE.test(text) &&
+    !REAL_PROBLEM.test(positiveClauses(text))
+  ) {
+    return true;
+  }
   // 严重/可忽略条目如果自己已经否定了问题，又没有指出真实矛盾，直接丢弃；
   // 建议类保留，避免误删“需要人工确认”的弱提示。
   return (
@@ -716,6 +723,11 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
           }
         }
         if (ruleLevel) issue.ruleLevel = ruleLevel;
+        // 大纲偏离只说明正文与细纲不同，不等于事实冲突；细纲可能已被作者调整。
+        // 只有同时违反台账/前文硬事实时，才应由对应类型（而不是大纲偏离）判 critical。
+        if (issue.type.includes("大纲偏离") && issue.severity === "critical") {
+          issue.severity = "warning";
+        }
       }
     }
     if (!issue || isDiscardableIssue(issue)) continue;
@@ -723,9 +735,16 @@ export function normalizeIssues(input: unknown): ContinuityIssue[] {
     if (seen.has(key)) continue;
     seen.add(key);
     issues.push(issue);
-    if (issues.length >= 40) break;
   }
-  return issues;
+  return limitIssues(issues);
+}
+
+// 上限截断必须优先保留 critical，不能按模型输出顺序把严重问题截掉。
+function limitIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
+  if (issues.length <= 40) return issues;
+  const rank = (issue: ContinuityIssue): number =>
+    issue.severity === "critical" ? 2 : issue.severity === "warning" ? 1 : 0;
+  return [...issues].sort((left, right) => rank(right) - rank(left)).slice(0, 40);
 }
 
 export function normalizeReviewResult(input: unknown, fallbackSummary = ""): ReviewResult {
@@ -781,10 +800,9 @@ export function mergeIssues(...lists: ContinuityIssue[][]): ContinuityIssue[] {
       if (seen.has(key)) continue;
       seen.add(key);
       merged.push(issue);
-      if (merged.length >= 40) return merged;
     }
   }
-  return merged;
+  return limitIssues(merged);
 }
 
 export function countCritical(issues: ContinuityIssue[]): number {
@@ -902,6 +920,20 @@ export function reconcileCanonWithChapters(
 export interface MergeCanonResult {
   canon: CanonFacts;
   conflicts: ContinuityIssue[];
+}
+
+// 跨章修复会同时改动多章；按章节顺序把各自的抽取结果重新合并，
+// 不能用某一章的完整台账快照覆盖其他章，否则目标章或中间章的新事实会丢失。
+export function mergeChapterExtractions(
+  base: CanonFacts,
+  updates: { index: number; extracted: ExtractedFacts }[],
+  mode: "write" | "rewrite" = "rewrite",
+): CanonFacts {
+  let canon = cloneCanon(base);
+  for (const update of [...updates].sort((left, right) => left.index - right.index)) {
+    canon = mergeCanon(canon, update.extracted, update.index, mode).canon;
+  }
+  return canon;
 }
 
 export function mergeCanon(

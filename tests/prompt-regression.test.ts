@@ -93,6 +93,32 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("人物做出意外选择");
     expect(text).toContain("不要要求每章都必须有冲突、反转或悬念");
     expect(text).toContain("warning：存在疑点，但仍有合理解释空间");
+    expect(text).toContain("跨地点感官可行性");
+    expect(text).toContain("距离、楼层、遮挡只算疑点");
+    expect(text).toContain("人物台词/推断");
+    expect(text).toContain("人物撒谎、试探或认知错误");
+  });
+
+  it("传入统一台账时只渲染一份台账，并声明事实优先", () => {
+    const detail = reviewProject();
+    const text = join(
+      auditMessages(
+        detail.meta,
+        detail.canon,
+        detail.characters,
+        detail.plan.chapters[3],
+        "张三进入密室。",
+        "",
+        [],
+        "",
+        "",
+        "",
+        "【事实台账】角色甲存活。\n【剧情台账】角色甲已死。",
+      ),
+    );
+    expect(text).toContain("统一台账");
+    expect(text).toContain("冲突时不得否定事实台账");
+    expect(text).not.toContain("事实台账（含每条事实确立的章节号）");
   });
 
   it("审校提示词要求区分明确矛盾、规则拓展与解释不足", () => {
@@ -154,6 +180,9 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("丙页");
     expect(text).toContain("抽象占位");
     expect(text).toContain("新增了原文没有建立因果关系的中间对象");
+    expect(text).toContain("跨地点感知规则");
+    expect(text).toContain("人物台词不等于客观事实");
+    expect(text).toContain("距离、楼层、遮挡只算疑点");
   });
 
   it("修复方案提示词要求先提取修复前因果结构", () => {
@@ -185,6 +214,9 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("被记录/改变/处理的对象");
     expect(text).toContain("不能写成计划中的新剧情");
     expect(text).toContain("中间对象");
+    expect(text).toContain("谁知道/怎么知道");
+    expect(text).toContain("不得把一种未建立的感知来源替换成另一种未建立的感知来源");
+    expect(text).toContain("明确写成诈/试探");
   });
 
   it("修复提示词要求局部修改且不得改台账既定剧情", () => {
