@@ -48,6 +48,10 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
   const [tab, setTab] = useState<TabKey>("overview");
   const [job, setJob] = useState<Job | null>(null);
   const [jobError, setJobError] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(detail.meta.title);
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [titleError, setTitleError] = useState("");
   const completedJobRef = useRef<string | null>(null);
   const slug = detail.meta.slug;
 
@@ -145,6 +149,52 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
           ? "这一轮结束了，可以安排下一项。"
           : "有新任务时，我会在这里冒泡。";
 
+  function startEditingTitle() {
+    setTitleDraft(detail.meta.title);
+    setTitleError("");
+    setEditingTitle(true);
+  }
+
+  function cancelEditingTitle() {
+    setTitleDraft(detail.meta.title);
+    setTitleError("");
+    setEditingTitle(false);
+  }
+
+  async function saveTitle() {
+    const title = titleDraft.trim();
+    if (!title) {
+      setTitleError("书名不能为空");
+      return;
+    }
+    // 番茄发布按「发布页书名」定位作品，改项目书名时一并同步，避免两处漂移。
+    const syncFanqieName = detail.publish.fanqie.bookName !== title;
+    if (title === detail.meta.title && !syncFanqieName) {
+      setEditingTitle(false);
+      return;
+    }
+    setTitleSaving(true);
+    setTitleError("");
+    try {
+      const response = await fetch(`/api/projects/${slug}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          meta: { title },
+          ...(syncFanqieName ? { publish: { fanqie: { bookName: title } } } : {}),
+        }),
+      });
+      const data = (await response.json()) as ProjectDetail & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "修改书名失败");
+      setDetail(data);
+      setEditingTitle(false);
+    } catch (error) {
+      setTitleError(errorMessage(error));
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
   async function pauseJob() {
     if (!job) return;
     setJobError("");
@@ -203,7 +253,58 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
       <section className="workspace-head">
         <div className="workspace-title-row">
           <div>
-            <h1 className="workspace-title">{detail.meta.title}</h1>
+            {editingTitle ? (
+              <form
+                className="workspace-title-edit"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveTitle();
+                }}
+              >
+                <input
+                  className="input workspace-title-input"
+                  value={titleDraft}
+                  aria-label="书名"
+                  autoFocus
+                  maxLength={80}
+                  disabled={titleSaving}
+                  onChange={(event) => {
+                    setTitleDraft(event.target.value);
+                    setTitleError("");
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") cancelEditingTitle();
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={titleSaving || !titleDraft.trim()}
+                >
+                  {titleSaving ? "保存中…" : "保存"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={titleSaving}
+                  onClick={cancelEditingTitle}
+                >
+                  取消
+                </button>
+              </form>
+            ) : (
+              <div className="workspace-title-display">
+                <h1 className="workspace-title">{detail.meta.title}</h1>
+                <button
+                  type="button"
+                  className="workspace-title-edit-btn"
+                  onClick={startEditingTitle}
+                  aria-label={`修改书名《${detail.meta.title}》`}
+                >
+                  修改书名
+                </button>
+              </div>
+            )}
             <div className="meta-chips">
               <span className="chip">{detail.meta.genre}</span>
               <span className="chip">{detail.meta.tone}</span>
@@ -229,6 +330,7 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
         </div>
       </section>
 
+      {titleError ? <div className="notice notice-error">{titleError}</div> : null}
       {jobError ? <div className="notice notice-error">{jobError}</div> : null}
 
       {/* 三栏布局：目录和任务台吸顶，中间正文独立滚动阅读。 */}

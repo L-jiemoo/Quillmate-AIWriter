@@ -50,6 +50,7 @@ interface ProjectRow {
   fanqie_book_id: string;
   fanqie_book_name: string;
   fanqie_auto_submit: number;
+  fanqie_ai_assisted: number;
   fanqie_headless: number;
   fanqie_selectors_json: string;
   state_updated_at: string;
@@ -168,6 +169,7 @@ function rowToProjectFile(row: ProjectRow): ProjectFile {
         bookId: row.fanqie_book_id,
         bookName: row.fanqie_book_name,
         autoSubmit: row.fanqie_auto_submit !== 0,
+        aiAssisted: row.fanqie_ai_assisted !== 0,
         headless: row.fanqie_headless !== 0,
         selectors,
       },
@@ -181,9 +183,9 @@ function insertProjectRow(db = getDatabase(), file: ProjectFile): void {
     `INSERT INTO projects (
       slug, title, genre, tone, idea, author, language, target_chapters, words_per_chapter,
       logline, tags_json, fanqie_enabled, fanqie_book_id, fanqie_book_name,
-      fanqie_auto_submit, fanqie_headless, fanqie_selectors_json,
+      fanqie_auto_submit, fanqie_ai_assisted, fanqie_headless, fanqie_selectors_json,
       state_updated_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     meta.slug,
     meta.title,
@@ -198,6 +200,7 @@ function insertProjectRow(db = getDatabase(), file: ProjectFile): void {
     publish.fanqie.bookId,
     publish.fanqie.bookName,
     publish.fanqie.autoSubmit ? 1 : 0,
+    publish.fanqie.aiAssisted === false ? 0 : 1,
     publish.fanqie.headless ? 1 : 0,
     JSON.stringify(publish.fanqie.selectors ?? {}),
     meta.updatedAt,
@@ -214,7 +217,8 @@ export function updateProjectFile(file: ProjectFile): void {
       title = ?, genre = ?, tone = ?, idea = ?, author = ?, language = ?,
       target_chapters = ?, words_per_chapter = ?, fanqie_enabled = ?,
       fanqie_book_id = ?, fanqie_book_name = ?, fanqie_auto_submit = ?,
-      fanqie_headless = ?, fanqie_selectors_json = ?, updated_at = ?
+      fanqie_ai_assisted = ?, fanqie_headless = ?, fanqie_selectors_json = ?,
+      updated_at = ?
     WHERE slug = ?`,
   ).run(
     meta.title,
@@ -229,6 +233,7 @@ export function updateProjectFile(file: ProjectFile): void {
     publish.fanqie.bookId,
     publish.fanqie.bookName,
     publish.fanqie.autoSubmit ? 1 : 0,
+    publish.fanqie.aiAssisted === false ? 0 : 1,
     publish.fanqie.headless ? 1 : 0,
     JSON.stringify(publish.fanqie.selectors ?? {}),
     meta.updatedAt,

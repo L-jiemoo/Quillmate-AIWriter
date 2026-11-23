@@ -28,6 +28,7 @@ export interface FanqiePublishOptions {
   bookId?: string;
   enabled?: boolean;
   autoSubmit: boolean;
+  aiAssisted?: boolean;
   headless: boolean;
   selectors?: Partial<FanqieSelectors>;
   chapters: { index: number; title: string; content: string }[];
@@ -112,6 +113,15 @@ async function fillFirst(
   throw new Error(`找不到「${label}」输入框，请到发布页的高级设置中调整选择器`);
 }
 
+// 番茄后台常把半角标点显示成全角；按书名匹配时统一标点/空格，避免因
+// “掌门在闭关,别催”和“掌门在闭关，别催”这类差异漏掉作品卡片。
+function normalizeBookText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]/gu, "");
+}
+
 async function locateCreateChapterHref(
   page: Page,
   bookName: string,
@@ -132,11 +142,14 @@ async function locateCreateChapterHref(
   // 没有 bookId 时只能在作品卡片里按书名匹配。卡片内优先找现成的 /publish/ 链接，
   // 找不到再点“创建章节”并读取其 href，兼容两种不同的工作台布局。
   const selectors = customSelectors?.length ? customSelectors : [".completion-book-item"];
+  const target = normalizeBookText(bookName);
   for (const selector of selectors) {
-    const cards = page.locator(selector).filter({ hasText: bookName });
+    const cards = page.locator(selector);
     const count = await cards.count().catch(() => 0);
     for (let i = 0; i < count; i += 1) {
       const card = cards.nth(i);
+      const cardText = await card.innerText().catch(() => "");
+      if (!target || !normalizeBookText(cardText).includes(target)) continue;
       const link = card.locator('a[href*="/publish/"]').first();
       const href = await link.getAttribute("href").catch(() => null);
       if (href) {
@@ -168,7 +181,68 @@ async function locateCreateChapterHref(
   );
 }
 
-async function chooseBasicCheck(page: Page, log: LogFn): Promise<void> {
+const TYPO_DIALOG_SELECTORS = [
+  ".arco-modal",
+  ".arco-dialog",
+  "[role='dialog']",
+  ".publish-modal-confirm",
+  ".auto-editor-error-modal",
+];
+
+// 平台的错别字提醒会挡住后续发布设置；只处理明确含“错别字/错字”的弹窗。
+// 其它内容安全提示仍交给人工判断，不能替用户盲点。
+async function dismissTypoWarnings(
+  page: Page,
+  log: LogFn,
+  checkCancelled?: () => void,
+): Promise<number> {
+  // 只点明确表示“继续发布/忽略”的按钮；不使用泛化的“确定”，防止误提交发布设置。
+  const continueButtons = [
+    /仍然?(发布|提交)/,
+    /仍要(发布|提交)/,
+    /继续(发布|提交)?/,
+    /忽略/,
+    /不用修改/,
+  ];
+  let dismissed = 0;
+  for (let round = 0; round < 3; round += 1) {
+    checkCancelled?.();
+    let clicked = false;
+    for (const selector of TYPO_DIALOG_SELECTORS) {
+      const dialogs = page.locator(selector);
+      const count = await dialogs.count().catch(() => 0);
+      for (let i = 0; i < count; i += 1) {
+        const dialog = dialogs.nth(i);
+        if (!(await dialog.isVisible().catch(() => false))) continue;
+        const text = (await dialog.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (!/错别字|错字/.test(text)) continue;
+        // 发布设置弹窗本身可能显示“错别字 0”统计，绝不能在这里自动点确认。
+        if (/是否使用\s*AI|确认提交/.test(text)) continue;
+        for (const name of continueButtons) {
+          const button = dialog.getByRole("button", { name }).first();
+          if (!(await button.count().catch(() => 0))) continue;
+          if (!(await button.isVisible().catch(() => false))) continue;
+          await button.click().catch(() => undefined);
+          log(`已跳过平台错别字提示：${text.slice(0, 80)}`);
+          dismissed += 1;
+          clicked = true;
+          await page.waitForTimeout(600);
+          break;
+        }
+        if (clicked) break;
+      }
+      if (clicked) break;
+    }
+    if (!clicked) break;
+  }
+  return dismissed;
+}
+
+async function chooseBasicCheck(
+  page: Page,
+  log: LogFn,
+  checkCancelled?: () => void,
+): Promise<void> {
   // 内容检测弹窗有两个不稳定点：
   // 1. 遮罩 #publish-check-chapter-mask 会在按钮动画期间拦截点击；
   // 2. 弹窗整体重渲染时，已拿到的按钮 locator 会 detached。
@@ -178,6 +252,8 @@ async function chooseBasicCheck(page: Page, log: LogFn): Promise<void> {
   const start = Date.now();
 
   while (Date.now() - start < 20000) {
+    checkCancelled?.();
+    if (await dismissTypoWarnings(page, log, checkCancelled)) continue;
     const basic = page.getByRole("button", { name: "仅基础检测", exact: true }).first();
 
     if (!(await basic.count().catch(() => 0))) {
@@ -224,19 +300,27 @@ async function submitForReview(
   page: Page,
   selectors: FanqieSelectors,
   chapterIndex: number,
+  useAi: boolean,
   log: LogFn,
+  checkCancelled?: () => void,
 ): Promise<void> {
+  checkCancelled?.();
   await clickFirst(page, selectors.publishButton, "下一步", log);
   await page.waitForTimeout(1500);
-  await chooseBasicCheck(page, log);
+  checkCancelled?.();
+  await chooseBasicCheck(page, log, checkCancelled);
   await page.waitForTimeout(1200);
+  checkCancelled?.();
+  await dismissTypoWarnings(page, log, checkCancelled);
 
   const modal = page.locator(".publish-confirm-container-new").first();
   // 选择基础检测后，平台可能先插入字数提示或自动编辑器错误提示。
   // 能自动点“提交/确定”就继续；出现需要人工判断的提示则立即中止并报告，
   // 不能在后台替用户盲选。
   for (let round = 0; round < 4; round += 1) {
+    checkCancelled?.();
     if (await modal.isVisible().catch(() => false)) break;
+    if (await dismissTypoWarnings(page, log, checkCancelled)) continue;
 
     const prompts = page.locator(".publish-modal-confirm, .auto-editor-error-modal");
     const promptCount = await prompts.count().catch(() => 0);
@@ -263,9 +347,15 @@ async function submitForReview(
     await page.waitForTimeout(800);
   }
 
-  try {
-    await modal.waitFor({ state: "visible", timeout: 20000 });
-  } catch {
+  const modalDeadline = Date.now() + 20000;
+  let modalReady = await modal.isVisible().catch(() => false);
+  while (!modalReady && Date.now() < modalDeadline) {
+    checkCancelled?.();
+    if (await dismissTypoWarnings(page, log, checkCancelled)) continue;
+    modalReady = await modal.isVisible().catch(() => false);
+    if (!modalReady) await page.waitForTimeout(400);
+  }
+  if (!modalReady) {
     // 等不到发布设置弹窗，通常是标题、章节号或正文被前端校验拦住。
     // 从页面文本里提取“至少/请选择/请输入”这类提示，给出比超时更有用的错误。
     const bodyText = await page.locator("body").innerText().catch(() => "");
@@ -282,16 +372,21 @@ async function submitForReview(
     );
   }
 
-  // 番茄要求作者声明是否使用 AI 辅助；这里固定按“是”提交，
-  // 与发布页说明保持一致。找不到选项时沿用平台默认值，不阻断发布。
-  const aiYes = modal.locator("label.arco-radio").filter({ hasText: /^是$/ }).first();
-  if (await aiYes.count()) {
-    await aiYes.click();
-    log("已在发布设置中选择「是否使用 AI：是」");
+  // 番茄要求作者声明是否使用 AI 辅助；按发布页配置点选“是/否”。
+  // 找不到选项时沿用平台默认值，不阻断发布。
+  const aiChoice = modal
+    .locator("label.arco-radio")
+    .filter({ hasText: useAi ? /^是$/ : /^否$/ })
+    .first();
+  if (await aiChoice.count()) {
+    await aiChoice.click();
+    log(`已在发布设置中选择「是否使用 AI：${useAi ? "是" : "否"}」`);
   } else {
     log("未找到「是否使用 AI」选项，按平台默认值提交");
   }
 
+  // 确认提交后无法安全中断（可能已经进入平台审核），只在这之前响应取消。
+  checkCancelled?.();
   let clicked = false;
   // 确认按钮同样支持多选择器；只点发布设置弹窗内部的按钮，
   // 避免误点到页面其他“确认”按钮。
@@ -453,6 +548,7 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
     page = activePage;
     activePage.setDefaultTimeout(20000);
     await activePage.goto(WORKBENCH_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    options.checkCancelled?.();
 
     if (!(await hasAuthCookie(context))) {
       const shot = await snapshot(activePage, "fanqie-not-logged-in");
@@ -477,6 +573,7 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
       selectors.createChapter,
       log,
     );
+    options.checkCancelled?.();
     const createUrl = new URL(createHref, "https://fanqienovel.com").toString();
 
     // 每章都重新打开新建页，避免复用上一章编辑器时标题/正文残留。
@@ -498,11 +595,13 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
         throw new Error(`第 ${chapter.index} 章编辑器加载失败${shot ? `（截图：${shot}）` : ""}`);
       }
       await activePage.waitForTimeout(800);
+      options.checkCancelled?.();
 
       await fillFirst(activePage, CHAPTER_NUMBER_INPUTS, "章节序号", String(chapter.index), log);
       await fillFirst(activePage, selectors.titleInput, "章节标题", chapter.title, log);
       await fillFirst(activePage, selectors.contentEditor, "章节正文", chapter.content, log);
       await activePage.waitForTimeout(1500);
+      options.checkCancelled?.();
       const wordCount = await activePage
         .locator(".publish-header-count")
         .innerText()
@@ -513,7 +612,14 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
         // 只有走完提交校验才回调记账；若中途抛错，调用方会把该章记为失败，
         // 下次发布会自动重试，不会误跳过。
         try {
-          await submitForReview(activePage, selectors, chapter.index, log);
+          await submitForReview(
+            activePage,
+            selectors,
+            chapter.index,
+            options.aiAssisted !== false,
+            log,
+            options.checkCancelled,
+          );
           await options.onChapterPublished?.(chapter.index);
         } catch (error) {
           if (error instanceof PublishUncertainError) {
@@ -522,10 +628,12 @@ export async function publishFanqie(options: FanqiePublishOptions): Promise<void
           throw error;
         }
       } else {
+        options.checkCancelled?.();
         await clickFirst(activePage, selectors.saveButton, "存草稿", log);
         await activePage.waitForTimeout(1500);
         log(`第 ${chapter.index} 章已保存为草稿`);
       }
+      options.checkCancelled?.();
     }
 
     const shot = await snapshot(activePage, "fanqie-publish-done");

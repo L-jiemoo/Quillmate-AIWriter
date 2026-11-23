@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BusyLabel } from "@/components/ui/Loading";
 import { matchesPublishWork } from "@/lib/publish-ledger";
 import type { ProjectDetail, StartJobFn } from "@/lib/types";
@@ -23,10 +23,13 @@ export function PublishTab({
   const [bookName, setBookName] = useState(fanqie.bookName);
   const [bookId, setBookId] = useState(fanqie.bookId);
   const [autoSubmit, setAutoSubmit] = useState(fanqie.autoSubmit);
+  const [aiAssisted, setAiAssisted] = useState(fanqie.aiAssisted !== false);
   const [headless, setHeadless] = useState(fanqie.headless);
+  const [publishCount, setPublishCount] = useState("");
   const [selectorsText, setSelectorsText] = useState(
     JSON.stringify(fanqie.selectors ?? {}, null, 2),
   );
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
@@ -35,6 +38,19 @@ export function PublishTab({
   const [resolving, setResolving] = useState<number | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [historyNotice, setHistoryNotice] = useState("");
+
+  // 书名可能从工作台标题处同步过来；没有未保存修改时跟随最新配置，避免旧表单把新值覆盖回去。
+  useEffect(() => {
+    if (dirty) return;
+    // 跟随服务端配置更新只读表单，属于同步外部状态。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBookName(fanqie.bookName);
+    setBookId(fanqie.bookId);
+    setAutoSubmit(fanqie.autoSubmit);
+    setAiAssisted(fanqie.aiAssisted !== false);
+    setHeadless(fanqie.headless);
+    setSelectorsText(JSON.stringify(fanqie.selectors ?? {}, null, 2));
+  }, [dirty, fanqie]);
 
   const history = [...(detail.state.publishHistory ?? [])].reverse();
   // 去重只看永久发布台账；日志被裁剪或清空都不影响这里。
@@ -49,6 +65,10 @@ export function PublishTab({
   const uncertain = ledgerEntries
     .filter((entry) => entry.status === "uncertain")
     .sort((a, b) => b.at.localeCompare(a.at));
+  // 已发布的章节来自本地永久台账；番茄后台删章不会自动同步，需在这里手动释放。
+  const publishedEntries = ledgerEntries
+    .filter((entry) => entry.status === "published")
+    .sort((a, b) => a.chapter - b.chapter);
   const uncertainChapters = new Set(uncertain.map((entry) => entry.chapter));
   const publishable = detail.chapters.filter(
     (chapter) =>
@@ -57,8 +77,18 @@ export function PublishTab({
       !published.has(chapter.index) &&
       !uncertainChapters.has(chapter.index),
   ).length;
+  const requestedCount = Number(publishCount);
+  const publishLimit =
+    Number.isInteger(requestedCount) && requestedCount > 0
+      ? Math.min(requestedCount, publishable)
+      : publishable;
 
   async function persist(showNotice: boolean): Promise<boolean> {
+    // 没改过设置就不要回写：旧页面停留太久时，回写会把别处更新过的书名覆盖成旧值。
+    if (!dirty) {
+      if (showNotice) setNotice("发布设置无改动");
+      return true;
+    }
     setSaving(true);
     setError("");
     try {
@@ -75,12 +105,15 @@ export function PublishTab({
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          publish: { fanqie: { bookName, bookId, autoSubmit, headless, selectors } },
+          publish: {
+            fanqie: { bookName, bookId, autoSubmit, aiAssisted, headless, selectors },
+          },
         }),
       });
       const data = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(data.error ?? "保存失败");
       if (showNotice) setNotice("发布设置已保存");
+      setDirty(false);
       await onRefresh();
       return true;
     } catch (err) {
@@ -175,13 +208,13 @@ export function PublishTab({
     const action = autoSubmit ? "直接提交发布" : "保存为草稿";
     if (
       !window.confirm(
-        `将自动操作浏览器，把 ${publishable} 个未发布章节${action}到番茄小说《${bookName}》。\n\n自动化发布可能违反平台规则或触发风控，请确认已了解风险。继续？`,
+        `将自动操作浏览器，把 ${publishLimit} 个未发布章节${action}到番茄小说《${bookName}》。\n\n自动化发布可能违反平台规则或触发风控，请确认已了解风险。继续？`,
       )
     ) {
       return;
     }
     if (!(await persist(false))) return;
-    await onStartJob("fanqie-publish", { confirmPublish: true });
+    await onStartJob("fanqie-publish", { confirmPublish: true, count: publishLimit });
   }
 
   return (
@@ -218,7 +251,10 @@ export function PublishTab({
                 <input
                   className="input"
                   value={bookName}
-                  onChange={(event) => setBookName(event.target.value)}
+                  onChange={(event) => {
+                    setBookName(event.target.value);
+                    setDirty(true);
+                  }}
                   placeholder="与番茄后台的作品名一致"
                 />
               </label>
@@ -227,18 +263,42 @@ export function PublishTab({
                 <input
                   className="input"
                   value={bookId}
-                  onChange={(event) => setBookId(event.target.value)}
+                  onChange={(event) => {
+                    setBookId(event.target.value);
+                    setDirty(true);
+                  }}
                   placeholder="留空时按书名定位作品"
                 />
               </label>
             </div>
+            <label className="field">
+              <span>发布设置：是否使用 AI 辅助</span>
+              <select
+                className="input"
+                value={aiAssisted ? "yes" : "no"}
+                onChange={(event) => {
+                  setAiAssisted(event.target.value === "yes");
+                  setDirty(true);
+                }}
+              >
+                <option value="yes">是</option>
+                <option value="no">否</option>
+              </select>
+            </label>
+            <p className="hint">
+              这里按番茄后台的实际作品名匹配；修改项目书名时也会自动同步到这里。AI
+              声明仅在自动提交且平台弹出该选项时生效。
+            </p>
 
             <label className="checkbox-row">
               <input
                 className="switch"
                 type="checkbox"
                 checked={autoSubmit}
-                onChange={(event) => setAutoSubmit(event.target.checked)}
+                onChange={(event) => {
+                  setAutoSubmit(event.target.checked);
+                  setDirty(true);
+                }}
               />
               <span>自动完成「下一步 → 内容检测 → 确认提交」（关闭时只保存草稿）</span>
             </label>
@@ -247,7 +307,10 @@ export function PublishTab({
                 className="switch"
                 type="checkbox"
                 checked={headless}
-                onChange={(event) => setHeadless(event.target.checked)}
+                onChange={(event) => {
+                  setHeadless(event.target.checked);
+                  setDirty(true);
+                }}
               />
               <span>发布时使用无头浏览器（登录过程始终可见）</span>
             </label>
@@ -258,7 +321,10 @@ export function PublishTab({
                 className="input code-area"
                 rows={9}
                 value={selectorsText}
-                onChange={(event) => setSelectorsText(event.target.value)}
+                onChange={(event) => {
+                  setSelectorsText(event.target.value);
+                  setDirty(true);
+                }}
                 spellCheck={false}
               />
               <p className="hint">
@@ -271,6 +337,20 @@ export function PublishTab({
             {error ? <p className="form-error">{error}</p> : null}
             {notice ? <p className="form-note">{notice}</p> : null}
 
+            <div className="publish-count-field">
+              <span>本次发布</span>
+              <input
+                className="input input-sm"
+                type="number"
+                min={1}
+                max={publishable || 1}
+                value={publishCount}
+                placeholder={String(publishable)}
+                disabled={saving || publishable === 0}
+                onChange={(event) => setPublishCount(event.target.value)}
+              />
+              <span>章（留空发布全部 {publishable} 章）</span>
+            </div>
             <div className="button-row">
               <button className="btn" onClick={() => persist(true)} disabled={saving}>
                 保存设置
@@ -283,7 +363,7 @@ export function PublishTab({
                 onClick={handlePublish}
                 disabled={saving || publishable === 0}
               >
-                发布 {publishable} 章
+                发布 {publishLimit} 章
               </button>
             </div>
 
@@ -293,8 +373,8 @@ export function PublishTab({
               </li>
               <li>首次建议关闭「自动提交」，先验证存草稿流程。</li>
               <li>
-                正式提交时会自动选择「仅基础检测」，并在发布设置中声明「使用
-                AI：是」；已提交成功的章节在下次发布时会自动跳过。
+                正式提交时会自动选择「仅基础检测」，并按上方配置声明「使用 AI：
+                {aiAssisted ? "是" : "否"}」；已提交成功的章节在下次发布时会自动跳过。
               </li>
             </ol>
             <p className="hint">
@@ -373,6 +453,46 @@ export function PublishTab({
                       </div>
                     </div>
                     <p className="muted small">{entry.message ?? "提交结果无法确认"}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {publishedEntries.length ? (
+            <div className="rejected-drafts">
+              <p className="canon-label">
+                已发布章节（本地台账；番茄后台删除后不会自动感知）
+              </p>
+              <div className="continuity-list">
+                {publishedEntries.map((entry) => (
+                  <article
+                    key={`${entry.bookId || entry.bookName}-${entry.chapter}`}
+                    className="continuity-chapter"
+                  >
+                    <div className="continuity-chapter-head">
+                      <div>
+                        <span className="plan-index">
+                          {String(entry.chapter).padStart(2, "0")}
+                        </span>{" "}
+                        <span className="canon-name">第 {entry.chapter} 章</span>
+                      </div>
+                      <div className="panel-head-tools">
+                        <span className="muted small">
+                          {new Date(entry.at).toLocaleString("zh-CN", { hour12: false })}
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-sm danger-text"
+                          onClick={() => handleResolve(entry.chapter, false)}
+                          disabled={resolving !== null || disabled}
+                        >
+                          {resolving === entry.chapter ? (
+                            <BusyLabel>处理中…</BusyLabel>
+                          ) : (
+                            "标记未发布"
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </article>
                 ))}
               </div>

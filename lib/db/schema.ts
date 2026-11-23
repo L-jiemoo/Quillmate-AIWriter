@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { nowIso } from "../utils";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // 结构化数据表。章节正文、世界观、大纲、审校报告等长文本仍保存在 Markdown 文件里。
 const SCHEMA_V1 = `
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS projects (
   fanqie_book_id TEXT NOT NULL DEFAULT '',
   fanqie_book_name TEXT NOT NULL DEFAULT '',
   fanqie_auto_submit INTEGER NOT NULL DEFAULT 0,
+  fanqie_ai_assisted INTEGER NOT NULL DEFAULT 1,
   fanqie_headless INTEGER NOT NULL DEFAULT 0,
   fanqie_selectors_json TEXT NOT NULL DEFAULT '{}',
   state_updated_at TEXT NOT NULL,
@@ -392,6 +393,18 @@ export function ensureSchema(db: DatabaseSync): void {
   }
   if (current < 5) {
     insertMigration.run(5, nowIso(), "architecture facts, item location and relation graph");
+  }
+  // v6 补 AI 辅助声明列；旧库按默认“是”保持原行为。
+  const projectColumns = db
+    .prepare("PRAGMA table_info(projects)")
+    .all() as unknown as Array<{ name: string }>;
+  if (!projectColumns.some((column) => column.name === "fanqie_ai_assisted")) {
+    db.exec(
+      "ALTER TABLE projects ADD COLUMN fanqie_ai_assisted INTEGER NOT NULL DEFAULT 1",
+    );
+  }
+  if (current < 6) {
+    insertMigration.run(6, nowIso(), "fanqie ai-assisted declaration");
   }
   // 兼容早期 v3 测试库：story_meta 可能还没有 suppressed_json 列。
   const storyMetaColumns = db

@@ -437,7 +437,11 @@ export function JobPanel({
               }}
               disabled={job?.cancelRequested}
             >
-              {job?.cancelRequested ? "正在取消…（当前模型调用结束后停止）" : "取消任务"}
+              {job?.cancelRequested
+                ? job.type === "fanqie-publish"
+                  ? "正在取消…（当前浏览器步骤结束后停止）"
+                  : "正在取消…（当前模型调用结束后停止）"
+                : "取消任务"}
             </button>
           ) : job && RETRYABLE.includes(job.status) ? (
             <button className="btn btn-block" onClick={onRetryJob}>

@@ -723,6 +723,8 @@ export interface FanqieConfig {
   bookId: string;
   bookName: string;
   autoSubmit: boolean;
+  // 发布设置里的「是否使用 AI 辅助」声明；旧配置缺省时按“是”处理。
+  aiAssisted?: boolean;
   headless: boolean;
   selectors: Partial<FanqieSelectors>;
 }

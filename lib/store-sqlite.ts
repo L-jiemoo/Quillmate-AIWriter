@@ -608,7 +608,18 @@ export async function updateProject(
 
   if (patch.meta) {
     const meta = patch.meta;
-    if (typeof meta.title === "string" && meta.title.trim()) file.meta.title = meta.title.trim();
+    const previousTitle = file.meta.title;
+    if (typeof meta.title === "string" && meta.title.trim()) {
+      file.meta.title = meta.title.trim();
+      // 发布按番茄书名定位作品；书名原本跟随项目标题时同步更新，避免改名后发布仍在找旧名。
+      const bookName = file.publish.fanqie.bookName.trim();
+      if (
+        !patch.publish?.fanqie?.bookName &&
+        (!bookName || bookName === previousTitle)
+      ) {
+        file.publish.fanqie.bookName = file.meta.title;
+      }
+    }
     if (typeof meta.genre === "string" && meta.genre.trim()) file.meta.genre = meta.genre.trim();
     if (typeof meta.tone === "string" && meta.tone.trim()) file.meta.tone = meta.tone.trim();
     if (typeof meta.idea === "string") file.meta.idea = meta.idea;

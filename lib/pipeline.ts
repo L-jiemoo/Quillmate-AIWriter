@@ -5622,10 +5622,10 @@ async function runFanqiePublish(job: Job): Promise<void> {
     else if (entry?.status === "uncertain") uncertain.add(chapter.index);
   }
 
-  const chapters = written.filter(
+  const pending = written.filter(
     (chapter) => !published.has(chapter.index) && !uncertain.has(chapter.index),
   );
-  const skipped = written.length - chapters.length;
+  const skipped = written.length - pending.length;
   if (skipped > 0) {
     logJob(
       job,
@@ -5635,10 +5635,24 @@ async function runFanqiePublish(job: Job): Promise<void> {
     );
   }
 
-  if (!chapters.length) {
+  if (!pending.length) {
     logJob(job, "没有新的已写章节需要发布；所有已写章节都已提交过。");
     job.result = "无新章节需要发布";
     return;
+  }
+
+  // 发布页可指定本次只发多少章；缺省或超出待发数时按全部处理。
+  const requested = Number(job.params.count);
+  const limit =
+    Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, pending.length)
+      : pending.length;
+  const chapters = pending.slice(0, limit);
+  if (limit < pending.length) {
+    logJob(
+      job,
+      `本次按设置只发布前 ${limit} 章，剩余 ${pending.length - limit} 章留待下次`,
+    );
   }
 
   logJob(
