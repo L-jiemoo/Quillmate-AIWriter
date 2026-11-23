@@ -53,6 +53,7 @@ import {
   slugify,
 } from "./utils";
 import type {
+  CanonFact,
   CanonFacts,
   ChapterContent,
   ChapterPlan,
@@ -70,6 +71,7 @@ import type {
   ProjectPlan,
   ProjectState,
   ProjectSummary,
+  PlanItem,
   PublishLedger,
   PublishLedgerStatus,
   PublishRecord,
@@ -859,7 +861,14 @@ export interface CommitArchitectureResult {
 // 大纲、世界观、主线大纲和人物卡全部生成并通过校验后，再一次性提交。
 export async function commitArchitecture(
   slug: string,
-  generated: { plan: ProjectPlan; bible: string; outlineMd: string; planLedger?: PlanLedger },
+  generated: {
+    plan: ProjectPlan;
+    bible: string;
+    outlineMd: string;
+    planLedger?: PlanLedger;
+    facts?: CanonFact[];
+    keyItems?: PlanItem[];
+  },
   characters: Character[],
   options: { seedCanon?: boolean } = {},
 ): Promise<CommitArchitectureResult> {
@@ -903,7 +912,7 @@ export async function commitArchitecture(
   const planLedger = generated.planLedger
     ? normalizePlanLedger(generated.planLedger)
     : derivePlanLedger(sortedPlan, syncedOutline);
-  assertValidPlanLedger(planLedger, sortedPlan);
+  assertValidPlanLedger(planLedger, sortedPlan, merged.characters);
   const nextFile: ProjectFile = {
     ...file,
     meta: {
@@ -914,7 +923,18 @@ export async function commitArchitecture(
   };
   const initialCanon =
     options.seedCanon === true && isCanonEmpty(await readCanon(slug))
-      ? buildInitialCanon(merged.characters)
+      ? buildInitialCanon(merged.characters, {
+          facts: generated.facts ?? [],
+          items: (generated.keyItems ?? []).map((item) => ({
+            name: item.name,
+            aliases: [...item.aliases],
+            holder: item.holder,
+            location: item.location,
+            state: item.state,
+            note: item.note,
+            chapter: item.introducedChapter || 0,
+          })),
+        })
       : null;
 
   const writes = [

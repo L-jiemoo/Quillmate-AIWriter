@@ -1,5 +1,5 @@
 import { DEFAULT_FANQIE } from "../store-file";
-import { emptyCanon, normalizeReviewResult } from "../canon";
+import { emptyCanon, normalizeCanonFacts, normalizeReviewResult } from "../canon";
 import {
   emptyMemory,
   normalizeChapterMemory,
@@ -480,7 +480,12 @@ export function getCanon(slug: string): CanonFacts {
   const meta = db
     .prepare("SELECT * FROM canon_meta WHERE slug = ?")
     .get(slug) as
-    | { current_day: string; last_chapter: number; updated_at: string }
+    | {
+        current_day: string;
+        last_chapter: number;
+        updated_at: string;
+        base_facts_json: string;
+      }
     | undefined;
   if (!meta) return emptyCanon();
 
@@ -501,6 +506,7 @@ export function getCanon(slug: string): CanonFacts {
     name: string;
     aliases_json: string;
     holder: string;
+    location: string;
     state: string;
     note: string;
     chapter: number;
@@ -517,6 +523,9 @@ export function getCanon(slug: string): CanonFacts {
     .prepare("SELECT rule FROM canon_rules WHERE slug = ? ORDER BY id")
     .all(slug) as unknown as Array<{ rule: string }>;
 
+  const facts = normalizeCanonFacts(
+    parseJson<unknown[]>(meta.base_facts_json ?? "[]", []),
+  );
   return {
     characters: characters.map((row) => ({
       name: row.name,
@@ -531,6 +540,7 @@ export function getCanon(slug: string): CanonFacts {
       name: row.name,
       aliases: parseJson<string[]>(row.aliases_json, []),
       holder: row.holder,
+      location: row.location,
       state: row.state,
       note: row.note,
       chapter: Number(row.chapter),
@@ -545,6 +555,7 @@ export function getCanon(slug: string): CanonFacts {
       })),
     },
     rules: rules.map((row) => row.rule),
+    ...(facts.length ? { facts } : {}),
     lastChapter: Number(meta.last_chapter),
     updatedAt: meta.updated_at,
   };
@@ -581,8 +592,8 @@ function replaceCanonInTransaction(db = getDatabase(), slug: string, canon: Cano
 
   const itemInsert = db.prepare(
     `INSERT INTO canon_items (
-      slug, name, aliases_json, holder, state, note, chapter
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      slug, name, aliases_json, holder, location, state, note, chapter
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const item of canon.items) {
     itemInsert.run(
@@ -590,6 +601,7 @@ function replaceCanonInTransaction(db = getDatabase(), slug: string, canon: Cano
       item.name,
       JSON.stringify(item.aliases ?? []),
       item.holder,
+      item.location ?? "",
       item.state,
       item.note,
       item.chapter,
@@ -607,8 +619,14 @@ function replaceCanonInTransaction(db = getDatabase(), slug: string, canon: Cano
   for (const rule of canon.rules) ruleInsert.run(slug, rule);
 
   db.prepare(
-    "INSERT INTO canon_meta (slug, current_day, last_chapter, updated_at) VALUES (?, ?, ?, ?)",
-  ).run(slug, canon.timeline.currentDay, canon.lastChapter, canon.updatedAt);
+    "INSERT INTO canon_meta (slug, current_day, last_chapter, updated_at, base_facts_json) VALUES (?, ?, ?, ?, ?)",
+  ).run(
+    slug,
+    canon.timeline.currentDay,
+    canon.lastChapter,
+    canon.updatedAt,
+    JSON.stringify(canon.facts ?? []),
+  );
   db.prepare("UPDATE projects SET updated_at = ? WHERE slug = ?").run(
     canon.updatedAt,
     slug,

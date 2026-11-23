@@ -1251,12 +1251,22 @@ export function storyChecks(
     }
   }
   for (const group of timeGroups.values()) {
-    if (group.locations.size <= 1) continue;
+    // “槐花村”与“槐花村西地主空院”是同一地点的不同粒度，不能算两地。
+    const locations = [...group.locations];
+    const distinct = locations.filter(
+      (location) =>
+        !locations.some(
+          (other) =>
+            other !== location &&
+            (other.includes(location) || location.includes(other)),
+        ),
+    );
+    if (distinct.length <= 1) continue;
     const first = group.events[0];
     issues.push({
       severity: "warning",
       code: "same-time-different-locations",
-      message: `${group.participant} 在同一时间出现在 ${group.locations.size} 个不同地点，请核对时间线或地点描写。`,
+      message: `${group.participant} 在同一时间出现在 ${distinct.length} 个不同地点，请核对时间线或地点描写。`,
       chapter: first.chapter,
       evidence: group.events.map((event) => `第 ${event.chapter} 章：${event.location}`).join("；"),
     });

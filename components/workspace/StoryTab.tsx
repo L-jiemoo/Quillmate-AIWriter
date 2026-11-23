@@ -14,13 +14,22 @@ import type {
   StoryLedger,
   StoryStatsView,
 } from "@/lib/types";
+import { itemOwnershipAt, relationsAt } from "@/lib/plan-view";
 import { errorMessage } from "@/lib/utils";
 
-type StoryView = "states" | "relations" | "events" | "foreshadows";
+type StoryView =
+  | "states"
+  | "relations"
+  | "events"
+  | "foreshadows"
+  | "planned-relations"
+  | "items";
 
 const VIEWS: { key: StoryView; label: string }[] = [
   { key: "states", label: "人物状态" },
   { key: "relations", label: "人物关系" },
+  { key: "planned-relations", label: "架构关系" },
+  { key: "items", label: "物品归属" },
   { key: "events", label: "剧情事件" },
   { key: "foreshadows", label: "伏笔" },
 ];
@@ -249,6 +258,15 @@ export function StoryTab({
     return [...names].filter(Boolean).sort((a, b) => a.localeCompare(b, "zh-CN"));
   }, [detail.characters, story]);
 
+  const plannedRelations = useMemo(
+    () => relationsAt(detail.planLedger, chapter),
+    [detail.planLedger, chapter],
+  );
+  const itemOwnership = useMemo(
+    () => itemOwnershipAt(detail.planLedger, chapter),
+    [detail.planLedger, chapter],
+  );
+
   const loadStory = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -383,6 +401,16 @@ export function StoryTab({
             {item.key === "events" && stats ? (
               <span className="segmented-count">{stats.events}</span>
             ) : null}
+            {item.key === "planned-relations" ? (
+              <span className="segmented-count">
+                {detail.planLedger?.relations.length ?? 0}
+              </span>
+            ) : null}
+            {item.key === "items" ? (
+              <span className="segmented-count">
+                {detail.planLedger?.itemRegistry.length ?? 0}
+              </span>
+            ) : null}
             {item.key === "foreshadows" && stats ? (
               <span className="segmented-count">{stats.openForeshadows}</span>
             ) : null}
@@ -457,6 +485,97 @@ export function StoryTab({
           ) : null}
         </div>
       </div>
+
+      {view === "planned-relations" ? (
+        <section className="panel">
+          <div className="panel-head">
+            <h2 className="panel-title">架构人物关系图</h2>
+            <span className="muted small">截至第 {chapter} 章</span>
+          </div>
+          <div className="panel-body">
+            {plannedRelations.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>从</th>
+                      <th>到</th>
+                      <th>关系</th>
+                      <th>强度</th>
+                      <th>方向</th>
+                      <th>生效章节</th>
+                      <th>变化事件</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {plannedRelations.map((relation) => (
+                      <tr key={relation.id}>
+                        <td>{relation.from}</td>
+                        <td>{relation.to}</td>
+                        <td>{relation.type}</td>
+                        <td>{relation.strength}/5</td>
+                        <td>{relation.direction === "one-way" ? "单向" : "双向"}</td>
+                        <td>
+                          第 {relation.startChapter}-
+                          {relation.endChapter || "持续"} 章
+                        </td>
+                        <td>{relation.changeEventIds.join("、") || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted">还没有架构关系图。生成架构后会自动登记。</p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {view === "items" ? (
+        <section className="panel">
+          <div className="panel-head">
+            <h2 className="panel-title">物品归属快照</h2>
+            <span className="muted small">截至第 {chapter} 章</span>
+          </div>
+          <div className="panel-body">
+            {itemOwnership.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>物品</th>
+                      <th>持有人</th>
+                      <th>位置</th>
+                      <th>状态</th>
+                      <th>最近变更</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {itemOwnership.map((snapshot) => (
+                      <tr key={snapshot.item}>
+                        <td>{snapshot.item}</td>
+                        <td>{snapshot.holder || "未知"}</td>
+                        <td>{snapshot.location || "未知"}</td>
+                        <td>{snapshot.state || "未记录"}</td>
+                        <td>
+                          {snapshot.changedChapter
+                            ? `第 ${snapshot.changedChapter} 章${
+                                snapshot.reason ? `：${snapshot.reason}` : ""
+                              }`
+                            : "架构初始"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted">还没有物品归属表。生成架构后会自动登记。</p>
+            )}
+          </div>
+        </section>
+      ) : null}
 
       {view === "states" ? (
         <section className="panel">

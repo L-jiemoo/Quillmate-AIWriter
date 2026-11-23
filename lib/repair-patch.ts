@@ -12,6 +12,8 @@ export interface RepairEdit {
 export interface RepairPatch {
   issueId: string;
   edits: RepairEdit[];
+  // 整条问题实际无需修改时使用；有值时 edits 必须为空，由后续审校复核。
+  noChangeReason?: string;
 }
 
 export interface EditRecord {
@@ -89,8 +91,15 @@ export function normalizeRepairPatches(input: unknown): RepairPatch[] {
   return raw.map((item) => {
     const patch = (item ?? {}) as Record<string, unknown>;
     const rawEdits = Array.isArray(patch.edits) ? patch.edits : [];
+    const noChangeReason = str(
+      patch.noChangeReason ??
+        patch.no_change_reason ??
+        patch.unchangedReason ??
+        patch.unchanged_reason,
+    ).trim();
     return {
       issueId: str(patch.issueId ?? patch.issue_id).trim(),
+      ...(noChangeReason ? { noChangeReason } : {}),
       edits: rawEdits.map((edit) => {
         const value = (edit ?? {}) as Record<string, unknown>;
         return {
@@ -260,7 +269,7 @@ export function paragraphsMatchingAnchors(
 ): string[] {
   const fragments = anchors
     .filter(Boolean)
-    .flatMap((anchor) => [anchor, ...evidenceFragments(anchor)]);
+    .flatMap((anchor) => [anchor, ...splitEvidenceFragments(anchor)]);
   const result: string[] = [];
   for (const paragraph of paragraphsOf(text)) {
     const trimmed = paragraph.text.trim();
@@ -316,18 +325,42 @@ function anchorMatchesParagraph(anchor: string, paragraph: string): boolean {
 }
 
 // 审校证据常用“……”把不同段落的原文拼在一起，整条证据无法在正文中命中。
-function evidenceFragments(anchor: string): string[] {
+export function splitEvidenceFragments(anchor: string): string[] {
   return anchor
     .split(/…+|\.{3,}|⋯+|[／/|｜]+|\n+/u)
     .map((part) => stripOuterQuotes(part))
     .filter((part) => part.length >= 2);
 }
 
+const EVIDENCE_COVERAGE_MIN_LENGTH = 6;
+
+// 补丁后 evidence 的每个有效片段仍原样存在，且没有任何 edit 落在该片段上，
+// 说明补丁没有触及审校引用的原句；下一轮审校很可能按同一证据重复报同一问题。
+export function issueEvidenceUnchanged(
+  issue: ContinuityIssue,
+  texts: string[],
+  editedAnchors: string[] = [],
+): boolean {
+  const fragments = splitEvidenceFragments(issue.evidence).filter(
+    (part) => part.length >= EVIDENCE_COVERAGE_MIN_LENGTH,
+  );
+  if (!fragments.length) return false;
+  return fragments.every((fragment) => {
+    const stillPresent = texts.some((text) => textContainsAnchor(text, fragment));
+    if (!stillPresent) return false;
+    return !editedAnchors.some(
+      (anchor) =>
+        textContainsAnchor(anchor, fragment) ||
+        textContainsAnchor(fragment, anchor),
+    );
+  });
+}
+
 function authorizedParagraphs(text: string, anchors: string[]): Set<number> {
   const paragraphs = paragraphsOf(text);
   const fragments = anchors
     .filter(Boolean)
-    .flatMap((anchor) => [anchor, ...evidenceFragments(anchor)]);
+    .flatMap((anchor) => [anchor, ...splitEvidenceFragments(anchor)]);
   const allowed = new Set<number>();
   for (const paragraph of paragraphs) {
     if (fragments.some((fragment) => anchorMatchesParagraph(fragment, paragraph.text))) {
@@ -383,6 +416,7 @@ export function applyRepairPatchesAcross(input: {
   }
 
   const editedIssues = new Set<string>();
+  const declaredIssues = new Set<string>();
   const located: LocatedEdit[] = [];
 
   for (const patch of input.patches) {
@@ -392,6 +426,12 @@ export function applyRepairPatchesAcross(input: {
         "UNKNOWN_ISSUE",
         `修复补丁引用了不存在的问题编号：${issueId || "（空）"}`,
       );
+    }
+    // 模型确认问题实际不成立时，允许用 noChangeReason 取代空补丁；
+    // 是否成立由后续审校复核，程序只保证不再是“无理由的空修改”。
+    if (!patch.edits.length && patch.noChangeReason?.trim()) {
+      declaredIssues.add(issueId);
+      continue;
     }
     if (!patch.edits.length) {
       throw new RepairPatchError("EMPTY_EDIT", `问题 ${issueId} 的补丁没有任何修改`);
@@ -412,7 +452,10 @@ export function applyRepairPatchesAcross(input: {
         throw new RepairPatchError("MISSING_REASON", `问题 ${issueId} 的补丁缺少修改理由`);
       }
       if (edit.replacement === edit.originalText) {
-        throw new RepairPatchError("UNCHANGED_EDIT", `问题 ${issueId} 的补丁没有实际修改内容`);
+        throw new RepairPatchError(
+          "UNCHANGED_EDIT",
+          `问题 ${issueId} 的补丁没有实际修改内容；如该问题实际无需修改，请用 noChangeReason 说明，不要输出无修改的 edit`,
+        );
       }
       const anchor = locateAnchor(chapter.text, edit.originalText);
       if (!anchor.location) {
@@ -436,7 +479,7 @@ export function applyRepairPatchesAcross(input: {
       if (replacement === anchor.location.text) {
         throw new RepairPatchError(
           "UNCHANGED_EDIT",
-          `问题 ${issueId} 的补丁没有实际修改内容`,
+          `问题 ${issueId} 的补丁没有实际修改内容；如该问题实际无需修改，请用 noChangeReason 说明，不要输出无修改的 edit`,
         );
       }
       located.push({
@@ -454,7 +497,9 @@ export function applyRepairPatchesAcross(input: {
     }
   }
 
-  const uncovered = [...issueById.keys()].filter((id) => !editedIssues.has(id));
+  const uncovered = [...issueById.keys()].filter(
+    (id) => !editedIssues.has(id) && !declaredIssues.has(id),
+  );
   if (uncovered.length) {
     throw new RepairPatchError(
       "UNCOVERED_ISSUE",

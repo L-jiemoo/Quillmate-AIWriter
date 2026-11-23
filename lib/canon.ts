@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { nowIso } from "./utils";
 import type {
   CanonCharacter,
   CanonCharacterStatus,
   CanonDeadline,
+  CanonFact,
+  CanonFactKind,
   CanonFacts,
   CanonItem,
   CanonTimeline,
@@ -165,12 +168,84 @@ function chapterLabel(chapter: number): string {
   return chapter > 0 ? `第 ${chapter} 章` : "架构设定";
 }
 
+const FACT_KINDS = new Set<CanonFactKind>([
+  "world",
+  "rule",
+  "event",
+  "character",
+  "item",
+  "other",
+]);
+
+function stableFactId(kind: string, content: string): string {
+  const digest = createHash("sha256").update(`${kind}:${content}`, "utf8").digest("hex");
+  return `fact-${digest.slice(0, 12)}`;
+}
+
+export function normalizeCanonFact(input: unknown): CanonFact | null {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const content = str(record.content).trim();
+  if (!content) return null;
+  const rawKind = str(record.kind).trim().toLowerCase() as CanonFactKind;
+  const kind = FACT_KINDS.has(rawKind) ? rawKind : "other";
+  const establishedAtRaw = str(record.establishedAt ?? record.established_at).trim();
+  const establishedAt =
+    establishedAtRaw === "character" || establishedAtRaw === "chapter"
+      ? establishedAtRaw
+      : "architecture";
+  const chapter = Math.max(0, num(record.chapter));
+  return {
+    id: str(record.id).trim() || stableFactId(kind, content),
+    kind,
+    content,
+    establishedAt,
+    chapter,
+    // event 事实可能是被误塞进来的未来剧情，读取时也一律按背景参考处理。
+    immutable:
+      record.immutable !== false && kind !== "event" && kind !== "other",
+    note: str(record.note).trim(),
+  };
+}
+
+export function normalizeCanonFacts(input: unknown): CanonFact[] {
+  if (!Array.isArray(input)) return [];
+  const facts: CanonFact[] = [];
+  const ids = new Set<string>();
+  for (const item of input) {
+    const fact = normalizeCanonFact(item);
+    if (!fact) continue;
+    let id = fact.id;
+    let suffix = 2;
+    while (ids.has(id)) {
+      id = `${fact.id}-${suffix}`;
+      suffix += 1;
+    }
+    ids.add(id);
+    facts.push({ ...fact, id });
+    if (facts.length >= 200) break;
+  }
+  return facts;
+}
+
+// 架构第一阶段的 facts 只需 content/kind；首次确立位置和 ID 由程序补齐。
+export function normalizeArchitectureFacts(input: unknown): CanonFact[] {
+  return normalizeCanonFacts(input).map((fact) => ({
+    ...fact,
+    establishedAt: "architecture" as const,
+    chapter: 0,
+    // 只有世界设定和硬规则是不可变约束；event 事实可能是模型误塞的未来剧情，
+    // 只能作为背景参考，不能反过来否定正文或计划。
+    immutable: fact.kind === "world" || fact.kind === "rule",
+  }));
+}
+
 export function emptyCanon(): CanonFacts {
   return {
     characters: [],
     items: [],
     timeline: { currentDay: "", deadlines: [] },
     rules: [],
+    facts: [],
     lastChapter: 0,
     updatedAt: nowIso(),
   };
@@ -183,16 +258,25 @@ export function isCanonEmpty(canon: CanonFacts): boolean {
     !canon.timeline.currentDay.trim() &&
     canon.timeline.deadlines.length === 0 &&
     canon.rules.length === 0 &&
+    (canon.facts?.length ?? 0) === 0 &&
     canon.lastChapter === 0
   );
 }
 
-// 架构阶段还没有正文可抽取，只能把人物卡转成“待正文确认”的初始基线。
+export interface BuildInitialCanonOptions {
+  facts?: CanonFact[];
+  items?: CanonItem[];
+  updatedAt?: string;
+}
+
+// 架构阶段还没有正文可抽取，只能把人物卡/架构事实/物品基线转成“待正文确认”的初始台账。
 // 统一用 chapter 0 标记，后续第 1 章事实抽取会覆盖为真实状态。
 export function buildInitialCanon(
   characters: Character[],
-  updatedAt = nowIso(),
+  options: string | BuildInitialCanonOptions = {},
 ): CanonFacts {
+  const resolved = typeof options === "string" ? { updatedAt: options } : options;
+  const updatedAt = resolved.updatedAt ?? nowIso();
   return {
     characters: characters
       .map((character): CanonCharacter | null => {
@@ -215,9 +299,14 @@ export function buildInitialCanon(
         };
       })
       .filter((item): item is CanonCharacter => Boolean(item)),
-    items: [],
+    items: (resolved.items ?? []).map((item) => ({
+      ...item,
+      aliases: [...item.aliases],
+      location: item.location ?? "",
+    })),
     timeline: { currentDay: "", deadlines: [] },
     rules: [],
+    facts: normalizeCanonFacts(resolved.facts ?? []),
     lastChapter: 0,
     updatedAt,
   };
@@ -250,6 +339,7 @@ export function canonForChapter(
       ),
     },
     rules: [...canon.rules],
+    facts: (canon.facts ?? []).filter((fact) => fact.chapter <= chapterIndex),
     lastChapter: chapterIndex,
     updatedAt: canon.updatedAt,
   };
@@ -280,6 +370,7 @@ function normalizeCanonItem(input: unknown): CanonItem | null {
     name,
     aliases: uniqueStrings(arr(record.aliases), name),
     holder: str(record.holder).trim(),
+    location: str(record.location).trim(),
     state: str(record.state).trim(),
     note: str(record.note).trim(),
     chapter: num(record.chapter),
@@ -315,6 +406,7 @@ function normalizeCanonTimeline(input: unknown): CanonTimeline {
 export function normalizeCanon(input: unknown): CanonFacts {
   // canon.json 可能来自不同版本，读取时统一结构，避免 UI 和提示词拿到脏数据。
   const record = (input ?? {}) as Record<string, unknown>;
+  const facts = normalizeCanonFacts(record.facts);
   return {
     characters: Array.isArray(record.characters)
       ? record.characters
@@ -330,6 +422,7 @@ export function normalizeCanon(input: unknown): CanonFacts {
       : [],
     timeline: normalizeCanonTimeline(record.timeline),
     rules: arr(record.rules).slice(0, 200),
+    ...(facts.length ? { facts } : {}),
     lastChapter: num(record.lastChapter ?? record.last_chapter),
     updatedAt: str(record.updatedAt ?? record.updated_at, nowIso()),
   };
@@ -441,6 +534,7 @@ function normalizeFactItem(input: unknown): FactItem | null {
     name,
     aliases: uniqueStrings(arr(record.aliases), name),
     holder: str(record.holder).trim(),
+    location: str(record.location).trim(),
     state: str(record.state).trim(),
     note: str(record.note).trim(),
     evidence: str(record.evidence).trim(),
@@ -812,12 +906,17 @@ export function countCritical(issues: ContinuityIssue[]): number {
 function cloneCanon(canon: CanonFacts): CanonFacts {
   return {
     characters: canon.characters.map((item) => ({ ...item, aliases: [...item.aliases] })),
-    items: canon.items.map((item) => ({ ...item, aliases: [...item.aliases] })),
+    items: canon.items.map((item) => ({
+      ...item,
+      aliases: [...item.aliases],
+      location: item.location ?? "",
+    })),
     timeline: {
       currentDay: canon.timeline.currentDay,
       deadlines: canon.timeline.deadlines.map((item) => ({ ...item })),
     },
     rules: [...canon.rules],
+    facts: (canon.facts ?? []).map((item) => ({ ...item })),
     lastChapter: canon.lastChapter,
     updatedAt: canon.updatedAt,
   };
@@ -943,6 +1042,7 @@ export function mergeCanon(
   mode: "write" | "rewrite" = "write",
 ): MergeCanonResult {
   const canon = cloneCanon(base);
+  const canonFacts = canon.facts ?? (canon.facts = []);
   const conflicts: ContinuityIssue[] = [];
 
   for (const fact of extracted.characters) {
@@ -1016,6 +1116,7 @@ export function mergeCanon(
         name: fact.name,
         aliases: uniqueStrings(fact.aliases, fact.name),
         holder: fact.holder,
+        location: fact.location,
         state: fact.state,
         note: fact.note,
         chapter: chapterIndex,
@@ -1048,7 +1149,24 @@ export function mergeCanon(
         });
         continue;
       }
+      if (holderChanged && fact.holder && extracted.story?.events?.length) {
+        const backedByEvent = extracted.story.events.some((event) => {
+          const text = [event.name, event.process, event.result, event.impact]
+            .filter(Boolean)
+            .join("\n");
+          return text.includes(fact.name) && text.includes(fact.holder);
+        });
+        if (!backedByEvent) {
+          conflicts.push({
+            severity: "warning",
+            type: "物品归属",
+            evidence: fact.evidence,
+            detail: `「${existing.name}」持有人变为 ${fact.holder}，但本章已抽取的剧情事件里没有对应的交接/转移描写。请确认物品归属与事件是否一致。`,
+          });
+        }
+      }
       if (fact.holder) existing.holder = fact.holder;
+      if (fact.location) existing.location = fact.location;
       if (fact.state) existing.state = fact.state;
       if (fact.note) existing.note = fact.note;
       existing.chapter = Math.max(existing.chapter, chapterIndex);
@@ -1086,6 +1204,18 @@ export function mergeCanon(
     const trimmed = rule.trim();
     if (trimmed && !canon.rules.some((item) => normalizeName(item) === normalizeName(trimmed))) {
       canon.rules.push(trimmed);
+      const factId = stableFactId("rule", trimmed);
+      if (!canonFacts.some((fact) => fact.id === factId)) {
+        canonFacts.push({
+          id: factId,
+          kind: "rule",
+          content: trimmed,
+          establishedAt: "chapter",
+          chapter: chapterIndex,
+          immutable: false,
+          note: "",
+        });
+      }
     }
   }
 
@@ -1128,7 +1258,25 @@ export function formatCanonForPrompt(
     .sort((a, b) => b.chapter - a.chapter)
     .slice(0, options.itemLimit ?? (includeChapters ? 40 : 30));
   const deadlines = canon.timeline.deadlines.slice(0, includeChapters ? 20 : 12);
-  const rules = canon.rules.slice(0, includeChapters ? 20 : 15);
+  // 规则类事实排在最前并放宽上限，避免“古印不出山门”这类硬规则被截断。
+  const hardFacts = (canon.facts ?? [])
+    .filter(
+      (fact) =>
+        fact.kind === "world" || fact.kind === "rule" || fact.immutable,
+    )
+    .sort(
+      (left, right) =>
+        (left.kind === "rule" ? 0 : 1) - (right.kind === "rule" ? 0 : 1),
+    )
+    .slice(0, includeChapters ? 160 : 120);
+  const factRuleKeys = new Set(
+    hardFacts
+      .filter((fact) => fact.kind === "rule")
+      .map((fact) => normalizeName(fact.content)),
+  );
+  const rules = canon.rules
+    .filter((rule) => !factRuleKeys.has(normalizeName(rule)))
+    .slice(0, includeChapters ? 20 : 15);
 
   const lines: string[] = [];
   if (dead.length) {
@@ -1164,10 +1312,24 @@ export function formatCanonForPrompt(
     for (const item of items) {
       const chapter = includeChapters ? `（${chapterLabel(item.chapter)}）` : "";
       const holder = item.holder ? `持有人：${clip(item.holder, 30)}` : "持有人未知";
+      const location = item.location ? `；位置：${clip(item.location, 40)}` : "";
       const state = item.state ? `；状态：${clip(item.state, 40)}` : "";
       const note = item.note ? `；${clip(item.note, 80)}` : "";
-      lines.push(`- ${item.name}${chapter}：${holder}${state}${note}`);
+      lines.push(`- ${item.name}${chapter}：${holder}${location}${state}${note}`);
     }
+  }
+  const factLine = (fact: CanonFact): string => {
+    const source =
+      fact.establishedAt === "architecture"
+        ? "架构设定"
+        : fact.establishedAt === "character"
+          ? "角色设定"
+          : chapterLabel(fact.chapter);
+    return `- [${fact.id}] ${clip(fact.content, 160)}（首次确立：${source}）`;
+  };
+  if (hardFacts.length) {
+    lines.push("既定事实与硬性规则（不得静默改写）：");
+    for (const fact of hardFacts) lines.push(factLine(fact));
   }
   if (canon.timeline.currentDay) {
     lines.push(`当前时间：${canon.timeline.currentDay}`);
@@ -1263,15 +1425,23 @@ export function openingRepeatSuspicion(
 
 export function formatIssuesForPrompt(
   issues: ContinuityIssue[],
-  options: { withIds?: boolean } = {},
+  options: {
+    withIds?: boolean;
+    detailLimit?: number;
+    evidenceLimit?: number;
+  } = {},
 ): string {
   if (!issues.length) return "（没有发现明确冲突）";
+  const detailLimit = options.detailLimit ?? 200;
+  const evidenceLimit = options.evidenceLimit ?? 100;
   return issues
     .slice(0, 20)
     .map((issue) => {
-      const evidence = issue.evidence ? `（证据：${clip(issue.evidence, 100)}）` : "";
+      const evidence = issue.evidence
+        ? `（证据：${clip(issue.evidence, evidenceLimit)}）`
+        : "";
       const id = options.withIds && issue.id ? `[${issue.id}] ` : "";
-      return `- ${id}[${issue.severity}] ${issue.type}：${clip(issue.detail, 200)}${evidence}`;
+      return `- ${id}[${issue.severity}] ${issue.type}：${clip(issue.detail, detailLimit)}${evidence}`;
     })
     .join("\n");
 }

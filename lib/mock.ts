@@ -1,7 +1,9 @@
 import { derivePlanLedger } from "./plan-ledger";
 import type {
+  CanonFact,
   ChapterPlan,
   Character,
+  PlanItem,
   PlanLedger,
   ProjectMeta,
   ProjectPlan,
@@ -13,6 +15,8 @@ export interface GeneratedPlan {
   bible: string;
   outlineMd: string;
   planLedger?: PlanLedger;
+  facts?: CanonFact[];
+  keyItems?: PlanItem[];
 }
 
 export function mockPlan(meta: ProjectMeta): GeneratedPlan {

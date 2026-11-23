@@ -40,6 +40,7 @@ export interface PlanEvent {
   id: string;
   name: string;
   chapter: number;
+  thread: string;
   participants: string[];
   premise: string;
   process: string;
@@ -98,12 +99,24 @@ export interface PlanTimelineEntry {
   updatedAt: string;
 }
 
+export type PlanItemChangeType =
+  | "transfer"
+  | "state"
+  | "location"
+  | "introduce"
+  | "destroy"
+  | "other";
+
 export interface PlanItemChange {
   id: string;
   item: string;
   chapter: number;
+  changeType: PlanItemChangeType;
   holder: string;
+  location: string;
+  state: string;
   stateChange: string;
+  reason: string;
   eventIds: string[];
   status: PlanStatus;
   actualChapter: number;
@@ -114,13 +127,50 @@ export interface PlanItemChange {
 // 计划与正文实际发展不一致时只记录偏离，不回写正文、不删除原计划。
 export interface PlanDeviation {
   id: string;
-  planType: "event" | "character-change" | "foreshadow" | "timeline" | "item";
+  planType:
+    | "event"
+    | "character-change"
+    | "foreshadow"
+    | "timeline"
+    | "item"
+    | "relation";
   planId: string;
   chapter: number;
   expected: string;
   actual: string;
   reason: string;
   at: string;
+}
+
+export type PlanRelationDirection = "one-way" | "two-way";
+
+// 架构期人物关系图的一条边：区间 + 强度 + 方向 + 触发变化的事件。
+export interface PlanRelation {
+  id: string;
+  from: string;
+  to: string;
+  type: string;
+  strength: number;
+  direction: PlanRelationDirection;
+  startChapter: number;
+  endChapter: number;
+  changeEventIds: string[];
+  status: PlanStatus;
+  actualChapter: number;
+  evidence: string;
+  updatedAt: string;
+}
+
+// 物品归属表的基线条目；后续变化记录在 PlanLedger.items。
+export interface PlanItem {
+  id: string;
+  name: string;
+  aliases: string[];
+  holder: string;
+  location: string;
+  state: string;
+  introducedChapter: number;
+  note: string;
 }
 
 export interface PlanLedger {
@@ -130,7 +180,12 @@ export interface PlanLedger {
   foreshadows: PlanForeshadow[];
   timeline: PlanTimelineEntry[];
   items: PlanItemChange[];
+  itemRegistry: PlanItem[];
+  relations: PlanRelation[];
   deviations: PlanDeviation[];
+  // 完结章写入成功后标记；0 表示仍在写作中。
+  completedChapter?: number;
+  completedAt?: string;
   updatedAt: string;
 }
 
@@ -171,9 +226,29 @@ export interface CanonItem {
   name: string;
   aliases: string[];
   holder: string;
+  location?: string;
   state: string;
   note: string;
   chapter: number;
+}
+
+export type CanonFactKind =
+  | "world"
+  | "rule"
+  | "event"
+  | "character"
+  | "item"
+  | "other";
+
+// 架构阶段确立的不可变事实；章节抽取补充的内容仍进入 characters/items/rules。
+export interface CanonFact {
+  id: string;
+  kind: CanonFactKind;
+  content: string;
+  establishedAt: "architecture" | "character" | "chapter";
+  chapter: number;
+  immutable: boolean;
+  note: string;
 }
 
 export interface CanonDeadline {
@@ -193,6 +268,7 @@ export interface CanonFacts {
   items: CanonItem[];
   timeline: CanonTimeline;
   rules: string[];
+  facts?: CanonFact[];
   lastChapter: number;
   updatedAt: string;
 }
@@ -211,6 +287,7 @@ export interface FactItem {
   name: string;
   aliases: string[];
   holder: string;
+  location?: string;
   state: string;
   note: string;
   evidence: string;
@@ -677,6 +754,8 @@ export interface ChapterWriteOptions {
   storyContext?: string;
   // 本章计划台账文本；只作为创作计划，不代表已经发生。
   planContext?: string;
+  // 全书完结章：收束主线、回收伏笔、交代人物结局，不留新的重大悬念。
+  finale?: boolean;
 }
 
 export interface ProjectDetail {
@@ -747,6 +826,7 @@ export interface Job {
     | "plan"
     | "extend"
     | "write"
+    | "finale"
     | "rewrite"
     | "repair"
     | "recanon"

@@ -43,6 +43,7 @@ const TYPE_LABEL: Record<Job["type"], string> = {
   plan: "生成架构",
   extend: "补充大纲",
   write: "自动写作",
+  finale: "生成完结章",
   rewrite: "重写章节",
   repair: "定点修复",
   recanon: "重建事实台账",
@@ -197,6 +198,7 @@ export function JobPanel({
   const nextIndex = detail.plan.chapters.length
     ? Math.max(...detail.plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
+  const completedChapter = detail.planLedger?.completedChapter ?? 0;
 
   useEffect(() => {
     const node = consoleRef.current;
@@ -221,6 +223,17 @@ export function JobPanel({
 
   function startExtend() {
     void onStartJob("extend", { count: Math.max(1, Number(extendCount) || 10) });
+  }
+
+  function startFinale() {
+    if (
+      !window.confirm(
+        "生成完结章会按现有计划收束全书，并标记项目“已完结”，之后不能再自动写作或补充大纲。继续？",
+      )
+    ) {
+      return;
+    }
+    void onStartJob("finale");
   }
 
   function startRewrite() {
@@ -455,7 +468,7 @@ export function JobPanel({
             <button
               className={`btn btn-block ${hasArchitecture && pending > 0 ? "btn-primary" : ""}`}
               onClick={startWrite}
-              disabled={running || pending === 0}
+              disabled={running || pending === 0 || Boolean(completedChapter)}
             >
               自动写 {count} 章
             </button>
@@ -494,11 +507,26 @@ export function JobPanel({
             <button
               className="btn btn-block"
               onClick={startExtend}
-              disabled={running || !detail.plan.chapters.length}
+              disabled={running || !detail.plan.chapters.length || Boolean(completedChapter)}
             >
               补充 {extendCount} 章大纲
             </button>
           </div>
+
+          <div className="job-divider" />
+          <p className="job-section-label">完结</p>
+          <p className="hint">
+            {completedChapter
+              ? `全书已完结：第 ${completedChapter} 章。不能再自动写作或补充大纲。`
+              : "按现有计划收束全书，生成完结章后项目标记为已完结。"}
+          </p>
+          <button
+            className="btn btn-block"
+            onClick={startFinale}
+            disabled={running || !detail.plan.chapters.length || Boolean(completedChapter)}
+          >
+            生成完结章
+          </button>
 
           <div className="job-divider" />
           <p className="job-section-label">改稿</p>

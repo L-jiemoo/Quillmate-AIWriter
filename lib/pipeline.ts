@@ -6,6 +6,7 @@ import {
   extractChapterFacts,
   generateCharacters,
   generatePlan,
+  generateRelationGraph,
   RepairNeedsAuthorDecisionError,
   RepairPlanRejectedError,
   repairChapter,
@@ -51,9 +52,13 @@ import {
   buildMemoryContext,
 } from "./memory";
 import {
+  detectFuturePlanConsumption,
   emptyPlanLedger,
+  ensureItemRegistryCoverage,
   formatPlanContext,
   mergePlanLedgers,
+  normalizePlanLedger,
+  planLedgerIdCollisions,
   reconcileChapterPlan,
 } from "./plan-ledger";
 import { promptVersionInfo } from "./prompt-store";
@@ -81,6 +86,7 @@ import {
   applyRepairPatchesAcross,
   describePatchBatch,
   hashText,
+  issueEvidenceUnchanged,
   RepairPatchError,
   textContainsAnchor,
   withIssueIds,
@@ -143,6 +149,7 @@ const JOB_LABELS: Record<Job["type"], string> = {
   plan: "生成架构与角色",
   extend: "补充章节大纲",
   write: "自动写作",
+  finale: "生成完结章",
   rewrite: "重写章节",
   repair: "定点修复",
   recanon: "重建事实台账",
@@ -275,6 +282,9 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
       case "write":
         paused = await runWrite(job, params.count ?? 1);
         break;
+      case "finale":
+        paused = await runFinale(job);
+        break;
       case "rewrite":
         paused = await runRewrite(
           job,
@@ -359,23 +369,34 @@ async function runPlan(job: Job): Promise<void> {
   throwIfCancelled(job);
   logJob(
     job,
-    `细纲已生成（${generated.plan.chapters.length} 章），正在创建人物档案；全部完成前不会写入任何文件…`,
+    `细纲与计划台账已生成（${generated.plan.chapters.length} 章），正在创建人物档案…`,
   );
 
   const characters = await generateCharacters(detail.meta, generated, {
     onProgress: (message) => logJob(job, message),
   });
   throwIfCancelled(job);
+  logJob(
+    job,
+    `角色档案已生成：${characters.map((item) => item.name).join("、")}。先提交架构与角色，再补人物关系图。`,
+  );
 
+  const planLedger = normalizePlanLedger({
+    ...(generated.planLedger ?? emptyPlanLedger()),
+  });
   const committed = await commitArchitecture(
     job.slug,
-    generated,
+    { ...generated, planLedger },
     characters,
     { seedCanon },
   );
   logJob(
     job,
-    `计划台账已登记：${generated.planLedger?.events.length ?? 0} 个计划事件、${generated.planLedger?.foreshadows.length ?? 0} 条计划伏笔（均未视为已发生）。`,
+    `计划台账已登记：${planLedger.events.length} 个计划事件、${planLedger.foreshadows.length} 条计划伏笔、${planLedger.itemRegistry.length} 件物品基线（均未视为已发生）。`,
+  );
+  logJob(
+    job,
+    `架构事实台账：${generated.facts?.length ?? 0} 条既定事实，${generated.keyItems?.length ?? 0} 件初始物品。`,
   );
   job.result = `已生成 ${committed.plan.chapters.length} 章细纲、${committed.characters.length} 位角色`;
   logJob(
@@ -385,13 +406,41 @@ async function runPlan(job: Job): Promise<void> {
   if (committed.seededCanon) {
     logJob(
       job,
-      `已建立架构初始事实台账：${committed.characters.length} 位人物（状态未知，待正文确认）；物品、期限和规则将在正文抽取后补充。`,
+      `已建立架构初始事实台账：${committed.characters.length} 位人物（状态未知，待正文确认）、${generated.facts?.length ?? 0} 条既定事实、${generated.keyItems?.length ?? 0} 件物品基线；后续正文抽取只补充和校正。`,
     );
   }
   logJob(
     job,
     `角色：${committed.characters.map((item) => item.name).join("、")}；主线大纲已同步章节细纲。`,
   );
+
+  // 关系图是架构的补强数据，不能再因为模型编造角色名而回滚已经生成并保存的架构与角色。
+  try {
+    logJob(job, "人物档案已保存，正在生成人物关系图（按章节区间与变化事件）…");
+    const relations = await generateRelationGraph(
+      detail.meta,
+      { ...generated, planLedger },
+      committed.characters,
+      { onProgress: (message) => logJob(job, message) },
+    );
+    throwIfCancelled(job);
+    if (relations.length) {
+      await savePlanLedger(
+        job.slug,
+        normalizePlanLedger({ ...planLedger, relations }),
+      );
+      logJob(
+        job,
+        `人物关系图已保存：${relations.length} 条关系边；可在「剧情台账 → 架构关系」按章节查看。`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof JobCancelledError) throw error;
+    logJob(
+      job,
+      `人物关系图生成失败，但架构与角色已保存，可稍后在剧情台账重新生成：${errorMessage(error)}`,
+    );
+  }
 }
 
 async function runExtend(job: Job, requested: number): Promise<void> {
@@ -400,6 +449,12 @@ async function runExtend(job: Job, requested: number): Promise<void> {
 
   if (!detail.plan.chapters.length) {
     throw new Error("还没有章节大纲，请先生成架构与角色");
+  }
+  const completedChapter = detail.planLedger?.completedChapter ?? 0;
+  if (completedChapter) {
+    throw new Error(
+      `全书已于第 ${completedChapter} 章完结，不能再补充大纲；如需续写请先取消完结标记或重新生成架构`,
+    );
   }
 
   // 新章节从现有最大序号往后接，不复用中间空缺，避免和已发布章节撞号。
@@ -455,12 +510,78 @@ async function runExtend(job: Job, requested: number): Promise<void> {
   );
   throwIfCancelled(job);
   const chapters = extended.chapters;
-  const nextLedger = mergePlanLedgers(
-    detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt),
-    extended.planLedger,
-  );
-  // 章节、主线大纲和计划台账在同一次提交里落盘。
+  const baseLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
+  const collisions = planLedgerIdCollisions(baseLedger, extended.planLedger);
+  if (collisions.length) {
+    throw new Error(
+      `补充大纲的计划 ID 与既有台账冲突（${collisions.slice(0, 5).join("、")}），本次未提交，避免覆盖已有剧情安排`,
+    );
+  }
+  const mergedLedger = mergePlanLedgers(baseLedger, extended.planLedger);
+  const beforeItemCount = mergedLedger.itemRegistry.length;
+  let nextLedger = ensureItemRegistryCoverage(mergedLedger);
+  if (nextLedger.itemRegistry.length > beforeItemCount) {
+    const added = nextLedger.itemRegistry
+      .slice(beforeItemCount)
+      .map((item) => item.name)
+      .slice(0, 8);
+    logJob(
+      job,
+      `续排计划里有未登记的物品，已自动补进物品基线：${added.join("、")}${
+        nextLedger.itemRegistry.length - beforeItemCount > 8 ? "……" : ""
+      }`,
+    );
+  }
+  // 先提交新增章节与台账，再补关系图；关系图失败不能回滚已经生成的章节。
+  const nextPlan = {
+    ...detail.plan,
+    chapters: [...detail.plan.chapters, ...chapters].sort(
+      (left, right) => left.index - right.index,
+    ),
+  };
   const plan = await appendChapters(job.slug, chapters, nextLedger);
+  try {
+    logJob(job, "新增章节已保存，正在补充人物关系图…");
+    const extendedRelations = await generateRelationGraph(
+      detail.meta,
+      {
+        plan: nextPlan,
+        bible: detail.bible,
+        outlineMd: detail.outlineMd,
+        planLedger: nextLedger,
+        keyItems: nextLedger.itemRegistry,
+      },
+      detail.characters,
+      {
+        existing: nextLedger.relations,
+        onProgress: (message) => logJob(job, message),
+      },
+    );
+    throwIfCancelled(job);
+    const relationMap = new Map(
+      nextLedger.relations.map((relation) => [relation.id, relation]),
+    );
+    for (const relation of extendedRelations) {
+      const previous = relationMap.get(relation.id);
+      relationMap.set(relation.id, {
+        ...relation,
+        actualChapter: previous?.actualChapter ?? relation.actualChapter,
+        evidence: previous?.evidence || relation.evidence,
+      });
+    }
+    nextLedger = { ...nextLedger, relations: [...relationMap.values()] };
+    await savePlanLedger(job.slug, nextLedger);
+    logJob(
+      job,
+      `人物关系图已补充：当前共 ${nextLedger.relations.length} 条关系边。`,
+    );
+  } catch (error) {
+    if (error instanceof JobCancelledError) throw error;
+    logJob(
+      job,
+      `人物关系图补充失败，但新增章节已保存，可稍后重试：${errorMessage(error)}`,
+    );
+  }
 
   job.result = `新增 ${chapters.length} 章大纲`;
   logJob(
@@ -883,6 +1004,7 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         storyContext,
         evidenceContext,
         unifiedLedger.text,
+        formatPlanContext(input.project.planLedger, input.chapter),
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -935,11 +1057,21 @@ async function verifyChapter(input: VerifyChapterInput): Promise<VerifyChapterRe
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
     // 普通自动线索只作为审校提示；数据级严重矛盾（如伏笔先回收后埋设）强制保留。
+    const futurePlanIssues =
+      getRuntimeConfig().provider === "mock"
+        ? []
+        : detectFuturePlanConsumption(
+            input.project.planLedger,
+            input.chapter.index,
+            extracted.story,
+            chapterMemory,
+          );
     const issues = mergeIssues(
       audit.issues,
       merged.conflicts,
       checks.hardIssues,
       unifiedLedger.conflicts,
+      futurePlanIssues,
     );
     const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
       (issue) => issue.severity === "critical",
@@ -1388,6 +1520,8 @@ async function verifyDraftChapter(
       cross: Record<number, string>;
       regressionScope: string;
       causalBaselines: CausalBaseline[];
+      editedAnchors: string[];
+      declaredIssues: string[];
     };
     const liveCrossContext = (chapters: Record<number, string>): string =>
       Object.keys(chapters).length
@@ -1421,6 +1555,26 @@ async function verifyDraftChapter(
       }
       return lines.join("\n");
     };
+    const untouchedEvidence = (
+      issues: ContinuityIssue[],
+      text: string,
+      chaptersForCall: Record<number, string>,
+      editedAnchors: string[],
+    ): ContinuityIssue[] => {
+      const texts = [text, ...Object.values(chaptersForCall)];
+      return issues.filter((issue) =>
+        issueEvidenceUnchanged(issue, texts, editedAnchors),
+      );
+    };
+    const coverageHint = (issues: ContinuityIssue[]): string =>
+      [
+        "上一版补丁没有改动审校 evidence 引用的原句；下一轮审校会继续用这些原句报同一个问题。",
+        ...issues.map(
+          (issue) =>
+            `- [${issue.id ?? "issue"}] evidence：${issue.evidence.slice(0, 160)}`,
+        ),
+        "请至少改写其中一处 evidence 引句，让它明确指向台账中的具体物品、持有人或地点；如果该句本身与台账兼容，也要把可能被误读的表述改成明确说法（例如把“不在某地”改成“被关在另一处”）。如果确认整条问题无需修改，请用 noChangeReason 逐字引用原句并说明理由，不要输出无修改的 edit。仍然只改授权段落，不要扩大到无关内容。",
+      ].join("\n");
     const applyPlan = async (
       issues: ContinuityIssue[],
       text: string,
@@ -1428,69 +1582,135 @@ async function verifyDraftChapter(
       evidence: string,
       feedback = "",
     ): Promise<PlanResult> => {
-      const planContext = neighborContextFor(text, chaptersForCall);
-      const plan = await repairChapterPatches(
-        input.meta,
-        input.chapter,
-        text,
-        issues,
-        auditCanon,
-        planContext.previousEnding,
-        planContext.nextOpening,
-        input.rewriteInstruction,
-        feedback,
-        {
-          draftRepair: true,
-          evidenceContext: evidence,
-          authorDirective: refreshAuthorDirective(
-            input.authorDirective,
-            text,
-            chaptersForCall,
-          ),
-          crossChapterContext: liveCrossContext(chaptersForCall),
-          affectedChapters: [
-            input.chapter.index,
-            ...Object.keys(chaptersForCall).map(Number),
-          ],
-        },
-      );
-      const patchChapters: PatchChapter[] = [
-        {
-          index: input.chapter.index,
+      const run = async (callFeedback: string): Promise<PlanResult> => {
+        const planContext = neighborContextFor(text, chaptersForCall);
+        const plan = await repairChapterPatches(
+          input.meta,
+          input.chapter,
           text,
-          extraAuthorizedAnchors: [...roundAnchors, ...(plan.authorizedAnchors ?? [])],
-        },
-        ...Object.keys(chaptersForCall).map((key) => {
-          const index = Number(key);
-          return {
-            index,
-            text: chaptersForCall[index],
-            extraAuthorizedAnchors: input.crossAnchors?.[index],
-          };
-        }),
-      ];
-      const batches = applyRepairPatchesAcross({
-        chapters: patchChapters,
-        targetIndex: input.chapter.index,
-        patches: plan.patches,
-        issues,
-      });
-      let nextText = text;
-      const nextCross = { ...chaptersForCall };
-      for (const batch of batches) {
-        logPatchBatch(input.job, batch.chapterIndex, batch);
-        if (batch.chapterIndex === input.chapter.index) {
-          nextText = batch.text;
-        } else {
-          nextCross[batch.chapterIndex] = batch.text;
+          issues,
+          auditCanon,
+          planContext.previousEnding,
+          planContext.nextOpening,
+          input.rewriteInstruction,
+          callFeedback,
+          {
+            draftRepair: true,
+            evidenceContext: evidence,
+            authorDirective: refreshAuthorDirective(
+              input.authorDirective,
+              text,
+              chaptersForCall,
+            ),
+            crossChapterContext: liveCrossContext(chaptersForCall),
+            affectedChapters: [
+              input.chapter.index,
+              ...Object.keys(chaptersForCall).map(Number),
+            ],
+            unifiedLedger: unifiedLedger.text,
+          },
+        );
+        const patchChapters: PatchChapter[] = [
+          {
+            index: input.chapter.index,
+            text,
+            extraAuthorizedAnchors: [...roundAnchors, ...(plan.authorizedAnchors ?? [])],
+          },
+          ...Object.keys(chaptersForCall).map((key) => {
+            const index = Number(key);
+            return {
+              index,
+              text: chaptersForCall[index],
+              extraAuthorizedAnchors: input.crossAnchors?.[index],
+            };
+          }),
+        ];
+        const batches = applyRepairPatchesAcross({
+          chapters: patchChapters,
+          targetIndex: input.chapter.index,
+          patches: plan.patches,
+          issues,
+        });
+        let nextText = text;
+        const nextCross = { ...chaptersForCall };
+        for (const batch of batches) {
+          logPatchBatch(input.job, batch.chapterIndex, batch);
+          if (batch.chapterIndex === input.chapter.index) {
+            nextText = batch.text;
+          } else {
+            nextCross[batch.chapterIndex] = batch.text;
+          }
         }
-      }
-      return {
-        text: nextText,
-        cross: nextCross,
-        regressionScope: plan.regressionScope ?? "",
-        causalBaselines: plan.causalBaselines ?? [],
+        for (const patch of plan.patches) {
+          if (!patch.edits.length && patch.noChangeReason?.trim()) {
+            logJob(
+              input.job,
+              `第 ${input.chapter.index} 章问题 ${patch.issueId} 声明无需修改：${patch.noChangeReason
+                .replace(/\s+/gu, " ")
+                .slice(0, 160)}`,
+            );
+          }
+        }
+        return {
+          text: nextText,
+          cross: nextCross,
+          regressionScope: plan.regressionScope ?? "",
+          causalBaselines: plan.causalBaselines ?? [],
+          editedAnchors: plan.patches
+            .flatMap((patch) => patch.edits.map((edit) => edit.originalText))
+            .filter(Boolean),
+          declaredIssues: plan.patches
+            .filter((patch) => !patch.edits.length && patch.noChangeReason?.trim())
+            .map((patch) => patch.issueId),
+        };
       };
+      const first = await run(feedback);
+      const missed = untouchedEvidence(
+        issues,
+        first.text,
+        first.cross,
+        first.editedAnchors,
+      ).filter((issue) => !first.declaredIssues.includes(issue.id ?? ""));
+      if (!missed.length) return first;
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章修复补丁未改动问题 evidence 的原句（${missed
+          .map((issue) => issue.id ?? "issue")
+          .join("、")}），携带证据覆盖提示重试一次…`,
+      );
+      try {
+        const second = await run(
+          [feedback, coverageHint(missed)].filter(Boolean).join("\n\n"),
+        );
+        const still = untouchedEvidence(
+          issues,
+          second.text,
+          second.cross,
+          second.editedAnchors,
+        );
+        if (still.length) {
+          logJob(
+            input.job,
+            `第 ${input.chapter.index} 章证据覆盖重试后仍有原句未改动（${still
+              .map((issue) => issue.id ?? "issue")
+              .join("、")}），交由本轮结束后的审校判断。`,
+          );
+        }
+        return second;
+      } catch (error) {
+        if (
+          error instanceof JobCancelledError ||
+          error instanceof RepairNeedsAuthorDecisionError
+        ) {
+          throw error;
+        }
+        // 覆盖重试只是补强提示；重试失败时保留第一版已通过校验的补丁。
+        logJob(
+          input.job,
+          `第 ${input.chapter.index} 章证据覆盖重试未通过校验，保留上一版补丁：${errorMessage(error)}`,
+        );
+        return first;
+      }
     };
     try {
       let result: PlanResult;
@@ -1603,6 +1823,8 @@ async function verifyDraftChapter(
             cross: seqCross,
             regressionScope: seqScope,
             causalBaselines: seqBaselines,
+            editedAnchors: [],
+            declaredIssues: [],
           };
         } else {
           throw error;
@@ -1736,6 +1958,7 @@ async function verifyDraftChapter(
         storyContext,
         evidenceContext,
         unifiedLedger.text,
+        formatPlanContext(input.project.planLedger, input.chapter),
       );
     } catch (error) {
       if (error instanceof JobCancelledError) throw error;
@@ -1764,16 +1987,38 @@ async function verifyDraftChapter(
       auditCanon === input.canon
         ? merged
         : mergeCanon(input.canon, extracted, input.chapter.index, input.mode);
+    const futurePlanIssues =
+      getRuntimeConfig().provider === "mock"
+        ? []
+        : detectFuturePlanConsumption(
+            input.project.planLedger,
+            input.chapter.index,
+            extracted.story,
+            chapterMemory,
+          );
     const issues = mergeIssues(
       audit.issues,
       merged.conflicts,
       checks.hardIssues,
       unifiedLedger.conflicts,
+      futurePlanIssues,
     );
     const factConflicts = mergeIssues(merged.conflicts, checks.hardIssues).filter(
       (issue) => issue.severity === "critical",
     );
     const critical = countCritical(issues);
+    if (critical > 0) {
+      logJob(
+        input.job,
+        `第 ${input.chapter.index} 章本轮审校严重问题 ${critical} 个：${issues
+          .filter((issue) => issue.severity === "critical")
+          .map(
+            (issue) =>
+              `[${issue.type}] ${clipRecord(issue.evidence || issue.detail, 100)}`,
+          )
+          .join("；")}`,
+      );
+    }
     const review: ReviewResult = {
       summary: extracted.summary || audit.summary || input.chapter.summary,
       issues,
@@ -1913,10 +2158,41 @@ async function verifyDraftChapter(
   return finish();
 }
 
-async function runWrite(job: Job, requested: number): Promise<boolean> {
+async function runWrite(
+  job: Job,
+  requested: number,
+  options: { finale?: boolean; finaleChapter?: number } = {},
+): Promise<boolean> {
   const count = Math.max(1, Math.min(50, Math.round(Number(requested) || 1)));
   const detail = await getProjectDetail(job.slug);
-  const pending = detail.chapters.filter((chapter) => !chapter.written).slice(0, count);
+  const completedChapter = detail.planLedger?.completedChapter ?? 0;
+  if (completedChapter && !options.finale) {
+    throw new Error(
+      `全书已于第 ${completedChapter} 章完结，不能继续自动写作；如需续写请先取消完结标记或重新生成架构`,
+    );
+  }
+  let pending = detail.chapters
+    .filter((chapter) => !chapter.written)
+    .slice(0, count);
+  if (options.finale) {
+    const target = detail.chapters.find(
+      (chapter) => chapter.index === options.finaleChapter,
+    );
+    if (!target) throw new Error("完结章不存在，请先生成大纲");
+    if (target.written) throw new Error(`第 ${target.index} 章已经写过，不能重复生成完结章`);
+    const earlier = detail.chapters.filter(
+      (chapter) => !chapter.written && chapter.index < target.index,
+    );
+    if (earlier.length) {
+      throw new Error(
+        `请先写完前面的章节（${earlier
+          .slice(0, 5)
+          .map((chapter) => `第 ${chapter.index} 章`)
+          .join("、")}${earlier.length > 5 ? "……" : ""}）再生成完结章`,
+      );
+    }
+    pending = [target];
+  }
 
   if (!pending.length) {
     logJob(job, "没有待写章节：请先生成架构，或调整目标章节数。");
@@ -1986,6 +2262,7 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
         memoryContext: retrieval.text,
         storyContext: storyRetrieval.text,
         planContext,
+        finale: options.finale === true,
       },
     );
     if (!text.trim()) throw new Error(`第 ${chapter.index} 章正文为空，请重试`);
@@ -2070,7 +2347,20 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
       canon,
     });
     planLedger = reconciled.ledger;
+    if (options.finale) {
+      planLedger = {
+        ...planLedger,
+        completedChapter: chapter.index,
+        completedAt: nowIso(),
+      };
+    }
     await savePlanLedger(job.slug, planLedger);
+    if (options.finale) {
+      logJob(
+        job,
+        `第 ${chapter.index} 章完结章已写入正文，全书标记为已完结；后续自动写作和续排将被阻止。`,
+      );
+    }
     if (reconciled.changes.length) {
       logJob(
         job,
@@ -2093,6 +2383,79 @@ async function runWrite(job: Job, requested: number): Promise<boolean> {
 
   if (!paused) logJob(job, "本轮自动写作完成，事实台账已同步");
   return paused;
+}
+
+function isPlannedFinale(chapter: { title: string; summary: string }): boolean {
+  return /结局|终章|大结局|完结|收束/u.test(`${chapter.title}${chapter.summary}`);
+}
+
+async function runFinale(job: Job): Promise<boolean> {
+  const detail = await getProjectDetail(job.slug);
+  if (!detail.plan.chapters.length) {
+    throw new Error("还没有章节大纲，请先生成架构与角色");
+  }
+  const completedChapter = detail.planLedger?.completedChapter ?? 0;
+  if (completedChapter) {
+    throw new Error(`全书已于第 ${completedChapter} 章完结`);
+  }
+  const written = new Set(detail.state.written);
+  const last = [...detail.plan.chapters].sort(
+    (left, right) => right.index - left.index,
+  )[0];
+  let targetIndex: number;
+  if (last && !written.has(last.index) && isPlannedFinale(last)) {
+    const earlier = detail.plan.chapters.filter(
+      (chapter) => chapter.index < last.index && !written.has(chapter.index),
+    );
+    if (earlier.length) {
+      throw new Error(
+        `请先写完前面的章节（${earlier
+          .slice(0, 5)
+          .map((chapter) => `第 ${chapter.index} 章`)
+          .join("、")}${earlier.length > 5 ? "……" : ""}）再生成完结章`,
+      );
+    }
+    targetIndex = last.index;
+    logJob(job, `使用大纲最后一章《${last.title}》作为完结章…`);
+  } else {
+    const unwritten = detail.plan.chapters.filter(
+      (chapter) => !written.has(chapter.index),
+    );
+    if (unwritten.length) {
+      throw new Error(
+        `请先写完所有已规划章节（还有 ${unwritten
+          .slice(0, 5)
+          .map((chapter) => `第 ${chapter.index} 章`)
+          .join("、")}${unwritten.length > 5 ? "……" : ""} 未写）再追加完结章`,
+      );
+    }
+    const nextIndex = (last?.index ?? 0) + 1;
+    const usedTitles = new Set(detail.plan.chapters.map((chapter) => chapter.title));
+    let title = "完结章";
+    let suffix = 2;
+    while (usedTitles.has(title)) {
+      title = `终章（${suffix}）`;
+      suffix += 1;
+    }
+    const chapter: ChapterPlan = {
+      index: nextIndex,
+      title,
+      summary:
+        "收束全书主线与核心冲突，回收或明确交代主要伏笔，交代主要人物的结局或阶段性归宿，不再留下新的重大悬念。",
+      keyBeats: ["解决核心冲突", "回收主要伏笔", "交代主要人物结局", "收束全书"],
+    };
+    await appendChapters(
+      job.slug,
+      [chapter],
+      normalizePlanLedger(detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt)),
+    );
+    targetIndex = nextIndex;
+    logJob(
+      job,
+      `已在大纲末尾追加完结章（第 ${nextIndex} 章《${title}》），开始写作…`,
+    );
+  }
+  return runWrite(job, 1, { finale: true, finaleChapter: targetIndex });
 }
 
 async function runRewrite(
@@ -5122,6 +5485,9 @@ async function runAudit(job: Job): Promise<void> {
         checks.suspicions,
         nextContext,
         storyContext,
+        "",
+        "",
+        formatPlanContext(detail.planLedger, chapterPlan),
       );
     } catch (error) {
       failed += 1;

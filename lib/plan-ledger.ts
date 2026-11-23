@@ -5,19 +5,26 @@ import type {
   CanonFacts,
   ChapterMemory,
   ChapterPlan,
+  Character,
+  ContinuityIssue,
   ExtractedStory,
   PlanCharacterChange,
   PlanDeviation,
   PlanEvent,
   PlanForeshadow,
   PlanImportance,
+  PlanItem,
   PlanItemChange,
+  PlanItemChangeType,
   PlanLedger,
+  PlanRelation,
+  PlanRelationDirection,
   PlanStatus,
   PlanTimelineEntry,
   PlotEvent,
   ProjectPlan,
 } from "./types";
+import { itemOwnershipAt, relationsAt } from "./plan-view";
 
 export const PLAN_LEDGER_VERSION = 1;
 
@@ -61,7 +68,11 @@ export function emptyPlanLedger(updatedAt = nowIso()): PlanLedger {
     foreshadows: [],
     timeline: [],
     items: [],
+    itemRegistry: [],
+    relations: [],
     deviations: [],
+    completedChapter: 0,
+    completedAt: "",
     updatedAt,
   };
 }
@@ -123,6 +134,7 @@ function normalizeEvent(input: unknown, at: string, used: Set<string>): PlanEven
     id: uniqueId(id, used),
     name,
     chapter,
+    thread: text(record.thread ?? record.line ?? record.storyline),
     participants: list(record.participants),
     premise: text(record.premise),
     process,
@@ -215,19 +227,100 @@ function normalizeTimeline(
   };
 }
 
+const ITEM_CHANGE_TYPES = new Set<PlanItemChangeType>([
+  "transfer",
+  "state",
+  "location",
+  "introduce",
+  "destroy",
+  "other",
+]);
+
+function normalizeItemChangeType(value: unknown): PlanItemChangeType {
+  const key = text(value).trim().toLowerCase();
+  if (ITEM_CHANGE_TYPES.has(key as PlanItemChangeType)) {
+    return key as PlanItemChangeType;
+  }
+  return "other";
+}
+
 function normalizeItem(input: unknown, at: string, used: Set<string>): PlanItemChange | null {
   const record = recordOf(input);
   const item = text(record.item ?? record.name);
   const chapter = positiveInt(record.chapter);
   if (!item || !chapter) return null;
   const id = text(record.id) || stableId("plan-item", `${chapter}:${item}`);
+  const stateChange = text(record.stateChange ?? record.state_change);
   return {
     id: uniqueId(id, used),
     item,
     chapter,
+    changeType: normalizeItemChangeType(record.changeType ?? record.change_type),
     holder: text(record.holder),
-    stateChange: text(record.stateChange ?? record.state_change),
+    location: text(record.location),
+    state: text(record.state) || stateChange,
+    stateChange,
+    reason: text(record.reason),
     eventIds: list(record.eventIds ?? record.event_ids),
+    status: normalizePlanStatus(record.status),
+    actualChapter: positiveInt(record.actualChapter ?? record.actual_chapter),
+    evidence: text(record.evidence),
+    updatedAt: text(record.updatedAt ?? record.updated_at) || at,
+  };
+}
+
+function normalizePlanItem(input: unknown): PlanItem | null {
+  const record = recordOf(input);
+  const name = text(record.name ?? record.item);
+  if (!name) return null;
+  return {
+    id: text(record.id) || stableId("plan-item-base", name),
+    name,
+    aliases: list(record.aliases),
+    holder: text(record.holder),
+    location: text(record.location),
+    state: text(record.state),
+    introducedChapter: positiveInt(
+      record.introducedChapter ?? record.introduced_chapter ?? record.chapter,
+    ),
+    note: text(record.note),
+  };
+}
+
+function normalizePlanRelation(
+  input: unknown,
+  at: string,
+  used: Set<string>,
+): PlanRelation | null {
+  const record = recordOf(input);
+  const from = text(record.from ?? record.source);
+  const to = text(record.to ?? record.target);
+  const startChapter = positiveInt(
+    record.startChapter ?? record.start_chapter ?? record.chapter,
+  );
+  if (!from || !to || !startChapter) return null;
+  const type = text(record.type ?? record.relation) || "未注明";
+  const endChapter = positiveInt(record.endChapter ?? record.end_chapter);
+  const strengthRaw = Number(record.strength);
+  const strength = Number.isFinite(strengthRaw)
+    ? Math.min(5, Math.max(1, Math.round(strengthRaw)))
+    : 3;
+  const directionRaw = text(record.direction).trim().toLowerCase();
+  const direction: PlanRelationDirection =
+    directionRaw === "one-way" || directionRaw === "oneway" || directionRaw === "单向"
+      ? "one-way"
+      : "two-way";
+  const id = text(record.id) || stableId("plan-relation", `${from}:${to}:${type}:${startChapter}`);
+  return {
+    id: uniqueId(id, used),
+    from,
+    to,
+    type,
+    strength,
+    direction,
+    startChapter,
+    endChapter: endChapter && endChapter >= startChapter ? endChapter : 0,
+    changeEventIds: list(record.changeEventIds ?? record.change_event_ids),
     status: normalizePlanStatus(record.status),
     actualChapter: positiveInt(record.actualChapter ?? record.actual_chapter),
     evidence: text(record.evidence),
@@ -241,7 +334,14 @@ function normalizeDeviation(input: unknown): PlanDeviation | null {
   const chapter = positiveInt(record.chapter);
   if (!planId || !chapter) return null;
   const planType = text(record.planType ?? record.plan_type);
-  const allowed = ["event", "character-change", "foreshadow", "timeline", "item"] as const;
+  const allowed = [
+    "event",
+    "character-change",
+    "foreshadow",
+    "timeline",
+    "item",
+    "relation",
+  ] as const;
   const normalizedType = (allowed as readonly string[]).includes(planType)
     ? (planType as PlanDeviation["planType"])
     : "event";
@@ -257,6 +357,63 @@ function normalizeDeviation(input: unknown): PlanDeviation | null {
   };
 }
 
+// 续排或模型漏登记时，把未知物品补进基线；否则一条漏登记就会让整批计划被拒绝。
+export function ensureItemRegistryCoverage(ledger: PlanLedger): PlanLedger {
+  const registry = [...ledger.itemRegistry];
+  const names = new Set(
+    registry.flatMap((item) => [item.name, ...item.aliases]).map(normalizeKey),
+  );
+  let changed = false;
+  for (const change of ledger.items) {
+    const key = normalizeKey(change.item);
+    if (!key || names.has(key)) continue;
+    registry.push({
+      id: stableId("plan-item-base", `${change.chapter}:${change.item}`),
+      name: change.item,
+      aliases: [],
+      holder: change.holder,
+      location: change.location,
+      state: change.state || change.stateChange,
+      introducedChapter: change.chapter,
+      note: change.reason || "续排自动登记的物品基线",
+    });
+    names.add(key);
+    changed = true;
+  }
+  return changed ? { ...ledger, itemRegistry: registry } : ledger;
+}
+
+export function normalizePlanItemRegistry(input: unknown): PlanItem[] {
+  const result: PlanItem[] = [];
+  const ids = new Set<string>();
+  for (const item of Array.isArray(input) ? input : []) {
+    const normalized = normalizePlanItem(item);
+    if (!normalized) continue;
+    let id = normalized.id;
+    let suffix = 2;
+    while (ids.has(id)) {
+      id = `${normalized.id}-${suffix}`;
+      suffix += 1;
+    }
+    ids.add(id);
+    result.push({ ...normalized, id });
+  }
+  return result;
+}
+
+export function normalizePlanRelations(
+  input: unknown,
+  updatedAt = nowIso(),
+): PlanRelation[] {
+  const result: PlanRelation[] = [];
+  const ids = new Set<string>();
+  for (const item of Array.isArray(input) ? input : []) {
+    const normalized = normalizePlanRelation(item, updatedAt, ids);
+    if (normalized) result.push(normalized);
+  }
+  return result;
+}
+
 export function normalizePlanLedger(input: unknown, updatedAt = nowIso()): PlanLedger {
   const record = recordOf(input);
   const at = text(record.updatedAt ?? record.updated_at) || updatedAt;
@@ -265,12 +422,15 @@ export function normalizePlanLedger(input: unknown, updatedAt = nowIso()): PlanL
   const foreshadows: PlanForeshadow[] = [];
   const timeline: PlanTimelineEntry[] = [];
   const items: PlanItemChange[] = [];
+  const itemRegistry: PlanItem[] = [];
+  const relations: PlanRelation[] = [];
   const deviations: PlanDeviation[] = [];
   const eventIds = new Set<string>();
   const changeIds = new Set<string>();
   const foreshadowIds = new Set<string>();
   const timelineIds = new Set<string>();
   const itemIds = new Set<string>();
+  const relationIds = new Set<string>();
   const deviationIds = new Set<string>();
 
   for (const item of Array.isArray(record.events) ? record.events : []) {
@@ -295,6 +455,25 @@ export function normalizePlanLedger(input: unknown, updatedAt = nowIso()): PlanL
     const normalized = normalizeItem(item, at, itemIds);
     if (normalized) items.push(normalized);
   }
+  const registryIds = new Set<string>();
+  for (const item of Array.isArray(record.itemRegistry ?? record.item_registry)
+    ? ((record.itemRegistry ?? record.item_registry) as unknown[])
+    : []) {
+    const normalized = normalizePlanItem(item);
+    if (!normalized) continue;
+    let id = normalized.id;
+    let suffix = 2;
+    while (registryIds.has(id)) {
+      id = `${normalized.id}-${suffix}`;
+      suffix += 1;
+    }
+    registryIds.add(id);
+    itemRegistry.push({ ...normalized, id });
+  }
+  for (const item of Array.isArray(record.relations) ? record.relations : []) {
+    const normalized = normalizePlanRelation(item, at, relationIds);
+    if (normalized) relations.push(normalized);
+  }
   for (const item of Array.isArray(record.deviations) ? record.deviations : []) {
     const normalized = normalizeDeviation(item);
     if (normalized) {
@@ -310,7 +489,13 @@ export function normalizePlanLedger(input: unknown, updatedAt = nowIso()): PlanL
     foreshadows,
     timeline,
     items,
+    itemRegistry,
+    relations,
     deviations,
+    completedChapter: positiveInt(
+      record.completedChapter ?? record.completed_chapter,
+    ),
+    completedAt: text(record.completedAt ?? record.completed_at),
     updatedAt: at,
   };
 }
@@ -347,11 +532,22 @@ export function sanitizeGeneratedPlanLedger(input: unknown, updatedAt = nowIso()
       ...reset(item),
       actualChapter: 0,
     })),
+    relations: ledger.relations.map((item) => ({
+      ...reset(item),
+      actualChapter: 0,
+    })),
+    itemRegistry: ledger.itemRegistry.map((item) => ({ ...item })),
     deviations: [],
+    completedChapter: 0,
+    completedAt: "",
   };
 }
 
-export function assertValidPlanLedger(ledger: PlanLedger, plan?: ProjectPlan): void {
+export function assertValidPlanLedger(
+  ledger: PlanLedger,
+  plan?: ProjectPlan,
+  characters?: Character[],
+): void {
   const maxChapter = plan?.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index))
     : Number.POSITIVE_INFINITY;
@@ -409,8 +605,76 @@ export function assertValidPlanLedger(ledger: PlanLedger, plan?: ProjectPlan): v
     checkChapter(item.chapter, `物品「${item.item}」`);
   }
 
+  const registryNames = new Set(
+    ledger.itemRegistry
+      .flatMap((item) => [item.name, ...item.aliases])
+      .map(normalizeKey)
+      .filter(Boolean),
+  );
+  const registryIds = new Set<string>();
+  for (const item of ledger.itemRegistry) {
+    if (registryIds.has(item.id)) throw new Error(`物品基线 ID 重复：${item.id}`);
+    registryIds.add(item.id);
+    if (item.introducedChapter) {
+      checkChapter(item.introducedChapter, `物品基线「${item.name}」`);
+    }
+  }
+  if (registryNames.size) {
+    for (const item of ledger.items) {
+      if (!registryNames.has(normalizeKey(item.item))) {
+        throw new Error(
+          `计划物品变化引用了未登记在物品基线中的物品：${item.item}`,
+        );
+      }
+    }
+  }
+
+  const nameKeys = characters?.length
+    ? new Set(characters.map((item) => normalizeKey(item.name)).filter(Boolean))
+    : null;
+  const relationIds = new Set<string>();
+  for (const relation of ledger.relations) {
+    if (relationIds.has(relation.id)) {
+      throw new Error(`计划关系 ID 重复：${relation.id}`);
+    }
+    relationIds.add(relation.id);
+    if (normalizeKey(relation.from) === normalizeKey(relation.to)) {
+      throw new Error(`计划关系不能指向同一角色：${relation.from}`);
+    }
+    if (
+      !Number.isInteger(relation.strength) ||
+      relation.strength < 1 ||
+      relation.strength > 5
+    ) {
+      throw new Error(`计划关系「${relation.from}—${relation.to}」的强度必须在 1-5`);
+    }
+    if (relation.direction !== "one-way" && relation.direction !== "two-way") {
+      throw new Error(`计划关系「${relation.from}—${relation.to}」方向不合法`);
+    }
+    checkChapter(relation.startChapter, `关系「${relation.from}—${relation.to}」起点`);
+    if (relation.endChapter) {
+      checkChapter(relation.endChapter, `关系「${relation.from}—${relation.to}」终点`);
+      if (relation.endChapter < relation.startChapter) {
+        throw new Error(`计划关系「${relation.from}—${relation.to}」终点早于起点`);
+      }
+    }
+    if (nameKeys) {
+      for (const name of [relation.from, relation.to]) {
+        if (!nameKeys.has(normalizeKey(name))) {
+          throw new Error(`计划关系引用了不存在的人物：${name}`);
+        }
+      }
+    }
+    if (relation.changeEventIds.some((id) => !eventIds.has(id))) {
+      throw new Error(`计划关系「${relation.from}—${relation.to}」引用了不存在的计划事件`);
+    }
+  }
+
   for (const deviation of ledger.deviations) {
     checkChapter(deviation.chapter, `计划偏离「${deviation.planId}」`);
+  }
+  if (ledger.completedChapter) {
+    checkChapter(ledger.completedChapter, "完结章");
   }
 }
 
@@ -425,6 +689,7 @@ export function derivePlanLedger(
     id: stableId("plan-event", `${chapter.index}:${chapter.title}`),
     name: chapter.title,
     chapter: chapter.index,
+    thread: "",
     participants: [],
     premise: "",
     process: chapter.summary,
@@ -466,7 +731,11 @@ export function derivePlanLedger(
     foreshadows,
     timeline: [],
     items: [],
+    itemRegistry: [],
+    relations: [],
     deviations: [],
+    completedChapter: 0,
+    completedAt: "",
     updatedAt,
   };
 }
@@ -479,6 +748,7 @@ export function planEntriesForChapters(
     id: stableId("plan-event", `${chapter.index}:${chapter.title}`),
     name: chapter.title,
     chapter: chapter.index,
+    thread: "",
     participants: [],
     premise: "",
     process: chapter.summary,
@@ -495,6 +765,27 @@ export function planEntriesForChapters(
   }));
 }
 
+function planLedgerIds(ledger: PlanLedger): string[] {
+  return [
+    ...ledger.events,
+    ...ledger.characterChanges,
+    ...ledger.foreshadows,
+    ...ledger.timeline,
+    ...ledger.items,
+    ...ledger.itemRegistry,
+    ...ledger.relations,
+  ].map((item) => item.id);
+}
+
+// 续排时新增计划如果复用了既有 id，merge 会覆盖原计划；提交前先拦下来。
+export function planLedgerIdCollisions(
+  base: PlanLedger,
+  addition: PlanLedger,
+): string[] {
+  const existing = new Set(planLedgerIds(base));
+  return [...new Set(planLedgerIds(addition))].filter((id) => existing.has(id));
+}
+
 export function mergePlanLedgers(base: PlanLedger, addition: PlanLedger): PlanLedger {
   const merge = <T extends { id: string }>(a: T[], b: T[]): T[] => {
     const map = new Map<string, T>();
@@ -509,7 +800,11 @@ export function mergePlanLedgers(base: PlanLedger, addition: PlanLedger): PlanLe
     foreshadows: merge(base.foreshadows, addition.foreshadows),
     timeline: merge(base.timeline, addition.timeline),
     items: merge(base.items, addition.items),
+    itemRegistry: merge(base.itemRegistry, addition.itemRegistry),
+    relations: merge(base.relations, addition.relations),
     deviations: merge(base.deviations, addition.deviations),
+    completedChapter: addition.completedChapter || base.completedChapter,
+    completedAt: addition.completedAt || base.completedAt,
     updatedAt: nowIso(),
   };
 }
@@ -544,6 +839,7 @@ export function formatPlanContext(
   );
   for (const item of events) {
     const parts = [`第 ${item.chapter} 章`, STATUS_LABELS[item.status]];
+    if (item.thread) parts.push(`线：${clip(item.thread, 40)}`);
     if (item.participants.length) parts.push(`参与：${item.participants.join("、")}`);
     if (item.premise) parts.push(`前提：${clip(item.premise, 120)}`);
     if (item.process) parts.push(`经过：${clip(item.process, 220)}`);
@@ -588,14 +884,124 @@ export function formatPlanContext(
     (item) => item.chapter === target && activePlanStatus(item.status),
   );
   for (const item of items) {
+    const parts = [
+      item.holder ? `持有人：${item.holder}` : "",
+      item.location ? `位置：${item.location}` : "",
+      item.state ? `状态：${item.state}` : "",
+      item.reason ? `原因：${clip(item.reason, 80)}` : "",
+      item.stateChange ? `变化：${clip(item.stateChange, 80)}` : "",
+    ].filter(Boolean);
+    lines.push(`- 物品变化：${item.item} → ${parts.join("；") || "未注明"}`);
+  }
+
+  const relations = relationsAt(ledger, target);
+  for (const relation of relations) {
+    const direction = relation.direction === "one-way" ? "单向" : "双向";
+    const range = relation.endChapter
+      ? `第 ${relation.startChapter}-${relation.endChapter} 章`
+      : `第 ${relation.startChapter} 章起`;
     lines.push(
-      `- 物品计划：${item.item} → 持有人：${item.holder || "?"}；变化：${clip(item.stateChange, 100) || "未注明"}`,
+      `- 关系：${relation.from} → ${relation.to}，${relation.type}（强度 ${relation.strength}/5，${direction}，${range}${relation.evidence ? `；已确认：${clip(relation.evidence, 60)}` : ""}）`,
     );
   }
 
-  const budget = options.budget ?? 1800;
+  const ownership = itemOwnershipAt(ledger, target);
+  if (ownership.length) {
+    lines.push(`- 第 ${target} 章物品归属快照：`);
+    for (const snapshot of ownership) {
+      const parts = [
+        snapshot.holder ? `持有人：${snapshot.holder}` : "",
+        snapshot.location ? `位置：${snapshot.location}` : "",
+        snapshot.state ? `状态：${snapshot.state}` : "",
+      ].filter(Boolean);
+      lines.push(
+        `  · ${snapshot.item} → ${parts.join("；") || "未记录"}${
+          snapshot.changedChapter
+            ? `（最近变更：第 ${snapshot.changedChapter} 章${snapshot.reason ? `，${clip(snapshot.reason, 60)}` : ""}）`
+            : ""
+        }`,
+      );
+    }
+  }
+
+  const budget = options.budget ?? 2400;
   const body = lines.join("\n");
   return body.length > budget ? `${body.slice(0, budget)}\n……（计划台账已截断）` : body;
+}
+
+// 本章正文如果已经写出了后面章节的计划事件，说明模型把后续剧情提前消费了。
+// 这是结构性错误，不能当成普通的“计划偏离”，否则后续章节会全部失去依据。
+export function detectFuturePlanConsumption(
+  ledger: PlanLedger | undefined,
+  chapter: number,
+  extracted: ExtractedStory | undefined,
+  memory?: ChapterMemory,
+): ContinuityIssue[] {
+  if (!ledger) return [];
+  const actualTexts = [
+    memory?.summary ?? "",
+    ...(memory?.events ?? []),
+    ...(memory?.actions ?? []),
+    ...(extracted?.events ?? []).map((event) =>
+      [event.name, event.process, event.result, event.impact]
+        .filter(Boolean)
+        .join("\n"),
+    ),
+  ]
+    .map((text) => text.trim())
+    .filter(Boolean);
+  if (!actualTexts.length) return [];
+  const actual = actualTexts.join("\n");
+  const issues: ContinuityIssue[] = [];
+  const GENERIC_NAMES = new Set([
+    "示例章节",
+    "示例",
+    "章节",
+    "测试",
+    "剧情",
+    "事件",
+    "故事",
+    "推进",
+  ]);
+  for (const event of ledger.events) {
+    if (event.chapter <= chapter || event.status === "cancelled") continue;
+    const target = [event.name, event.process, event.expectedResult]
+      .filter(Boolean)
+      .join("\n");
+    if (!target.trim()) continue;
+    const nameTokens = event.name
+      .split(/[^一-鿿]+/u)
+      .map((token) => token.trim())
+      .filter(
+        (token) =>
+          token.length >= 2 &&
+          !GENERIC_NAMES.has(token) &&
+          !/^(示例|测试)/u.test(token) &&
+          !/^第.+章$/u.test(token),
+      );
+    const names = event.participants.filter((name) => name.trim().length >= 2);
+    const sharesCharacter = names.some((name) => actual.includes(name));
+    const sharesName = nameTokens.some((token) => actual.includes(token));
+    // 没有角色名、也没有有效事件名命中的通用文本，不进入提前消费判断。
+    if (!sharesCharacter && !sharesName) continue;
+    let best = { score: 0, text: "" };
+    for (const text of actualTexts) {
+      const score = textSimilarity(target, text);
+      if (score > best.score) best = { score, text };
+    }
+    const threshold = sharesCharacter ? 0.35 : 0.5;
+    if (best.score < threshold) continue;
+    issues.push({
+      severity: "critical",
+      type: "提前消费后续章节",
+      evidence: clip(best.text, 160),
+      detail: `本章写出了计划第 ${event.chapter} 章的事件《${event.name}》。每章只能写本章细纲范围，后续章节的计划事件、人物变化、伏笔和物品转移不得提前实现。`,
+      sourceChapter: event.chapter,
+      conflictCategory: "causality",
+    });
+    if (issues.length >= 3) break;
+  }
+  return issues;
 }
 
 function normalizeKey(value: string): string {
@@ -974,31 +1380,96 @@ export function reconcileChapterPlan(input: PlanReconciliationInput): PlanReconc
       );
       continue;
     }
-    const matchesHolder = !item.holder || textSimilarity(item.holder, actual.holder) >= 0.2 || actual.holder.includes(item.holder);
-    const matchesState = !item.stateChange || textSimilarity(item.stateChange, actual.state) >= 0.2 || actual.state.includes(item.stateChange);
-    if (matchesHolder && matchesState) {
+    const plannedState = item.state || item.stateChange;
+    const matchesHolder =
+      !item.holder ||
+      textSimilarity(item.holder, actual.holder) >= 0.2 ||
+      actual.holder.includes(item.holder);
+    const matchesLocation =
+      !item.location ||
+      textSimilarity(item.location, actual.location ?? "") >= 0.2 ||
+      (actual.location ?? "").includes(item.location);
+    const matchesState =
+      !plannedState ||
+      textSimilarity(plannedState, actual.state) >= 0.2 ||
+      actual.state.includes(plannedState);
+    const matched = [matchesHolder, matchesLocation, matchesState].filter(Boolean).length;
+    const required = [item.holder, item.location, plannedState].filter(Boolean).length;
+    const actualText = clip(
+      [actual.holder, actual.location, actual.state, actual.note].filter(Boolean).join("；"),
+      300,
+    );
+    if (required === 0 || matched === required) {
       item.status = "realized";
       item.actualChapter = chapter;
-      item.evidence = clip([actual.holder, actual.state, actual.note].filter(Boolean).join("；"), 300);
+      item.evidence = actualText;
       item.updatedAt = at;
-    } else if (matchesHolder || matchesState) {
+    } else if (matched > 0) {
       item.status = "partially_realized";
       item.actualChapter = chapter;
-      item.evidence = clip([actual.holder, actual.state].filter(Boolean).join("；"), 300);
+      item.evidence = actualText;
       item.updatedAt = at;
     } else {
       item.status = "deviated";
       item.actualChapter = chapter;
-      item.evidence = clip([actual.holder, actual.state].filter(Boolean).join("；"), 300);
+      item.evidence = actualText;
       item.updatedAt = at;
       markDeviation(
         ledger,
         "item",
         item.id,
         chapter,
-        `${item.item}：${item.holder} / ${item.stateChange}`,
-        `${actual.holder} / ${actual.state}`,
-        "正文中的物品归属或状态与计划不一致",
+        `${item.item}：${item.holder} / ${item.location} / ${plannedState}`,
+        `${actual.holder} / ${actual.location ?? ""} / ${actual.state}`,
+        "正文中的物品归属、位置或状态与计划不一致",
+      );
+    }
+  }
+
+  const extractedRelations = input.extracted?.relations ?? [];
+  for (const relation of ledger.relations) {
+    if (relation.status === "cancelled") continue;
+    const active =
+      relation.startChapter <= chapter &&
+      (relation.endChapter === 0 || chapter <= relation.endChapter);
+    if (!active) continue;
+    const pairMatch = extractedRelations.find(
+      (item) =>
+        (normalizeKey(item.from) === normalizeKey(relation.from) &&
+          normalizeKey(item.to) === normalizeKey(relation.to)) ||
+        (normalizeKey(item.from) === normalizeKey(relation.to) &&
+          normalizeKey(item.to) === normalizeKey(relation.from)),
+    );
+    if (pairMatch) {
+      relation.actualChapter = chapter;
+      relation.evidence = clip(
+        pairMatch.evidence || `${pairMatch.from}→${pairMatch.to}：${pairMatch.type}`,
+        300,
+      );
+      if (relation.status === "planned") relation.status = "partially_realized";
+      relation.updatedAt = at;
+      continue;
+    }
+    const eventChanged = relation.changeEventIds.some((id) =>
+      ledger.events.some(
+        (event) =>
+          event.id === id &&
+          event.status === "realized" &&
+          event.actualChapter === chapter,
+      ),
+    );
+    if (relation.startChapter === chapter && eventChanged) {
+      relation.status = "deviated";
+      relation.actualChapter = chapter;
+      relation.updatedAt = at;
+      markDeviation(
+        ledger,
+        "relation",
+        relation.id,
+        chapter,
+        `${relation.from}—${relation.to}：${relation.type}`,
+        "正文未检出对应关系变化",
+        "计划中的关系变化在正文中没有落实",
       );
     }
   }

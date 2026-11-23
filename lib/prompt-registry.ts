@@ -18,8 +18,8 @@ export interface PromptCatalogEntry {
 export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   architect: {
     label: "架构师",
-    version: "2026.11.20-p10",
-    description: "分阶段生成世界观、主线大纲、分批章节细纲和结构化计划台账。",
+    version: "2026.11.23-p16",
+    description: "分阶段生成世界观、主线大纲、章节细纲、计划台账、事实/物品基线和关系图。",
   },
   "extend-plan": {
     label: "大纲续排",
@@ -38,22 +38,22 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   writer: {
     label: "写作",
-    version: "2026.11.20-p9",
+    version: "2026.11.23-p13",
     description: "续写或重写章节正文，并区分计划、事实与实际剧情。",
   },
   "fact-extractor": {
     label: "事实抽取",
-    version: "2026.11.18-p7",
-    description: "从正文抽取事实台账、长期记忆和剧情台账。",
+    version: "2026.11.23-p9",
+    description: "从正文抽取事实台账、物品位置、长期记忆和剧情台账。",
   },
   auditor: {
     label: "连续性与质量审校",
-    version: "2026.11.21-p13",
-    description: "检查人物、时间线、规则、因果、伏笔和章节重复。",
+    version: "2026.11.23-p15",
+    description: "检查人物、时间线、规则、因果、伏笔、计划和物品/关系漂移。",
   },
   "repair-editor": {
     label: "定点修复",
-    version: "2026.11.21-p13",
+    version: "2026.11.23-p14",
     description: "只修改与审校问题直接相关的正文段落。",
   },
 };

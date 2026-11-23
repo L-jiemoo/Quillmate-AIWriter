@@ -3,6 +3,7 @@ import {
   applyRepairPatches,
   applyRepairPatchesAcross,
   hashText,
+  issueEvidenceUnchanged,
   normalizeRepairPatches,
   paragraphsMatchingAnchors,
   RepairPatchError,
@@ -483,5 +484,72 @@ describe("补角色丁输入规范化与问题 ID", () => {
   it("原文哈希对相同文本稳定、对修改敏感", () => {
     expect(hashText("同一段正文")).toBe(hashText("同一段正文"));
     expect(hashText("同一段正文")).not.toBe(hashText("同一段正文。"));
+  });
+});
+
+describe("修复证据覆盖检查", () => {
+  it("evidence 的片段在补丁后仍原样存在时判定未覆盖", () => {
+    const item = issue("角色甲把账本放在桌上。……角色乙拿走了钥匙。");
+    expect(
+      issueEvidenceUnchanged(item, [
+        "角色甲把账本放在桌上，随后离开。角色乙拿走了钥匙。",
+      ]),
+    ).toBe(true);
+  });
+
+  it("任意一个证据片段被改写后判定已覆盖", () => {
+    const item = issue("角色甲把账本放在桌上。……角色乙拿走了钥匙。");
+    expect(
+      issueEvidenceUnchanged(item, [
+        "角色甲把账本放在桌上。角色乙拿走了备用钥匙。",
+      ]),
+    ).toBe(false);
+  });
+
+  it("补丁落在 evidence 原句上时视为已覆盖", () => {
+    const item = issue("角色甲把账本放在桌上。……角色乙拿走了钥匙。");
+    expect(
+      issueEvidenceUnchanged(
+        item,
+        ["角色甲把账本放在桌上，随后离开。角色乙拿走了钥匙。"],
+        ["角色甲把账本放在桌上。"],
+      ),
+    ).toBe(false);
+  });
+
+  it("证据过短时不触发覆盖重试", () => {
+    expect(issueEvidenceUnchanged(issue("账本。"), ["账本。"])).toBe(false);
+  });
+});
+
+describe("无需修改声明", () => {
+  it("整条问题声明无需修改时允许空 edits", () => {
+    const text = "角色乙接电话。";
+    const batch = applyRepairPatches({
+      originalText: text,
+      issues: [issue(text)],
+      patches: [
+        {
+          issueId: "issue-1",
+          edits: [],
+          noChangeReason: "角色乙接电话。与既定事实一致，无需修改。",
+        },
+      ],
+    });
+    expect(batch.text).toBe(text);
+    expect(batch.records).toEqual([]);
+  });
+
+  it("空 edits 且没有理由时仍然拒绝", () => {
+    const text = "角色乙接电话。";
+    expect(
+      errorCode(() =>
+        applyRepairPatches({
+          originalText: text,
+          issues: [issue(text)],
+          patches: [{ issueId: "issue-1", edits: [] }],
+        }),
+      ),
+    ).toBe("EMPTY_EDIT");
   });
 });

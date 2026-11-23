@@ -20,7 +20,7 @@ import type {
 import { errorMessage } from "@/lib/utils";
 
 type Section = "canon" | "reviews" | "leftovers" | "audit";
-type CanonView = "characters" | "items" | "timeline" | "rules";
+type CanonView = "characters" | "items" | "timeline" | "facts" | "rules";
 type ReviewFilter = "all" | "flagged";
 
 const STATUS_ORDER: { key: CanonCharacterStatus; label: string }[] = [
@@ -131,6 +131,9 @@ function CanonReadView({ canon, view }: { canon: CanonFacts; view: CanonView }) 
               {item.holder ? (
                 <span className="canon-meta"> · 持有人：{item.holder}</span>
               ) : null}
+              {item.location ? (
+                <span className="canon-meta"> · 位置：{item.location}</span>
+              ) : null}
               {item.state ? <span className="canon-meta"> · {item.state}</span> : null}
               {item.note ? <span className="canon-meta"> · {item.note}</span> : null}
             </li>
@@ -161,6 +164,33 @@ function CanonReadView({ canon, view }: { canon: CanonFacts; view: CanonView }) 
         ) : (
           <p className="muted small">暂无期限记录。</p>
         )}
+      </div>
+    );
+  }
+
+  if (view === "facts") {
+    const facts = canon.facts ?? [];
+    if (!facts.length) return <p className="muted small">暂无架构既定事实。</p>;
+    return (
+      <div className="canon-block">
+        <ul className="canon-list">
+          {facts.map((fact) => (
+            <li key={fact.id}>
+              <span className="canon-name">[{fact.kind}]</span>
+              <span className="canon-meta"> · {fact.content}</span>
+              <span className="canon-meta">
+                {" "}
+                · 首次确立：
+                {fact.establishedAt === "architecture"
+                  ? "架构设定"
+                  : fact.establishedAt === "character"
+                    ? "角色设定"
+                    : `第 ${fact.chapter} 章`}
+                {fact.immutable ? " · 不可变" : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
       </div>
     );
   }
@@ -309,6 +339,7 @@ export function ContinuityTab({
     canon.items.length > 0 ||
     Boolean(canon.timeline.currentDay) ||
     canon.timeline.deadlines.length > 0 ||
+    (canon.facts?.length ?? 0) > 0 ||
     canon.rules.length > 0;
   const latestWritten = written.length
     ? Math.max(...written.map((chapter) => chapter.index))
@@ -606,6 +637,7 @@ export function ContinuityTab({
                     ["characters", "人物"],
                     ["items", "物品"],
                     ["timeline", "时间线"],
+                    ["facts", "设定"],
                     ["rules", "规则"],
                   ] as const
                 ).map(([key, label]) => (

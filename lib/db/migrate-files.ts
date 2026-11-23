@@ -52,6 +52,7 @@ const JOB_TYPES = [
   "plan",
   "extend",
   "write",
+  "finale",
   "rewrite",
   "repair",
   "recanon",

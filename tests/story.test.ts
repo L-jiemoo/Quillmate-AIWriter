@@ -445,6 +445,42 @@ describe("剧情台账生成与增量更新", () => {
     expect(issues.some((issue) => issue.code === "broken-event-link")).toBe(true);
   });
 
+  it("同一地点的不同粒度不算两地", () => {
+    const detail = fixture();
+    const event = (id: string, name: string, location: string) => ({
+      id,
+      name,
+      chapter: 2,
+      time: "第一日",
+      location,
+      participants: ["张三"],
+      cause: "",
+      process: "",
+      result: "",
+      impact: "",
+      relatedEventIds: [],
+      foreshadowIds: [],
+      source: "ai" as const,
+      updatedAt,
+    });
+    const ledger = normalizeStory({
+      version: 1,
+      updatedAt,
+      states: [],
+      relations: [],
+      events: [
+        event("evt-2-1", "村口会面", "甲村"),
+        event("evt-2-2", "院中议事", "甲村西空院"),
+      ],
+      foreshadows: [],
+    });
+    expect(
+      storyChecks(detail, ledger).some(
+        (issue) => issue.code === "same-time-different-locations",
+      ),
+    ).toBe(false);
+  });
+
   it("写作前检索只包含目标章之前的状态、事件和未回收伏笔", () => {
     const detail = fixture();
     const memory = buildEffectiveMemory(detail, null);

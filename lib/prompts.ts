@@ -8,6 +8,7 @@ import type {
   ChapterWriteOptions,
   Character,
   ContinuityIssue,
+  PlanRelation,
   ProjectMeta,
 } from "./types";
 
@@ -110,6 +111,12 @@ export function architectFoundationMessages(meta: ProjectMeta): ChatMessage[] {
   "outlineMd": "全书主线大纲（Markdown）：分卷结构、各卷阶段目标、关键转折、伏笔与回收点、爽点节奏",
   "volumes": [
     {"title": "卷名", "chapters": "第 1-10 章", "goal": "本卷阶段目标", "turningPoints": ["关键转折"]}
+  ],
+  "facts": [
+    {"id": "fact-world-1", "kind": "world|rule|event", "content": "不可违背的设定、规则或既定事件", "immutable": true}
+  ],
+  "keyItems": [
+    {"id": "item-1", "name": "关键物品", "aliases": [], "holder": "初始持有人", "location": "初始位置", "state": "完好", "introducedChapter": 1, "note": ""}
   ]
 }
 
@@ -119,6 +126,8 @@ export function architectFoundationMessages(meta: ProjectMeta): ChatMessage[] {
 - 人物行动必须符合性格、目标、认知和当前处境，不要为了爽点牺牲因果。
 - 重要伏笔在 outlineMd 中记录埋设位置、作用和预计回收方向，不得为了悬念随意设置。
 - 世界观规则必须内部一致，为长篇连载留出扩展空间。
+- facts 只记录故事开始前已经成立的世界背景、硬规则和前置事件（如盗墓、藏棺）；本章及以后才会发生的剧情事件、结局、谁死谁活、谁被掳走，一律不能写进 facts，必须留给后面生成的 planLedger。kind 只用 world/rule，event 仅限故事开始前的背景事件；数量 10-40 条，id 唯一。
+- keyItems 只写关键物品的初始持有人、位置和状态，不写后续转移；数量 5-30 件，id 唯一，introducedChapter 必须在 1-${meta.targetChapters}。
 - 本阶段只输出整体架构，不要输出 chapters、planLedger 或逐章梗概。`,
     },
   ];
@@ -174,7 +183,11 @@ ${tail || "（这是第一批章节，暂无前序细纲）"}
 
 export function architectLedgerBatchMessages(
   meta: ProjectMeta,
-  foundation: { bible: string; outlineMd: string },
+  foundation: {
+    bible: string;
+    outlineMd: string;
+    keyItems?: Array<{ name: string; aliases?: string[] }>;
+  },
   chapters: ChapterPlan[],
   priorEvents: Array<{ id: string; name: string; chapter: number }>,
   batchNo: number,
@@ -209,6 +222,14 @@ ${clip(foundation.outlineMd, 1800)}
 【本批章节细纲】
 ${list}
 
+【已登记的关键物品（物品变化必须引用这些名称）】
+${(foundation.keyItems ?? [])
+  .map(
+    (item) =>
+      `- ${item.name}${item.aliases?.length ? `（别名：${item.aliases.join("、")}）` : ""}`,
+  )
+  .join("\n") || "（无；本批不要凭空新增物品变化）"}
+
 【前面批次已有的计划事件 ID】
 ${events || "（这是第一批，暂无既有事件）"}
 
@@ -216,7 +237,7 @@ ${events || "（这是第一批，暂无既有事件）"}
 {
   "planLedger": {
     "events": [
-      {"id": "plan-arch-b${batchNo}-event-1", "name": "计划事件名称", "chapter": ${first}, "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "core"}
+      {"id": "plan-arch-b${batchNo}-event-1", "name": "计划事件名称", "chapter": ${first}, "thread": "主线/支线/感情线", "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "core"}
     ],
     "characterChanges": [
       {"id": "plan-arch-b${batchNo}-char-1", "character": "人物姓名", "chapter": ${first}, "before": "变化前状态", "after": "变化后状态", "reason": "变化原因", "eventIds": []}
@@ -228,7 +249,7 @@ ${events || "（这是第一批，暂无既有事件）"}
       {"id": "plan-arch-b${batchNo}-time-1", "chapter": ${first}, "time": "计划时间", "eventIds": [], "sequence": "事件先后关系", "constraints": "时间约束", "participants": ["人物"]}
     ],
     "items": [
-      {"id": "plan-arch-b${batchNo}-item-1", "item": "重要物品", "chapter": ${first}, "holder": "预计持有人", "stateChange": "预计状态变化", "eventIds": []}
+      {"id": "plan-arch-b${batchNo}-item-1", "item": "重要物品", "chapter": ${first}, "changeType": "transfer|state|location|introduce|destroy|other", "holder": "预计持有人", "location": "预计位置", "state": "预计状态", "reason": "变化原因", "stateChange": "兼容旧字段，可留空", "eventIds": []}
     ]
   }
 }
@@ -239,6 +260,8 @@ ${events || "（这是第一批，暂无既有事件）"}
 - 只描述未来计划，不得包含 status、actualChapter、evidence 或任何“已经发生”的字段。
 - 人物变化必须写成计划（例如“计划第 8 章由存活转为死亡”），不能写成当前已经死亡。
 - 伏笔埋设章节必须在本批或前文合理位置；回收章节可以是未来章节，不确定时填 0。
+- thread 写明本章推进的是主线、支线、感情线还是哪条并行线，便于写作时对照。
+- 物品变化只能引用【已登记的关键物品】中的名称；转移必须同时写清新持有人和位置，状态变化写清前后状态，destroy 必须写明原因，不得凭空出现或消失。
 - 时间线和物品变化同样是计划，不是既定事实。`,
     },
   ];
@@ -312,14 +335,16 @@ ${clip(context.storyContext?.trim() || "（未检索到剧情台账；不得虚�
   ],
   "planLedger": {
     "events": [
-      {"id": "plan-extend-event-${startIndex}-1", "name": "计划事件名称", "chapter": ${startIndex}, "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "major"}
+      {"id": "plan-extend-event-${startIndex}-1", "name": "计划事件名称", "chapter": ${startIndex}, "thread": "主线/支线/感情线", "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "major"}
     ],
     "characterChanges": [],
     "foreshadows": [
       {"id": "plan-extend-foreshadow-1", "text": "伏笔内容", "plantChapter": ${startIndex}, "resolveChapter": 0, "purpose": "伏笔作用", "eventIds": [], "resolveCondition": "回收条件"}
     ],
     "timeline": [],
-    "items": []
+    "items": [
+      {"id": "plan-extend-item-1", "item": "已登记或新引入的关键物品", "chapter": ${startIndex}, "changeType": "transfer|state|location|introduce|destroy|other", "holder": "新持有人", "location": "新位置", "state": "新状态", "reason": "变化原因", "eventIds": []}
+    ]
   }
 }
 
@@ -327,7 +352,8 @@ ${clip(context.storyContext?.trim() || "（未检索到剧情台账；不得虚�
 - chapters 从 index ${startIndex} 开始连续编号，共 ${count} 章。
 - planLedger 只登记本批新章节的计划，chapter 必须落在 ${startIndex}-${startIndex + count - 1}；不要重复登记已有章节。
 - 新 id 统一使用 plan-extend- 前缀，不得复用已有台账 id；只描述未来计划，不得包含 status 或 actualChapter。
-- 每个新章节至少关联一个计划事件；人物变化、物品和时间线也只写成计划，不代表已经发生。
+- 每个新章节至少关联一个计划事件；thread 写明推进的主线/支线；人物变化、物品和时间线也只写成计划，不代表已经发生。
+- 物品变化必须写清 changeType、持有人、位置、状态和原因；沿用既有物品名称，新增物品用 introduce 并说明来源。
 - 新章节标题必须互不相同，且不得与【现有章节标题（不得复用）】中的任何一条重复；尤其不要复用现有最后一章的标题。
 - 续排必须尊重事实台账、人物档案和剧情台账，不得推翻或改写已经发生的事实。
 - 充分考虑人物当前状态、人物关系、已发生事件和未解决冲突；人物不得知道其尚未掌握的信息。
@@ -443,6 +469,97 @@ ${feedback.join("\n")}
   ];
 }
 
+export function architectRelationsMessages(
+  meta: ProjectMeta,
+  bible: string,
+  outlineMd: string,
+  chapters: ChapterPlan[],
+  characters: Character[],
+  events: Array<{ id: string; name: string; chapter: number }>,
+  existing: PlanRelation[] = [],
+  feedback = "",
+): ChatMessage[] {
+  const chapterList = chapters
+    .map((chapter) => `第 ${chapter.index} 章《${chapter.title}》：${chapter.summary}`)
+    .join("\n");
+  const characterList = characters
+    .map(
+      (character) =>
+        `- ${character.name}（${character.role}）：${clip(character.relationships, 120) || "关系未注明"}`,
+    )
+    .join("\n");
+  const eventList = events
+    .slice(-120)
+    .map((event) => `${event.id}（第 ${event.chapter} 章：${event.name}）`)
+    .join("、");
+  const last = chapters[chapters.length - 1]?.index ?? meta.targetChapters;
+
+  return [
+    {
+      role: "system",
+      content: `你是中文小说的人物关系策划，负责把已确定的角色与章节细纲整理成可逐章切片的动态关系图。关系是创作计划，不是已经发生的事实。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `《${meta.title}》（${meta.genre} / ${meta.tone}）已完成角色设定。请为全书生成人物关系图。
+
+【世界观摘要】
+${clip(bible, 1600)}
+
+【全书主线大纲】
+${clip(outlineMd, 2200)}
+
+【角色名单】
+${characterList}
+
+【章节细纲】
+${clip(chapterList, 9000)}
+
+【计划事件 ID（changeEventIds 只能引用这些 ID）】
+${eventList || "（暂无计划事件）"}
+
+【已有关系边（续排时保留仍有效的 id；只更新区间或新增边，不要删除仍成立的关系）】
+${
+  existing.length
+    ? existing
+        .slice(0, 200)
+        .map(
+          (relation) =>
+            `- ${relation.id}：${relation.from}—${relation.to} ${relation.type}（第 ${relation.startChapter}-${relation.endChapter || "∞"} 章）`,
+        )
+        .join("\n")
+    : "（首次生成，暂无已有关系）"
+}
+${feedback ? `\n【上一轮输出未通过校验，请修正】\n${clip(feedback, 1200)}\n` : ""}
+请输出 JSON：
+{
+  "relations": [
+    {
+      "id": "plan-rel-1",
+      "from": "角色甲",
+      "to": "角色乙",
+      "type": "关系类型",
+      "strength": 3,
+      "direction": "one-way | two-way",
+      "startChapter": 1,
+      "endChapter": 0,
+      "changeEventIds": ["plan-event-1"],
+      "note": "关系变化说明"
+    }
+  ]
+}
+
+要求：
+- from/to 必须是【角色名单】中的姓名，不能自环；同一对角色可以有不同时间段的多条边。
+- strength 为 1-5 的整数；direction 只能是 one-way 或 two-way。
+- startChapter 必须在 1-${last}；endChapter 为 0 表示持续到全书结束，否则必须 >= startChapter。
+- 关系类型/强度/方向发生变化时，用新的边表示新的章节区间，并在 changeEventIds 中引用触发变化的计划事件。
+- 至少覆盖主要角色之间的核心关系；不要为路人或一次性配角硬造关系。
+- 只描述关系计划，不得包含 status、actualChapter 或 evidence。`,
+    },
+  ];
+}
+
 export function writerMessages(
   meta: ProjectMeta,
   bible: string,
@@ -501,16 +618,20 @@ ${previous}
 - 避免连续使用相同句式、段落结构和情绪表达，避免反复总结刚刚发生的事情。
 - 根据剧情需要控制节奏，允许安静、过渡、铺垫和情绪沉淀；重要转折要有充分铺垫，不要每章都制造强冲突、强反转和强悬念。
 - 章末应按章节定位自然收束或留钩子，不要每次都用刻意悬念。细纲是创作依据，不是必须逐句执行的机械模板。
+- 本章正文必须严格按【本章细纲】和【本章计划台账】执行；本章计划中的关键事件必须逐项落实，不得跳过、合并到其他章节或换成别的剧情。
+- 本章只能写本章时间范围内的场景；不得把后续章节的计划事件、人物变化、伏笔、物品转移提前写进本章，也不得把数年跨度压缩进本章。
+- 如果本章细纲不足以支撑目标字数，只能在本章场景内扩展动作、对话、细节和心理，不能拉入后续剧情来凑字数。
 - 不得把人物猜测、谎言或计划写成客观事实；如果细纲与事实台账冲突，以事实台账为准，并在正文中自然暴露冲突。
 
 【写作要求】
-${options.mode === "rewrite" ? "- 这是在重写已有章节：不要照抄旧稿，按细纲和重写要求重新组织场景与叙述。\n" : ""}${rewriteNote ? `- 本次重写要求：${rewriteNote}\n` : ""}- 本章开头必须直接承接【上一章结尾（原文）】中的人物动作、场景和情绪，不要复述上一章，也不要无交代地另起一场戏。
+${options.finale ? `- 这是全书完结章：必须收束主线核心冲突，回收或明确交代主要伏笔，交代主要人物的结局或阶段性归宿；不要留下新的重大悬念、续集钩子或“故事才刚刚开始”式结尾，结尾要自然收束。\n` : ""}${options.mode === "rewrite" ? "- 这是在重写已有章节：不要照抄旧稿，按细纲和重写要求重新组织场景与叙述。\n" : ""}${rewriteNote ? `- 本次重写要求：${rewriteNote}\n` : ""}- 本章开头必须直接承接【上一章结尾（原文）】中的人物动作、场景和情绪，不要复述上一章，也不要无交代地另起一场戏。
 - 如果本章细纲要求换场或时间跳跃，必须在前 200 字内用动作、对话或叙述交代过渡。
 ${nextOpening ? "- 本章结尾必须能自然过渡到【下一章开头（供收束参考）】，不要与其矛盾。\n" : ""}- 严格遵守【不可违背的事实台账】：已死亡角色不得以活人身份行动；关键物品的持有人、形态与状态不得随意改写；日期、天数和死线必须前后一致。
 - 【长期记忆】只来自已写章节的摘要/事件/人物/规则检索结果；记忆中没有记录的人物、物品、关系和事件，不得补写成既定事实。检索不到时按本章细纲自然推进，不要虚构“前文已经发生”的内容。
 - 如果【长期记忆】与事实台账冲突，以事实台账为准；如果与本章细纲冲突，以已写事实为准并自然处理。
 - 【剧情台账】中的人物状态、关系、事件和伏笔也只来自已写章节；未记录的状态变化、关系和因果不得凭空补写。人物行为必须符合其当前生死、位置、身体、能力和掌握的信息。
 - 【本章计划台账】只是创作计划，不代表这些事情已经发生；正文没有实际写出的计划事件、人物变化、物品转移或伏笔，不得当成既定事实。
+- 架构既定事实是硬约束，不得静默改写；如果正文必须偏离计划台账，必须写出足够的过程和过渡，系统会在写后登记偏离（带章节号）。
 - 计划与事实台账或实际剧情冲突时，以事实台账和已写剧情为准；不得为了完成计划而强行制造不符合前文的剧情。
 - 三种台账冲突时的优先级：事实台账 > 实际剧情台账/长期记忆 > 计划台账。已确认事实不能被计划覆盖。
 - 伏笔只按台账中“未回收/待回收/发展中”的状态推进；不得在没有正文依据时宣布回收。若本章按细纲需要回收，必须写出明确回收情节。
@@ -571,6 +692,7 @@ ${clip(chapterText, 16000)}
       "name": "物品名",
       "aliases": ["别名或描述"],
       "holder": "本章结束时持有人",
+      "location": "本章结束时所在位置，未知则留空",
       "state": "完整/分裂/遗失/被封印等",
       "note": "形态、纹饰、能力、来历等硬设定",
       "evidence": "正文中的短句依据"
@@ -648,12 +770,13 @@ ${clip(chapterText, 16000)}
 - 只出现在坟地、遗物、笔记、名单、回忆里的已死人物，status 填 dead 或 unknown，不要因为名字出现就标 alive。
 - aliases 只填正文中能唯一指向该人物的称呼；不要填“老东西”“爷爷”“老小子”“师傅”这类通用骂法、亲属称谓或身份称呼，也不要填其他角色的名字。拿不准时留空。
 - 只抽取有名字、会行动或状态发生变化的人物，以及推动剧情的关键物品。
+- 物品在本章明确转移、移动或损坏时，holder/location/state 必须按正文填写；没有变化就留空，不得凭猜测补位置。
 - 不要臆造正文没有的姓名、物品、日期；summary 里不得出现正文没有的人名或事件。
 - memory.events 只写本章正文实际推进的事件，不写细纲里计划但正文没发生的内容；memory.characters 中的名字必须在正文出现。
 - memory.foreshadowsPlanted 只记录正文中明确留下、后续可能需要回收的线索；普通悬念不要全部算作伏笔。memory.foreshadowsResolved 只记录本章明确回收的旧伏笔。
 - story.states 只写本章结束时的状态快照，不写计划、猜测或未来变化；lifeStatus 只能填 alive、dead、unknown，本章死亡才填 dead。
 - story.relations 只写正文明确体现的关系或本章发生的关系变化；不要补写未出现的关系。
-- story.events 只写正文实际发生的事件；participants 必须是正文出现的参与者。relatedEvents 只能引用本章事件名称；foreshadows 只关联正文明确涉及的伏笔。
+- story.events 只写正文实际发生的事件；participants 只写该事件实际在场的人物，同章其他场景、只被提及或计划中的人物不要列入。relatedEvents 只能引用本章事件名称；foreshadows 只关联正文明确涉及的伏笔。
 - 事件应尽量保留发生时间、地点、涉及人物和结果；伏笔的埋设和回收必须有正文依据。
 - 不得把本章细纲中计划但正文没有发生的事件写入事实、记忆或剧情台账。
 - evidence 必须摘自本章正文。`,
@@ -688,6 +811,7 @@ export function auditMessages(
   storyContext: string,
   evidenceContext = "",
   unifiedLedger = "",
+  planContext = "",
 ): ChatMessage[] {
   return [
     {
@@ -699,6 +823,7 @@ export function auditMessages(
       content: `请审校《${meta.title}》第 ${chapter.index} 章《${chapter.title}》。
 
 ${unifiedLedger ? `【统一台账（事实优先；剧情台账仅作补充，冲突时不得否定事实台账）】\n${clip(unifiedLedger, 9000)}\n` : `【事实台账（含每条事实确立的章节号）】\n${formatCanonForPrompt(canon, { includeChapters: true })}\n\n【剧情台账（人物状态/关系/事件/伏笔，来自已写章节）】\n${clip(storyContext || "（未检索到剧情台账）", 4000)}\n`}
+${planContext ? `【本章架构计划（创作计划，不是已经发生的事实；正文偏离时应有过渡）】\n${clip(planContext, 3000)}\n` : ""}
 【核心人物档案（用于人物性格与行为一致性）】
 ${formatCharacterProfiles(characters)}
 
@@ -773,6 +898,11 @@ ${clip(chapterText, 16000)}
 - 重写章节时：台账里 statusChapter 等于本章序号的条目属于旧稿事实，可以在本章被改写，不要因此报 critical；statusChapter 小于本章序号的是硬约束；大于本章序号的是后文事实，只用于检查衔接，不要用它否定本章。
 - 剧情台账和长期记忆是辅助线索，不是绝对真理：与事实台账冲突时以事实台账为准，与正文明确写出的事实冲突时以正文为准；不能因为台账没有记录就判定正文错误。
 - 不允许为了通过审校而建议修改既定事实、台账或后文设定；如果正文与既定事实冲突，应指出正文需要修改，而不是让台账迁就正文。
+- evidence 必须逐字引用你判定冲突的那一句正文。如果在 detail 里引用了“后文又说……”“本章又写……”等具体句子，这些句子必须同时出现在 evidence 中；不得只引背景句，把真正冲突的句子留在 detail 里。
+- 物品归属和地点判断只认正文明确写出的持有人、容器和位置，不得自行推断容器所在。“不在 A”和“在 B”可以同时成立，只有正文明确 B 位于 A 内时才算冲突；例如“角色甲不在地点甲”与“角色甲被关在地点乙”并不矛盾。
+- 同一章出现多件同类物品（如多块令牌、多枚印章、多把钥匙）时，只有正文明确把台账中的具体物品写到错误持有人或错误位置，才判物品归属 critical；仅因裸称、代词或指代不清而无法确定是哪一件的，按 CLARITY_GAP 记 warning，并要求写清全称。
+- 【本章架构计划】不是已发生事实：正文没有落实计划事件/关系本身不判 critical；但正文把物品或关系写到计划外，且没有过渡、也没有登记偏离时，按 warning 记录并提示需要登记台账变更。
+- 架构既定事实不可静默改写；只有正文明确写出相反事实时才判 critical，推断或人物怀疑不算。
 - 自动检查线索只是待核实提示：核对后确认是回忆、尸体、幻象、遗物或他人转述的，不要输出这一条，也不要在 issues 里写“机械检查误报 / 不构成复活 / 不属问题 / 应标为 ignore”这类说明。
 - issues 只保留确实需要作者修改的问题；确认不是问题就直接不输出，不要为了解释误报而保留空问题，也不要为了凑问题把可忽略项标成 warning。
 - continuityOk 只有在没有任何 critical 时才为 true。
@@ -822,7 +952,7 @@ export function chapterRepairMessages(
       content: `《${meta.title}》第 ${chapter.index} 章《${chapter.title}》存在以下连续性问题，请做定点修订。
 
 【必须解决的问题】
-${formatIssuesForPrompt(issues)}
+${formatIssuesForPrompt(issues, { detailLimit: 400, evidenceLimit: 300 })}
 ${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问题以“必须解决的问题”为准；已解决项不要重做）】\n${clip(reviewFeedback.trim(), 2400)}\n` : ""}
 【不可违背的事实台账】
 ${formatCanonForPrompt(canon)}
@@ -940,6 +1070,7 @@ ${clip(repairedText, 16000)}
 12. 是否与上一章结尾、下一章开头或来源章节产生新的冲突。
 问题分类规则与章节审校相同：只有 ESTABLISHED_CONTRADICTION 才能判 critical；RULE_EXTENSION 和 CLARITY_GAP 按 warning 记录，不得为了回归通过而判 critical；“以前没出现”“与常见设定不同”不构成 critical 证据。
 跨地点感知规则也与章节审校相同：距离、楼层、遮挡只算疑点；人物台词不等于客观事实；正文明确没发生的声音不能被人物一句“我听见了”当成客观事实。没有机制依据时最多按 CLARITY_GAP/warning 记录；只有客观旁白或既有硬规则明确否定这种感知时，才判 critical。
+物品归属与地点规则也与章节审校相同：只认正文明确写出的持有人、容器和位置，不得自行推断容器所在；“不在 A”与“在 B”可以同时成立，除非正文明确 B 位于 A 内。同类物品裸称指代不清只能记 CLARITY_GAP/warning，不得判 critical。evidence 必须引用修复后正文里真正冲突的原句，不得只引背景句。
 
 因果结构对比（必须逐项执行，并始终返回 causalChanges 数组；没有变化时返回空数组，但仍必须把 causalVerified 设为 true；只有真正完成逐项对比才能设为 true）：
 1. 动作的执行者是否被替换或拆分？
@@ -1038,6 +1169,7 @@ export function chapterRepairPlanMessages(
     evidenceContext?: string;
     crossChapterContext?: string;
     authorDirective?: string;
+    unifiedLedger?: string;
   } = {},
 ): ChatMessage[] {
   return [
@@ -1050,10 +1182,14 @@ export function chapterRepairPlanMessages(
       content: `请为《${meta.title}》第 ${chapter.index} 章《${chapter.title}》制定修复方案。
 
 【需要解决的问题（按序号对应，方括号内为问题 ID）】
-${formatIssuesForPrompt(issues, { withIds: true })}
-${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
-【不可违背的事实台账】
-${formatCanonForPrompt(canon)}
+${formatIssuesForPrompt(issues, {
+  withIds: true,
+  detailLimit: 400,
+  evidenceLimit: 300,
+})}
+${reviewFeedback.trim() ? `\n【本轮必须执行的修复反馈】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
+【不可违背的事实台账（统一台账；事实优先，剧情台账仅作补充）】
+${options.unifiedLedger ? clip(options.unifiedLedger, 8000) : formatCanonForPrompt(canon)}
 
 ${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.crossChapterContext ? `【问题涉及的此前章节原文（只读参考，用于判断是否需要跨章修复）】\n${clip(options.crossChapterContext, 8000)}\n\n` : ""}${options.authorDirective ? `【作者已确认的修复方向（必须严格遵守，不得再要求作者决定）】\n${clip(options.authorDirective, 2000)}\n\n` : ""}【上一章结尾】
 ${clip(previousEnding || "（无）", 1200)}
@@ -1122,7 +1258,11 @@ ${clip(chapterText, 12000)}
 - affectedFacts 和 sideEffects 必须如实填写，供后续回归审校使用。
 - causalBaseline 必须描述**修复前原文**的真实因果结构，不能写成计划中的新剧情；actor/action/target/object/effect 不得留空。仅做表达调整时，各字段写“仅表达调整”，但 actor/action/effect 仍要给出。
 - 必须区分动作发生位置、动作直接作用对象、最终产生结果的对象；不能因为它们在同一个场景出现就当作可以互换。
-- 修复时必须保持 causalBaseline 中的执行者、动作、作用对象、处理对象和事件顺序；不得新增原文没有的中间对象或动作落点来连接因果。`,
+- 修复时必须保持 causalBaseline 中的执行者、动作、作用对象、处理对象和事件顺序；不得新增原文没有的中间对象或动作落点来连接因果。
+- issuePlans 必须覆盖每个问题 evidence 中的全部原文片段；如果某个 evidence 片段与台账兼容、无需修改，必须在 strategy 中逐字引用该片段并说明理由，或明确写成整条问题无需修改（补丁阶段用 noChangeReason），不能设计无修改的补丁。不得只处理 detail 提到、但没有出现在 evidence 中的另一句，而把 evidence 原句原样留下。
+- 绝不要把 originalText 与 replacement 相同的修改写进方案；补丁阶段输出空修改会让整批校验失败。如果整条问题实际无需修改，应在 strategy 中说明，并指示补丁阶段使用 noChangeReason。
+- 如果问题 evidence 引用的句子本身可能被误读（例如多件同类物品中的裸称或代词），优先改写这句话，使其明确指向台账中的具体物品、持有人或地点，而不是只改 detail 后文提到的另一句。
+- 修改涉及多件同类物品、同类法器或器具时，replacement 必须使用正文已有的全称，不得新造名称，也不得把具体物品改成无法区分的裸称。`,
     },
   ];
 }
@@ -1147,6 +1287,7 @@ export function chapterRepairPatchMessages(
     affectedChapters?: number[];
     authorizedAnchors?: string[];
     authorizedParagraphs?: string[];
+    unifiedLedger?: string;
   } = {},
 ): ChatMessage[] {
   const crossChapters = (options.affectedChapters ?? []).filter(
@@ -1162,10 +1303,14 @@ export function chapterRepairPatchMessages(
       content: `请为《${meta.title}》第 ${chapter.index} 章《${chapter.title}》输出局部修复补丁。
 
 【待修问题（必须全部覆盖，方括号内为问题 ID）】
-${formatIssuesForPrompt(issues, { withIds: true })}
-${reviewFeedback.trim() ? `\n【上一版审校记录（仅作参考，当前问题以“待修问题”为准）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
-【不可违背的事实台账（不是原文，不得当作补丁锚点）】
-${formatCanonForPrompt(canon)}
+${formatIssuesForPrompt(issues, {
+  withIds: true,
+  detailLimit: 400,
+  evidenceLimit: 300,
+})}
+${reviewFeedback.trim() ? `\n【本轮必须执行的修复反馈（与“待修问题”同时满足）】\n${clip(reviewFeedback.trim(), 1800)}\n` : ""}
+【不可违背的事实台账（统一台账；事实优先，剧情台账仅作补充；不是原文，不得当作补丁锚点）】
+${options.unifiedLedger ? clip(options.unifiedLedger, 8000) : formatCanonForPrompt(canon)}
 
 ${options.evidenceContext ? `【相关原文证据（按问题检索；原文与台账已分开标注）】\n${clip(options.evidenceContext, 6000)}\n\n` : ""}${options.planText ? `【已通过约束检查的修复方案（必须按方案执行，不得扩大修改范围）】\n${clip(options.planText, 4000)}\n\n` : ""}${options.authorizedAnchors?.length ? `【本次授权修改的原文位置（只能落在包含以下片段的段落）】\n${options.authorizedAnchors
   .map((anchor, index) => `${index + 1}. ${anchor}`)
@@ -1193,13 +1338,14 @@ ${clip(chapterText, 16000)}
           "replacement": "替换后的文本，保留原句其余部分，只改必要内容",
           "reason": "这处修改如何解决对应问题"
         }
-      ]
+      ],
+      "noChangeReason": "仅当整条问题实际不成立、无需任何修改时填写；此时 edits 必须为空数组"
     }
   ]
 }
 
 约束：
-- 每个待修问题都必须至少有一个 edit；没有把握安全修改时不要编造锚点。
+- 每个待修问题必须二选一：至少输出一个真实 edit，或用 noChangeReason 说明整条问题无需修改（此时 edits 必须为空）。不得两者都没有，也不得两者同时填。没有把握安全修改时不要编造锚点。
 - chapterIndex 默认当前章 ${chapter.index}${crossChapters.length ? `；只有本次允许的第 ${crossChapters.join("、")} 章可以例外` : "；本次不允许修改其他章节"}。
 - originalText 必须逐字存在于对应 chapterIndex 的章节正文且只出现一次；不能用台账、摘要、上一版或推断文本作为锚点。
 - 审校证据里包住整段引文的“…”可能只是引用标记，并不属于正文；如果正文中没有这对引号，不要把外层引号写进 originalText 或 replacement。
@@ -1210,6 +1356,11 @@ ${clip(chapterText, 16000)}
 - 必须保持方案中的因果结构：动作执行者、动作、直接作用对象、被记录/改变对象、事件顺序和结果都不能改变。
 - 不得为了增强画面感新增原文没有的中间对象、动作落点或媒介；不得让结果指向另一个人物或物体。
 - 如果按原因果结构无法修复，保留原段落，不要自行设计新的因果机制。
+- 绝不允许 originalText 与 replacement 相同的 edit；程序会把整批补丁判为没有实际修改而拒绝。如果某个 evidence 片段无需修改，不要为它生成 edit，也不要复制原句充当修改：整条问题无需改就写 noChangeReason，否则把兼容理由写进真正修改的那条 edit 的 reason。
+- 每个待修问题 evidence 中的每个片段都必须至少落在一处 edit；如果某个片段确实无需修改，必须在该问题真正修改的 edit 的 reason 中逐字引用该片段并说明它与台账兼容，或整条问题用 noChangeReason 说明。只改 detail 提到、但没有出现在 evidence 中的句子，不算覆盖该问题。
+- noChangeReason 必须逐字引用 evidence 原句，并说明它为什么不与台账冲突；审校仍会复核，不能只写“与台账一致”。
+- evidence 引句本身可能被误读时，优先改写引句，使其明确指向台账中的具体物品、持有人或地点，并把这一点写进 reason；不要把同一个问题留给下一轮审校。
+- replacement 涉及多件同类物品、同类法器或器具时必须使用正文已有的全称，不得改写成裸称或新造名称。
 - 直接输出 JSON，不要输出解释或修改记录。`,
     },
   ];

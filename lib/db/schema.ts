@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { nowIso } from "../utils";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // 结构化数据表。章节正文、世界观、大纲、审校报告等长文本仍保存在 Markdown 文件里。
 const SCHEMA_V1 = `
@@ -351,6 +351,23 @@ export function ensureSchema(db: DatabaseSync): void {
   db.exec(SCHEMA_V2);
   db.exec(SCHEMA_V3);
   db.exec(SCHEMA_V4);
+  // v5 只给既有表补列：物品位置与架构既定事实。
+  const canonItemColumns = db
+    .prepare("PRAGMA table_info(canon_items)")
+    .all() as unknown as Array<{ name: string }>;
+  if (!canonItemColumns.some((column) => column.name === "location")) {
+    db.exec(
+      "ALTER TABLE canon_items ADD COLUMN location TEXT NOT NULL DEFAULT ''",
+    );
+  }
+  const canonMetaColumns = db
+    .prepare("PRAGMA table_info(canon_meta)")
+    .all() as unknown as Array<{ name: string }>;
+  if (!canonMetaColumns.some((column) => column.name === "base_facts_json")) {
+    db.exec(
+      "ALTER TABLE canon_meta ADD COLUMN base_facts_json TEXT NOT NULL DEFAULT '[]'",
+    );
+  }
 
   const row = db
     .prepare("SELECT MAX(version) AS version FROM schema_migrations")
@@ -372,6 +389,9 @@ export function ensureSchema(db: DatabaseSync): void {
   }
   if (current < 4) {
     insertMigration.run(4, nowIso(), "plan ledger separated from canon and story ledgers");
+  }
+  if (current < 5) {
+    insertMigration.run(5, nowIso(), "architecture facts, item location and relation graph");
   }
   // 兼容早期 v3 测试库：story_meta 可能还没有 suppressed_json 列。
   const storyMetaColumns = db

@@ -1,4 +1,8 @@
-import { normalizeExtractedFacts, normalizeReviewResult } from "./canon";
+import {
+  normalizeArchitectureFacts,
+  normalizeExtractedFacts,
+  normalizeReviewResult,
+} from "./canon";
 import { getRuntimeConfig } from "./config";
 import {
   LLMClient,
@@ -19,6 +23,7 @@ import {
   architectChapterBatchMessages,
   architectFoundationMessages,
   architectLedgerBatchMessages,
+  architectRelationsMessages,
   auditMessages,
   chapterRepairMessages,
   chapterRepairPatchMessages,
@@ -55,7 +60,10 @@ import {
 import {
   assertValidPlanLedger,
   emptyPlanLedger,
+  ensureItemRegistryCoverage,
   mergePlanLedgers,
+  normalizePlanItemRegistry,
+  normalizePlanRelations,
   planEntriesForChapters,
   sanitizeGeneratedPlanLedger,
 } from "./plan-ledger";
@@ -67,13 +75,16 @@ import {
 } from "./token-tiers";
 import { errorMessage } from "./utils";
 import type {
+  CanonFact,
   CanonFacts,
   ChapterPlan,
   ChapterWriteOptions,
   Character,
   ContinuityIssue,
   ExtractedFacts,
+  PlanItem,
   PlanLedger,
+  PlanRelation,
   ProjectMeta,
   ProjectPlan,
   ReviewResult,
@@ -146,6 +157,8 @@ interface ArchitectureFoundation {
   tags: string[];
   bible: string;
   outlineMd: string;
+  facts: CanonFact[];
+  keyItems: PlanItem[];
 }
 
 interface EventReference {
@@ -187,6 +200,8 @@ function parseFoundation(data: Record<string, unknown>): ArchitectureFoundation 
     tags: arr(data.tags),
     bible,
     outlineMd,
+    facts: normalizeArchitectureFacts(data.facts),
+    keyItems: normalizePlanItemRegistry(data.keyItems ?? data.key_items),
   };
 }
 
@@ -618,12 +633,37 @@ export async function generatePlan(
     report(`计划台账清理了 ${pruned.removed} 个不存在的跨事件引用。`);
   }
   planLedger = ensureLedgerCoverage(planLedger, chapters, report);
+  const registryBefore = foundation.keyItems.length;
+  planLedger = ensureItemRegistryCoverage({
+    ...planLedger,
+    itemRegistry: foundation.keyItems,
+  });
+  if (planLedger.itemRegistry.length > registryBefore) {
+    report(
+      `计划台账里出现了 ${planLedger.itemRegistry.length - registryBefore} 件未登记在 keyItems 的物品，已自动补进物品基线。`,
+    );
+  }
   const plan: ProjectPlan = {
     logline: foundation.logline,
     tags: foundation.tags,
     chapters,
   };
   assertValidPlanLedger(planLedger, plan);
+  const unbackedTransfers = planLedger.items.filter(
+    (item) =>
+      item.changeType === "transfer" &&
+      item.holder &&
+      !planLedger.events.some(
+        (event) =>
+          event.chapter === item.chapter &&
+          event.participants.includes(item.holder),
+      ),
+  );
+  if (unbackedTransfers.length) {
+    report(
+      `计划台账提示：${unbackedTransfers.length} 条物品转移没有同章计划事件包含新持有人，写作时会按计划台账处理，建议人工核对。`,
+    );
+  }
   report(
     `计划台账已完成：${planLedger.events.length} 个计划事件、${planLedger.foreshadows.length} 条计划伏笔。`,
   );
@@ -633,6 +673,8 @@ export async function generatePlan(
     bible: foundation.bible,
     outlineMd: foundation.outlineMd,
     planLedger,
+    facts: foundation.facts,
+    keyItems: foundation.keyItems,
   };
 }
 
@@ -732,6 +774,142 @@ export async function generateCharacters(
   }
   throw new Error(
     `角色生成连续两次未通过结构校验：${errorMessage(lastError)} 已生成的架构尚未提交。`,
+  );
+}
+
+export interface RelationGenerationOptions {
+  onProgress?: ProgressReporter;
+  client?: LLMClient;
+  existing?: PlanRelation[];
+}
+
+export async function generateRelationGraph(
+  meta: ProjectMeta,
+  generated: GeneratedPlan,
+  characters: Character[],
+  options: RelationGenerationOptions = {},
+): Promise<PlanRelation[]> {
+  if (isMock()) return [];
+  const runtime = getRuntimeConfig();
+  const budget = tokenBudgetForTask("architecture", runtime.maxTokens);
+  const report = reporter(options.onProgress);
+  const client = options.client ?? new LLMClient();
+  const onProgress = llmProgress(report);
+  const events = (generated.planLedger?.events ?? []).map((event) => ({
+    id: event.id,
+    name: event.name,
+    chapter: event.chapter,
+  }));
+  const validNames = new Set(
+    characters.map((item) => item.name.trim().toLowerCase()).filter(Boolean),
+  );
+  const validEventIds = new Set(events.map((event) => event.id));
+  const maxChapter = Math.max(
+    0,
+    ...generated.plan.chapters.map((chapter) => chapter.index),
+  );
+  const describeInvalid = (relation: PlanRelation): string => {
+    if (!validNames.has(relation.from.trim().toLowerCase())) {
+      return `角色不存在：${relation.from}`;
+    }
+    if (!validNames.has(relation.to.trim().toLowerCase())) {
+      return `角色不存在：${relation.to}`;
+    }
+    if (relation.startChapter > maxChapter) {
+      return `起始章节越界：${relation.startChapter}`;
+    }
+    if (relation.endChapter > maxChapter) {
+      return `结束章节越界：${relation.endChapter}`;
+    }
+    const missingEvent = relation.changeEventIds.find(
+      (id) => !validEventIds.has(id),
+    );
+    return missingEvent ? `计划事件不存在：${missingEvent}` : "";
+  };
+  let feedback = "";
+  let lastError: unknown = null;
+  report(`架构关系图：模型 ${runtime.model}，输出预算 ${budget} Tokens。`);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const data = await client.json<Record<string, unknown>>(
+        architectRelationsMessages(
+          meta,
+          generated.bible,
+          generated.outlineMd,
+          generated.plan.chapters,
+          characters,
+          events,
+          options.existing ?? [],
+          feedback,
+        ),
+        { agent: "architect", maxTokens: budget, onProgress },
+      );
+      const relations = normalizePlanRelations(data.relations);
+      if (!relations.length) {
+        throw new Error("模型没有返回任何人物关系边");
+      }
+      const accepted: PlanRelation[] = [];
+      const rejected: Array<{ relation: PlanRelation; reason: string }> = [];
+      for (const relation of relations) {
+        const reason = describeInvalid(relation);
+        if (reason) rejected.push({ relation, reason });
+        else accepted.push(relation);
+      }
+      if (rejected.length) {
+        const summary = rejected
+          .slice(0, 8)
+          .map((item) => `${item.relation.from}—${item.relation.to}（${item.reason}）`)
+          .join("；");
+        if (!accepted.length) {
+          throw new Error(`关系边全部无效：${summary}`);
+        }
+        if (attempt < 2) {
+          feedback = [
+            `上一轮有 ${rejected.length} 条关系边无效：${summary}。`,
+            `from/to 只能使用这些角色名：${characters.map((item) => item.name).join("、")}。`,
+            `changeEventIds 只能使用这些计划事件 ID：${events
+              .slice(0, 120)
+              .map((event) => event.id)
+              .join("、")}。`,
+            "请重新输出完整关系图；不要引用未列出的角色或事件。",
+          ].join("\n");
+          report(`关系图有 ${rejected.length} 条无效边，正在重试…`);
+          continue;
+        }
+        report(`关系图丢弃了 ${rejected.length} 条无效边：${summary}`);
+      }
+      if (!accepted.length) {
+        throw new Error("模型没有返回可用的人物关系边");
+      }
+      assertValidPlanLedger(
+        {
+          ...emptyPlanLedger(),
+          events: generated.planLedger?.events ?? [],
+          itemRegistry: generated.keyItems ?? [],
+          relations: accepted,
+        },
+        generated.plan,
+        characters,
+      );
+      report(
+        `架构关系图完成：${accepted.length} 条关系边${
+          rejected.length ? `（丢弃 ${rejected.length} 条无效边）` : ""
+        }。`,
+      );
+      return accepted;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof LLMOutputTruncatedError) {
+        throw new Error(`关系图生成失败：${errorMessage(error)} 关系图未生成。`);
+      }
+      feedback = errorMessage(error);
+      if (attempt < 2) {
+        report(`关系图未通过校验（${feedback}），正在重试…`);
+      }
+    }
+  }
+  throw new Error(
+    `关系图连续两次未通过校验：${errorMessage(lastError)} 关系图未生成。`,
   );
 }
 
@@ -909,7 +1087,12 @@ async function extendPlanBatch(
   if (!Array.isArray(rawRecord.events) && !Array.isArray(rawRecord.foreshadows)) {
     throw new Error("续排没有返回结构化计划台账（planLedger），本次新章节未提交");
   }
-  const planLedger = sanitizeGeneratedPlanLedger(rawLedger);
+  // 模型可能漏掉某一章的计划事件；用章节细纲补齐，保证每个新章节都有可执行的本章计划。
+  const planLedger = ensureLedgerCoverage(
+    sanitizeGeneratedPlanLedger(rawLedger),
+    chapters,
+    () => undefined,
+  );
   if (!planLedger.events.length) {
     throw new Error("续排计划台账为空，本次新章节未提交");
   }
@@ -1095,6 +1278,7 @@ export async function auditChapter(
   storyContext: string,
   evidenceContext = "",
   unifiedLedger = "",
+  planContext = "",
 ): Promise<ReviewResult> {
   if (isMock()) return mockReview(chapter);
 
@@ -1112,6 +1296,7 @@ export async function auditChapter(
       storyContext,
       evidenceContext,
       unifiedLedger,
+      planContext,
     ),
     { temperature: 0.1, agent: "auditor", chapter: chapter.index },
   );
@@ -1623,6 +1808,7 @@ export async function repairChapterPatches(
     crossChapterContext?: string;
     authorDirective?: string;
     affectedChapters?: number[];
+    unifiedLedger?: string;
   } = {},
 ): Promise<RepairPatchPlanResult> {
   if (isMock()) {

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  architectFoundationMessages,
+  architectLedgerBatchMessages,
   architectMessages,
+  architectRelationsMessages,
   auditMessages,
   chapterRepairMessages,
+  chapterRepairPatchMessages,
   chapterRepairPlanMessages,
   characterMessages,
   extendMessages,
@@ -97,6 +101,10 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("距离、楼层、遮挡只算疑点");
     expect(text).toContain("人物台词/推断");
     expect(text).toContain("人物撒谎、试探或认知错误");
+    expect(text).toContain("evidence 必须逐字引用你判定冲突的那一句正文");
+    expect(text).toContain("不得自行推断容器所在");
+    expect(text).toContain("“不在 A”和“在 B”可以同时成立");
+    expect(text).toContain("仅因裸称、代词或指代不清而无法确定是哪一件的，按 CLARITY_GAP 记 warning");
   });
 
   it("传入统一台账时只渲染一份台账，并声明事实优先", () => {
@@ -183,6 +191,9 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("跨地点感知规则");
     expect(text).toContain("人物台词不等于客观事实");
     expect(text).toContain("距离、楼层、遮挡只算疑点");
+    expect(text).toContain("“不在 A”与“在 B”可以同时成立");
+    expect(text).toContain("同类物品裸称指代不清只能记 CLARITY_GAP/warning");
+    expect(text).toContain("evidence 必须引用修复后正文里真正冲突的原句");
   });
 
   it("修复方案提示词要求先提取修复前因果结构", () => {
@@ -217,6 +228,40 @@ describe("典型小说审校提示词回归", () => {
     expect(text).toContain("谁知道/怎么知道");
     expect(text).toContain("不得把一种未建立的感知来源替换成另一种未建立的感知来源");
     expect(text).toContain("明确写成诈/试探");
+    expect(text).toContain("evidence 中的全部原文片段");
+    expect(text).toContain("逐字引用该片段并说明理由");
+    expect(text).toContain("replacement 必须使用正文已有的全称");
+    expect(text).toContain("noChangeReason");
+  });
+
+  it("补丁提示词要求覆盖 evidence 每个片段并写全物品名称", () => {
+    const detail = reviewProject();
+    const text = join(
+      chapterRepairPatchMessages(
+        detail.meta,
+        detail.plan.chapters[3],
+        "张三进入密室。",
+        [
+          {
+            severity: "critical",
+            type: "物品归属",
+            evidence: "张三拿着账本。",
+            detail: "账本应属李四。",
+          },
+        ],
+        detail.canon,
+        "",
+        "",
+        "",
+        "",
+      ),
+    );
+
+    expect(text).toContain("每个片段都必须至少落在一处 edit");
+    expect(text).toContain("不算覆盖该问题");
+    expect(text).toContain("不得改写成裸称或新造名称");
+    expect(text).toContain("noChangeReason");
+    expect(text).toContain("绝不允许 originalText 与 replacement 相同的 edit");
   });
 
   it("修复提示词要求局部修改且不得改台账既定剧情", () => {
@@ -303,6 +348,42 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain('"characterChanges"');
     expect(text).toContain("不得包含 status、actualChapter");
     expect(text).toContain("人物计划在第 8 章死亡");
+  });
+
+  it("架构阶段要求事实台账、物品基线和关系图结构化输出", () => {
+    const detail = reviewProject();
+    const foundation = join(architectFoundationMessages(detail.meta));
+    expect(foundation).toContain('"facts"');
+    expect(foundation).toContain('"keyItems"');
+    expect(foundation).toContain("不可违背的设定");
+
+    const ledgerText = join(
+      architectLedgerBatchMessages(
+        detail.meta,
+        { bible: "世界观", outlineMd: "大纲", keyItems: [{ name: "账本" }] },
+        detail.plan.chapters.slice(0, 2),
+        [],
+        1,
+      ),
+    );
+    expect(ledgerText).toContain('"thread"');
+    expect(ledgerText).toContain('"changeType"');
+    expect(ledgerText).toContain("已登记的关键物品");
+
+    const relations = join(
+      architectRelationsMessages(
+        detail.meta,
+        "世界观",
+        "大纲",
+        detail.plan.chapters,
+        detail.characters,
+        [],
+      ),
+    );
+    expect(relations).toContain('"strength"');
+    expect(relations).toContain('"direction"');
+    expect(relations).toContain('"changeEventIds"');
+    expect(relations).toContain("不能自环");
   });
 
   it("大纲续排注入事实台账、人物档案和剧情台账", () => {
@@ -432,6 +513,20 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("正文没有实际写出的计划事件");
     expect(text).toContain("计划与事实台账或实际剧情冲突时");
     expect(text).toContain("事实台账 > 实际剧情台账/长期记忆 > 计划台账");
+
+    const finale = join(
+      writerMessages(
+        detail.meta,
+        detail.bible,
+        detail.characters,
+        detail.plan.chapters[3],
+        "",
+        [],
+        { canon: detail.canon, finale: true },
+      ),
+    );
+    expect(finale).toContain("这是全书完结章");
+    expect(finale).toContain("不要留下新的重大悬念");
   });
 
   it("事实抽取区分计划、怀疑、评价和未知信息", () => {

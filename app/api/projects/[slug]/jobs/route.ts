@@ -17,6 +17,7 @@ const ALLOWED: Job["type"][] = [
   "plan",
   "extend",
   "write",
+  "finale",
   "rewrite",
   "repair",
   "recanon",
