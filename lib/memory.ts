@@ -565,6 +565,7 @@ function chapterMemoryMap(
 export function collectOpenForeshadows(
   memory: Pick<ProjectMemory, "chapters">,
   beforeChapter: number,
+  limit = 20,
 ): OpenForeshadow[] {
   const chapters = Object.values(memory.chapters)
     // source=summary 的记忆来自大纲/摘要自动派生，不能作为伏笔实际埋设或回收的证据。
@@ -604,7 +605,7 @@ export function collectOpenForeshadows(
       return true;
     })
     .sort((a, b) => a.plantedChapter - b.plantedChapter)
-    .slice(0, 20);
+    .slice(0, limit);
 }
 
 function aggregateVolume(
@@ -1039,7 +1040,9 @@ export function buildMemoryContext(
   );
   const rules = uniqueStrings([...matchedRules, ...canon.rules]).slice(0, 12);
   const deadlines = canon.timeline.deadlines.slice(0, 10);
-  const open = collectOpenForeshadows(memory, target).slice(0, 12);
+  // 注入条数有上限，但总数要单独保留：日志里不能把 12 条上限说成未回收总数。
+  const openAll = collectOpenForeshadows(memory, target, 200);
+  const open = openAll.slice(0, 12);
   const currentVolume =
     memory.volumes.find(
       (item) => target >= item.startChapter && target <= item.endChapter,
@@ -1157,5 +1160,6 @@ export function buildMemoryContext(
     chapterIndices: relevantChapters.map((item) => item.index),
     sources,
     openForeshadows: open,
+    openForeshadowTotal: openAll.length,
   };
 }

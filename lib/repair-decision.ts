@@ -61,6 +61,22 @@ async function saveDecisions(slug: string, decisions: RepairDecision[]): Promise
   });
 }
 
+// 删除章节后丢弃包含该章的待确认修复方案，避免确认一个已经不存在的章节。
+export async function removeRepairDecisionsForChapter(
+  slug: string,
+  index: number,
+): Promise<boolean> {
+  const decisions = await listRepairDecisions(slug);
+  const kept = decisions.filter(
+    (decision) =>
+      decision.chapterIndex !== index &&
+      !decision.options.some((option) => option.affectedChapters.includes(index)),
+  );
+  if (kept.length === decisions.length) return false;
+  await saveDecisions(slug, kept);
+  return true;
+}
+
 export async function createRepairDecision(input: {
   slug: string;
   chapterIndex: number;

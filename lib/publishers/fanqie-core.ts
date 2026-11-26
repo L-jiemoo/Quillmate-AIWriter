@@ -47,6 +47,31 @@ export interface FanqieChapterInput {
   content: string;
 }
 
+// 平台错别字提示的识别规则：文案必须明确提到错别字，且不能是发布设置弹窗本身
+// （发布设置会显示“错别字 0”统计并带“确认提交”按钮，误点会跳过 AI 声明）。
+export function isTypoWarningText(text: string): boolean {
+  if (!/错别字|错字|typo/iu.test(text)) return false;
+  return !/是否使用\s*AI|确认提交/.test(text);
+}
+
+// 只点明确表示“继续/忽略/不修改/仍然提交”的按钮，不能用泛化的“确定/确认”。
+// 番茄新版错别字提示只有「取消 / 提交」两个按钮，点“提交”才是忽略错别字继续发布；
+// 这个弹窗已被“含错别字”条件限定，因此精确的“提交”是安全的。
+export const TYPO_CONTINUE_BUTTON_NAMES: RegExp[] = [
+  /仍(然|要)?(发布|提交)/u,
+  /继续(发布|提交)/u,
+  /忽略(并发布|全部)?/u,
+  /不用修改/u,
+  /不修改/u,
+  /^跳过$/u,
+  /^提\s*交$/u,
+];
+
+export function isTypoContinueButton(label: string): boolean {
+  const text = label.replace(/\s+/g, "").trim();
+  return TYPO_CONTINUE_BUTTON_NAMES.some((pattern) => pattern.test(text));
+}
+
 export interface FanqiePublishValidationInput {
   bookName: string;
   bookId?: string;

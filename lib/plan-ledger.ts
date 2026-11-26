@@ -414,6 +414,104 @@ export function normalizePlanRelations(
   return result;
 }
 
+function resetRealizedChapter<T extends {
+  actualChapter: number;
+  status: PlanStatus;
+  evidence: string;
+}>(item: T, chapter: number): Partial<T> {
+  if (item.actualChapter !== chapter) return {};
+  return {
+    actualChapter: 0,
+    status: item.status === "realized" ? "planned" : item.status,
+    evidence: "",
+  } as Partial<T>;
+}
+
+// 删除章节后移除只属于该章的创作计划；其余计划保留，但清掉对已删章节的关联。
+export function removeChapterFromPlanLedger(
+  ledger: PlanLedger,
+  chapter: number,
+  updatedAt = nowIso(),
+): PlanLedger {
+  const removedEventIds = new Set(
+    ledger.events.filter((event) => event.chapter === chapter).map((event) => event.id),
+  );
+  const clearEvents = (ids: string[]) => ids.filter((id) => !removedEventIds.has(id));
+
+  const events = ledger.events
+    .filter((event) => event.chapter !== chapter)
+    .map((event) => ({
+      ...event,
+      relatedEventIds: clearEvents(event.relatedEventIds),
+      ...resetRealizedChapter(event, chapter),
+    }));
+  const characterChanges = ledger.characterChanges
+    .filter((item) => item.chapter !== chapter)
+    .map((item) => ({
+      ...item,
+      eventIds: clearEvents(item.eventIds),
+      ...resetRealizedChapter(item, chapter),
+    }));
+  const foreshadows = ledger.foreshadows
+    .filter((item) => item.plantChapter !== chapter)
+    .map((item) => ({
+      ...item,
+      eventIds: clearEvents(item.eventIds),
+      ...(item.actualPlantChapter === chapter ? { actualPlantChapter: 0 } : {}),
+      ...(item.resolveChapter === chapter ? { resolveChapter: 0 } : {}),
+      ...(item.actualResolveChapter === chapter
+        ? { actualResolveChapter: 0, status: "planned" as PlanStatus, evidence: "" }
+        : {}),
+    }));
+  const timeline = ledger.timeline
+    .filter((item) => item.chapter !== chapter)
+    .map((item) => ({
+      ...item,
+      eventIds: clearEvents(item.eventIds),
+      ...resetRealizedChapter(item, chapter),
+    }));
+  const items = ledger.items
+    .filter((item) => item.chapter !== chapter)
+    .map((item) => ({
+      ...item,
+      eventIds: clearEvents(item.eventIds),
+      ...resetRealizedChapter(item, chapter),
+    }));
+  const itemRegistry = ledger.itemRegistry.filter(
+    (item) => item.introducedChapter !== chapter,
+  );
+  const relations = ledger.relations
+    .filter((relation) => relation.startChapter !== chapter)
+    .map((relation) => ({
+      ...relation,
+      changeEventIds: clearEvents(relation.changeEventIds),
+      ...resetRealizedChapter(relation, chapter),
+      ...(relation.endChapter >= chapter
+        ? { endChapter: Math.max(relation.startChapter, chapter - 1) }
+        : {}),
+    }))
+    .filter((relation) => relation.endChapter >= relation.startChapter);
+  const deviations = ledger.deviations.filter(
+    (deviation) => deviation.chapter !== chapter,
+  );
+
+  return normalizePlanLedger({
+    ...ledger,
+    events,
+    characterChanges,
+    foreshadows,
+    timeline,
+    items,
+    itemRegistry,
+    relations,
+    deviations,
+    ...(ledger.completedChapter === chapter
+      ? { completedChapter: 0, completedAt: undefined }
+      : {}),
+    updatedAt,
+  });
+}
+
 export function normalizePlanLedger(input: unknown, updatedAt = nowIso()): PlanLedger {
   const record = recordOf(input);
   const at = text(record.updatedAt ?? record.updated_at) || updatedAt;
@@ -765,7 +863,7 @@ export function planEntriesForChapters(
   }));
 }
 
-function planLedgerIds(ledger: PlanLedger): string[] {
+export function planLedgerIds(ledger: PlanLedger): string[] {
   return [
     ...ledger.events,
     ...ledger.characterChanges,
@@ -784,6 +882,404 @@ export function planLedgerIdCollisions(
 ): string[] {
   const existing = new Set(planLedgerIds(base));
   return [...new Set(planLedgerIds(addition))].filter((id) => existing.has(id));
+}
+
+// 未回收的计划伏笔：没有排定回收章节，且计划仍然有效。
+export function openForeshadows(ledger: PlanLedger | undefined): PlanLedger["foreshadows"] {
+  if (!ledger) return [];
+  return ledger.foreshadows.filter(
+    (item) => !item.resolveChapter && activePlanStatus(item.status),
+  );
+}
+
+// 实际未回收的伏笔：正文没有确认回收，且计划仍然有效。
+// 与 openForeshadows 的差别：已经排过回收章、但正文没真正收掉的（逾期、部分实现）
+// 也要算进来，否则收尾大纲会把“排过期却没收”的悬念整条漏掉。
+// 已偏离但正文从未确认埋设的条目同样保留：收尾需要看到它们，才能决定补埋还是明确放弃。
+export function unresolvedForeshadows(
+  ledger: PlanLedger | undefined,
+): PlanLedger["foreshadows"] {
+  if (!ledger) return [];
+  return ledger.foreshadows
+    .filter((item) => activePlanStatus(item.status) && !item.actualResolveChapter)
+    .sort((a, b) => {
+      const left = a.resolveChapter || Number.MAX_SAFE_INTEGER;
+      const right = b.resolveChapter || Number.MAX_SAFE_INTEGER;
+      return left - right || a.plantChapter - b.plantChapter;
+    });
+}
+
+export type ForeshadowUrgency = "must" | "soon" | "later";
+
+export interface ForeshadowResolutionSlot {
+  id: string;
+  text: string;
+  plantChapter: number;
+  plannedResolveChapter: number;
+  suggestedResolveChapter: number;
+  remainingChapters: number;
+  overdue: boolean;
+  urgency: ForeshadowUrgency;
+  reason: string;
+}
+
+// 写作期调度：把“还没排回收章”的伏笔按剩余篇幅折算出一个建议回收章。
+// 只产出建议，不写回台账；AI 真在正文里收掉以后由对账回填 resolveChapter，
+// 这样回收时机既有规划兜底，又能跟着实际剧情走。
+export function planForeshadowResolutions(
+  ledger: PlanLedger | undefined,
+  targetChapter: number,
+  totalChapters: number,
+): ForeshadowResolutionSlot[] {
+  if (!ledger) return [];
+  const target = Math.max(1, Math.round(Number(targetChapter) || 1));
+  const total = Math.max(target, Math.round(Number(totalChapters) || target));
+  const remaining = total - target + 1;
+  // 最后两章留给核心冲突和完结，普通伏笔不排到那里。
+  const latest = remaining > 2 ? total - 1 : total;
+  const used = new Set<number>();
+
+  const pending = ledger.foreshadows
+    .filter((item) => {
+      if (!activePlanStatus(item.status) || item.actualResolveChapter) return false;
+      // 正文从未埋过的已偏离伏笔没有回收对象，不能进回收调度。
+      if (item.status === "deviated" && !item.actualPlantChapter) return false;
+      // 已排期且尚未到期（含本章）的伏笔由 formatPlanContext 原样注入，不重复催促。
+      if (item.resolveChapter >= target) return false;
+      const planted = item.actualPlantChapter || item.plantChapter;
+      return planted <= target;
+    })
+    .sort((a, b) => {
+      const left = a.resolveChapter || Number.MAX_SAFE_INTEGER;
+      const right = b.resolveChapter || Number.MAX_SAFE_INTEGER;
+      return left - right || a.plantChapter - b.plantChapter;
+    });
+
+  return pending.map((item) => {
+    const planted = item.actualPlantChapter || item.plantChapter;
+    const overdue = item.resolveChapter > 0;
+    // 本章才新埋的伏笔不能要求同章回收，除非这已经是全书最后一章。
+    const fresh = !item.actualPlantChapter && item.plantChapter === target;
+    const carried = Math.max(1, target - planted + 1);
+    let urgency: ForeshadowUrgency;
+    if (overdue || remaining <= 3) urgency = "must";
+    else if (remaining <= 5) urgency = "soon";
+    else urgency = "later";
+    if (fresh && remaining > 1 && urgency === "must") urgency = "soon";
+
+    let suggested: number;
+    if (urgency === "must") {
+      suggested = target;
+    } else if (urgency === "soon") {
+      suggested = Math.min(target + 1, latest);
+    } else {
+      // 需要触发条件的伏笔要靠后铺垫，纯线索型伏笔尽快收掉。
+      const ratio = item.resolveCondition || item.purpose ? 0.65 : 0.4;
+      const span = Math.max(1, latest - target);
+      suggested = target + Math.max(1, Math.round(span * ratio));
+    }
+    suggested = Math.min(Math.max(suggested, target), latest);
+    // 同章堆太多伏笔会显得生硬，逐条错开一章。
+    while (used.has(suggested) && suggested < latest) suggested += 1;
+    used.add(suggested);
+
+    const reason = overdue
+      ? `计划第 ${item.resolveChapter} 章回收，已逾期`
+      : urgency === "must"
+        ? `只剩 ${remaining} 章，必须本章收束`
+        : fresh
+          ? `本章新埋，建议第 ${suggested} 章前回收`
+          : urgency === "soon"
+            ? `已埋 ${carried} 章，剩 ${remaining} 章，应尽快收`
+            : `已埋 ${carried} 章，建议第 ${suggested} 章前回收`;
+
+    return {
+      id: item.id,
+      text: item.text,
+      plantChapter: planted,
+      plannedResolveChapter: item.resolveChapter,
+      suggestedResolveChapter: suggested,
+      remainingChapters: remaining,
+      overdue,
+      urgency,
+      reason,
+    };
+  });
+}
+
+// 伏笔文本归一化：模型经常省略标点或换个引号再复述同一条伏笔。
+export function foreshadowTextKey(text: string): string {
+  return text
+    .replace(/[\s，。！？；：、,.!?;:"'“”‘’（）()《》〈〉【】\[\]·…—\-]/gu, "")
+    .toLowerCase();
+}
+
+function foreshadowsReferToSameThing(left: string, right: string): boolean {
+  const a = foreshadowTextKey(left);
+  const b = foreshadowTextKey(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // 允许一次包含匹配（模型常把长伏笔压成短标签），但过短的串容易误配。
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 4 && long.includes(short);
+}
+
+export interface WrapUpForeshadowBackfill {
+  base: PlanLedger;
+  addition: PlanLedger;
+  // 已回填回收章节的既有伏笔原文。
+  resolved: string[];
+  // 原本已排期、这次被改到新章节的伏笔原文（逾期改期）。
+  rescheduled: string[];
+  // 本批之后仍未排进收尾的伏笔原文。
+  unassigned: string[];
+  // 模型给出但没能和既有伏笔对上的回收计划（按新增伏笔保留）。
+  unmatched: string[];
+}
+
+// 收尾大纲安排伏笔回收时，既有计划里的那条伏笔仍然是“未回收”。
+// 这里把新排定的回收章节回填到既有条目，避免同一伏笔出现两条互相矛盾的记录。
+export function applyWrapUpForeshadowPlans(
+  base: PlanLedger,
+  addition: PlanLedger,
+): WrapUpForeshadowBackfill {
+  const planned = addition.foreshadows.filter(
+    (item) => item.resolveChapter > 0 && item.text.trim(),
+  );
+  if (!planned.length) {
+    return {
+      base,
+      addition,
+      resolved: [],
+      rescheduled: [],
+      unassigned: openForeshadows(base).map((item) => item.text),
+      unmatched: [],
+    };
+  }
+
+  const claimed = new Set<string>();
+  const resolved: string[] = [];
+  const rescheduled: string[] = [];
+  const foreshadows = base.foreshadows.map((item) => {
+    // 只有正文已确认回收、已取消或已实现的条目才不能再改期。
+    if (item.actualResolveChapter || item.status === "cancelled" || item.status === "realized") {
+      return item;
+    }
+    const hit = planned.find(
+      (candidate) =>
+        !claimed.has(candidate.id) && foreshadowsReferToSameThing(item.text, candidate.text),
+    );
+    if (!hit) return item;
+    claimed.add(hit.id);
+    resolved.push(item.text);
+    if (item.resolveChapter > 0 && item.resolveChapter !== hit.resolveChapter) {
+      rescheduled.push(item.text);
+    }
+    return {
+      ...item,
+      resolveChapter: hit.resolveChapter,
+      resolveCondition: hit.resolveCondition || item.resolveCondition,
+      updatedAt: nowIso(),
+    };
+  });
+
+  const nextBase: PlanLedger = { ...base, foreshadows, updatedAt: nowIso() };
+  return {
+    base: nextBase,
+    // 已经回填到既有条目的计划不再重复登记，对不上的保留为新增计划。
+    addition: {
+      ...addition,
+      foreshadows: addition.foreshadows.filter((item) => !claimed.has(item.id)),
+    },
+    resolved,
+    rescheduled,
+    // 这里只关心“有没有排到章节”，不关心正文是否已经写出来。
+    unassigned: openForeshadows(nextBase).map((item) => item.text),
+    unmatched: planned.filter((item) => !claimed.has(item.id)).map((item) => item.text),
+  };
+}
+
+export type PlanLedgerEntryKind =
+  | "event"
+  | "character-change"
+  | "foreshadow"
+  | "timeline"
+  | "item"
+  | "relation"
+  | "item-registry";
+
+// 手动删除某条计划：同时清掉指向被删事件的引用和对应的偏离记录，
+// 否则后续 assertValidPlanLedger 会因为“断裂的事件引用”直接拒绝整本台账。
+export function removePlanLedgerEntry(
+  ledger: PlanLedger,
+  kind: PlanLedgerEntryKind,
+  id: string,
+  updatedAt = nowIso(),
+): PlanLedger {
+  const target = id.trim();
+  if (!target) return ledger;
+  const at = updatedAt;
+  const removeEventRefs = (ids: string[], removed: Set<string>) =>
+    ids.filter((item) => !removed.has(item));
+
+  if (kind === "event") {
+    const removed = new Set([target]);
+    return {
+      ...ledger,
+      events: ledger.events
+        .filter((item) => item.id !== target)
+        .map((item) => ({ ...item, relatedEventIds: removeEventRefs(item.relatedEventIds, removed) })),
+      characterChanges: ledger.characterChanges.map((item) => ({
+        ...item,
+        eventIds: removeEventRefs(item.eventIds, removed),
+      })),
+      foreshadows: ledger.foreshadows.map((item) => ({
+        ...item,
+        eventIds: removeEventRefs(item.eventIds, removed),
+      })),
+      timeline: ledger.timeline.map((item) => ({
+        ...item,
+        eventIds: removeEventRefs(item.eventIds, removed),
+      })),
+      items: ledger.items.map((item) => ({
+        ...item,
+        eventIds: removeEventRefs(item.eventIds, removed),
+      })),
+      relations: ledger.relations.map((item) => ({
+        ...item,
+        changeEventIds: removeEventRefs(item.changeEventIds, removed),
+      })),
+      deviations: ledger.deviations.filter(
+        (item) => !(item.planType === "event" && item.planId === target),
+      ),
+      updatedAt: at,
+    };
+  }
+
+  const planType =
+    kind === "character-change"
+      ? "character-change"
+      : kind === "foreshadow"
+        ? "foreshadow"
+        : kind === "timeline"
+          ? "timeline"
+          : kind === "item"
+            ? "item"
+            : kind === "relation"
+              ? "relation"
+              : null;
+  const deviations = planType
+    ? ledger.deviations.filter((item) => !(item.planType === planType && item.planId === target))
+    : ledger.deviations;
+
+  switch (kind) {
+    case "character-change":
+      return {
+        ...ledger,
+        characterChanges: ledger.characterChanges.filter((item) => item.id !== target),
+        deviations,
+        updatedAt: at,
+      };
+    case "foreshadow":
+      return {
+        ...ledger,
+        foreshadows: ledger.foreshadows.filter((item) => item.id !== target),
+        deviations,
+        updatedAt: at,
+      };
+    case "timeline":
+      return {
+        ...ledger,
+        timeline: ledger.timeline.filter((item) => item.id !== target),
+        deviations,
+        updatedAt: at,
+      };
+    case "item":
+      return {
+        ...ledger,
+        items: ledger.items.filter((item) => item.id !== target),
+        deviations,
+        updatedAt: at,
+      };
+    case "relation":
+      return {
+        ...ledger,
+        relations: ledger.relations.filter((item) => item.id !== target),
+        deviations,
+        updatedAt: at,
+      };
+    default: {
+      // 物品基线被删除时，引用同名物品的变化计划也会失去归属，一并清掉。
+      const registry = ledger.itemRegistry.find((item) => item.id === target);
+      if (!registry) return ledger;
+      const names = new Set(
+        [registry.name, ...registry.aliases].map((item) => normalizeKey(item)),
+      );
+      return {
+        ...ledger,
+        itemRegistry: ledger.itemRegistry.filter((item) => item.id !== target),
+        items: ledger.items.filter((item) => !names.has(normalizeKey(item.item))),
+        updatedAt: at,
+      };
+    }
+  }
+}
+
+export interface StoryForeshadowForPlan {
+  id: string;
+  text: string;
+  plantedChapter: number;
+  status: string;
+}
+
+// 剧情台账（正文实际埋设的伏笔）和计划台账长期对不上时，收尾会误以为“没有未回收伏笔”。
+// 这里把剧情台账里未回收、且计划台账里没有同名条目的伏笔补登记成计划伏笔，
+// 让收尾清单、写作调度和界面都能看到它们。
+export function mergeStoryForeshadowsIntoPlan(
+  ledger: PlanLedger,
+  storyForeshadows: StoryForeshadowForPlan[],
+  updatedAt = nowIso(),
+): { ledger: PlanLedger; added: PlanForeshadow[] } {
+  const usedIds = new Set(ledger.foreshadows.map((item) => item.id));
+  const added: PlanForeshadow[] = [];
+  for (const item of storyForeshadows) {
+    const text = item.text?.trim();
+    if (!text || !Number.isInteger(item.plantedChapter) || item.plantedChapter < 1) continue;
+    if (item.status === "resolved" || item.status === "abandoned") continue;
+    if (ledger.foreshadows.some((entry) => foreshadowsReferToSameThing(entry.text, text))) {
+      continue;
+    }
+    let id = `plan-story-${item.id}`;
+    let sequence = 2;
+    while (usedIds.has(id)) {
+      id = `plan-story-${item.id}-${sequence}`;
+      sequence += 1;
+    }
+    usedIds.add(id);
+    added.push({
+      id,
+      text,
+      plantChapter: item.plantedChapter,
+      resolveChapter: 0,
+      purpose: "来自剧情台账的未回收线索",
+      eventIds: [],
+      resolveCondition: "",
+      status: "partially_realized",
+      actualPlantChapter: item.plantedChapter,
+      actualResolveChapter: 0,
+      evidence: "剧情台账记录为已埋设、未回收",
+      updatedAt,
+    });
+  }
+  if (!added.length) return { ledger, added };
+  return {
+    ledger: {
+      ...ledger,
+      foreshadows: [...ledger.foreshadows, ...added],
+      updatedAt,
+    },
+    added,
+  };
 }
 
 export function mergePlanLedgers(base: PlanLedger, addition: PlanLedger): PlanLedger {
@@ -828,7 +1324,7 @@ function clip(text: string, max: number): string {
 export function formatPlanContext(
   ledger: PlanLedger | undefined,
   chapter: ChapterPlan,
-  options: { budget?: number } = {},
+  options: { budget?: number; totalChapters?: number } = {},
 ): string {
   if (!ledger) return "";
   const target = chapter.index;
@@ -870,6 +1366,30 @@ export function formatPlanContext(
           ? "计划埋设"
           : "计划回收";
     lines.push(`- ${action}：${clip(item.text, 200)}（${STATUS_LABELS[item.status]}）`);
+  }
+
+  // 还没排回收章的伏笔：按剩余篇幅折算回收窗口，交给模型在写作时自行决定具体落在哪里。
+  const totalChapters = options.totalChapters ?? 0;
+  if (totalChapters > 0) {
+    const schedule = planForeshadowResolutions(ledger, target, totalChapters);
+    if (schedule.length) {
+      lines.push(`- 未排期伏笔回收调度（共 ${schedule.length} 条，由系统按剩余篇幅推算）：`);
+      for (const slot of schedule.slice(0, 6)) {
+        const label =
+          slot.urgency === "must"
+            ? "必须本章回收"
+            : slot.urgency === "soon"
+              ? "建议两章内回收"
+              : `建议第 ${slot.suggestedResolveChapter} 章前回收`;
+        lines.push(`  · [${label}] ${clip(slot.text, 120)}（${slot.reason}）`);
+      }
+      if (schedule.length > 6) {
+        lines.push(`  · 另有 ${schedule.length - 6} 条未排期伏笔，优先处理上面这些。`);
+      }
+      lines.push(
+        "  这些回收章只是调度建议：本章若已能自然收束，就在正文中真正回收并写明因果；收不掉就按建议推进线索，不要把悬念当成已解决。",
+      );
+    }
   }
 
   const timeline = ledger.timeline.filter(
@@ -1293,6 +1813,22 @@ export function reconcileChapterPlan(input: PlanReconciliationInput): PlanReconc
           "正文没有出现计划中的伏笔线索",
         );
         changes.push(`计划伏笔「${item.text}」未在正文埋设，未写入实际剧情台账`);
+        continue;
+      }
+    }
+    // 未排期的伏笔：正文既然已经写出了回收证据，就把实际回收章回填成计划回收章，
+    // 避免后续调度继续把它当成“还欠着”的悬念重复安排。
+    if (!item.resolveChapter && item.actualPlantChapter && !item.actualResolveChapter) {
+      const match = resolved.find((candidate) => samePlanText(candidate, item.text));
+      if (match) {
+        item.resolveChapter = chapter;
+        item.actualResolveChapter = chapter;
+        item.status = "realized";
+        item.evidence = clip(match, 400);
+        item.updatedAt = at;
+        changes.push(
+          `计划伏笔「${item.text}」在第 ${chapter} 章正文中自行回收，已补记回收章节`,
+        );
         continue;
       }
     }

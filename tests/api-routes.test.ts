@@ -189,6 +189,173 @@ describe("项目与发布路由确认", () => {
     expect(without.status).toBe(400);
   });
 
+  it("从未发布过的章节也能手动标记为已发布并释放", async () => {
+    const slug = (await store.createProject({ title: "手动标记发布" })).meta.slug;
+    const route = await import("@/app/api/projects/[slug]/publish/records/route");
+
+    // 新建项目默认用书名做番茄书名；清空后应该拒绝标记，
+    // 否则台账会落到空书名下，发布去重无法匹配。
+    await store.updateProject(slug, { publish: { fanqie: { bookName: "" } } });
+    const noBook = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapter: 1,
+        published: true,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(noBook.status).toBe(400);
+
+    await store.updateProject(slug, {
+      publish: { fanqie: { bookName: "手动标记之书", bookId: "book-manual" } },
+    });
+
+    const marked = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapter: 1,
+        published: true,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(marked.status).toBe(200);
+    const ledger = await store.getPublishLedger(slug);
+    const entry = Object.values(ledger.records).find((item) => item.chapter === 1);
+    expect(entry?.status).toBe("published");
+    expect(entry?.bookName).toBe("手动标记之书");
+
+    const released = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapter: 1,
+        published: false,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(released.status).toBe(200);
+    const after = await store.getPublishLedger(slug);
+    expect(
+      Object.values(after.records).some((item) => item.chapter === 1),
+    ).toBe(false);
+  });
+
+  it("发布状态支持一次批量标记已发布与未发布", async () => {
+    const slug = (await store.createProject({ title: "批量标记发布" })).meta.slug;
+    await store.updateProject(slug, {
+      publish: { fanqie: { bookName: "批量标记之书", bookId: "book-batch" } },
+    });
+    const route = await import("@/app/api/projects/[slug]/publish/records/route");
+
+    const marked = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapters: [1, 2, 3, 2, 0, "x"],
+        published: true,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(marked.status).toBe(200);
+    let ledger = await store.getPublishLedger(slug);
+    expect(
+      Object.values(ledger.records)
+        .filter((item) => item.status === "published")
+        .map((item) => item.chapter)
+        .sort((a, b) => a - b),
+    ).toEqual([1, 2, 3]);
+
+    // 批量释放：一次请求清掉整批，避免逐章写台账。
+    const released = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapters: [1, 2, 3],
+        published: false,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(released.status).toBe(200);
+    ledger = await store.getPublishLedger(slug);
+    expect(Object.values(ledger.records)).toHaveLength(0);
+
+    const empty = await route.POST(
+      jsonRequest(`http://localhost/api/projects/${slug}/publish/records`, "POST", {
+        chapters: [],
+        published: true,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(empty.status).toBe(400);
+  });
+
+  it("剧情台账支持批量标记伏笔已回收与已废弃", async () => {
+    const slug = (await store.createProject({ title: "批量伏笔", targetChapters: 3 })).meta.slug;
+    const { normalizeStory } = await import("@/lib/story");
+    await store.saveStory(
+      slug,
+      normalizeStory({
+        foreshadows: [
+          {
+            id: "fs-a",
+            text: "测试伏笔甲",
+            plantedChapter: 1,
+            status: "developing",
+            source: "manual",
+          },
+          {
+            id: "fs-b",
+            text: "测试伏笔乙",
+            plantedChapter: 1,
+            status: "pending",
+            source: "manual",
+          },
+          {
+            id: "fs-c",
+            text: "账房先生的旧账",
+            plantedChapter: 1,
+            status: "pending",
+            source: "manual",
+          },
+        ],
+      }),
+    );
+
+    const route = await import("@/app/api/projects/[slug]/story/route");
+    const marked = await route.PATCH(
+      jsonRequest(`http://localhost/api/projects/${slug}/story`, "PATCH", {
+        foreshadows: { ids: ["fs-a", "fs-b"], status: "resolved", resolvedChapter: 3 },
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(marked.status).toBe(200);
+    let story = await store.getStory(slug);
+    const resolved = story.foreshadows.find((item) => item.id === "fs-a");
+    expect(resolved?.status).toBe("resolved");
+    expect(resolved?.resolvedChapter).toBe(3);
+    expect(story.foreshadows.find((item) => item.id === "fs-b")?.status).toBe("resolved");
+    expect(story.foreshadows.find((item) => item.id === "fs-c")?.status).toBe("pending");
+
+    const abandoned = await route.PATCH(
+      jsonRequest(`http://localhost/api/projects/${slug}/story`, "PATCH", {
+        foreshadows: { ids: ["fs-c"], status: "abandoned" },
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(abandoned.status).toBe(200);
+    story = await store.getStory(slug);
+    expect(story.foreshadows.find((item) => item.id === "fs-c")?.status).toBe("abandoned");
+
+    // 批量修改同样需要二次确认。
+    const noConfirm = await route.PATCH(
+      jsonRequest(`http://localhost/api/projects/${slug}/story`, "PATCH", {
+        foreshadows: { ids: ["fs-a"], status: "pending" },
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(noConfirm.status).toBe(400);
+  });
+
   it("恢复章节版本必须二次确认", async () => {
     const slug = (await store.createProject({ title: "版本恢复确认" })).meta.slug;
     await store.savePlan(
@@ -227,6 +394,94 @@ describe("项目与发布路由确认", () => {
       { params: Promise.resolve({ slug, index: "1", version: String(target) }) },
     );
     expect(withConfirm.status).toBe(200);
+  });
+});
+
+describe("计划台账路由", () => {
+  async function projectWithChapters(title: string, count: number): Promise<string> {
+    const slug = (await store.createProject({ title })).meta.slug;
+    const { emptyPlanLedger } = await import("@/lib/plan-ledger");
+    await store.appendChapters(
+      slug,
+      Array.from({ length: count }, (_, offset) => ({
+        index: offset + 1,
+        title: `章节${offset + 1}`,
+        summary: `第 ${offset + 1} 章梗概`,
+        keyBeats: [],
+      })),
+      emptyPlanLedger(),
+    );
+    return slug;
+  }
+
+  it("可以删除单条计划伏笔", async () => {
+    const slug = (await store.createProject({ title: "删计划" })).meta.slug;
+    const { normalizePlanLedger } = await import("@/lib/plan-ledger");
+    await store.savePlanLedger(
+      slug,
+      normalizePlanLedger({
+        foreshadows: [
+          { id: "fs-1", text: "测试伏笔甲", plantChapter: 1, resolveChapter: 2 },
+          { id: "fs-2", text: "测试伏笔乙", plantChapter: 1, resolveChapter: 0 },
+        ],
+      }),
+    );
+    const route = await import("@/app/api/projects/[slug]/plan-ledger/route");
+
+    const response = await route.PATCH(
+      jsonRequest(`http://localhost/api/projects/${slug}/plan-ledger`, "PATCH", {
+        remove: { kind: "foreshadow", id: "fs-1" },
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(response.status).toBe(200);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.planLedger?.foreshadows.map((item) => item.id)).toEqual(["fs-2"]);
+  });
+
+  it("可以从末尾删除后补的章节大纲", async () => {
+    const slug = await projectWithChapters("删后补大纲", 3);
+    const route = await import("@/app/api/projects/[slug]/plan-ledger/route");
+
+    const withoutConfirm = await route.DELETE(
+      jsonRequest(`http://localhost/api/projects/${slug}/plan-ledger`, "DELETE", {
+        fromChapter: 2,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(withoutConfirm.status).toBe(400);
+
+    const response = await route.DELETE(
+      jsonRequest(`http://localhost/api/projects/${slug}/plan-ledger`, "DELETE", {
+        fromChapter: 2,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(response.status).toBe(200);
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.plan.chapters.map((chapter) => chapter.index)).toEqual([1]);
+  });
+
+  it("已有正文的章节拒绝直接删大纲", async () => {
+    const slug = await projectWithChapters("正文保护", 2);
+    await store.saveChapter(slug, 2, "第二章正文。", "章节2");
+    const route = await import("@/app/api/projects/[slug]/plan-ledger/route");
+
+    const response = await route.DELETE(
+      jsonRequest(`http://localhost/api/projects/${slug}/plan-ledger`, "DELETE", {
+        fromChapter: 2,
+        confirm: true,
+      }),
+      { params: Promise.resolve({ slug }) },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("已有正文");
+
+    const detail = await store.getProjectDetail(slug);
+    expect(detail.plan.chapters).toHaveLength(2);
   });
 });
 

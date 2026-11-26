@@ -16,6 +16,8 @@ export const dynamic = "force-dynamic";
 const ALLOWED: Job["type"][] = [
   "plan",
   "extend",
+  "wrapup",
+  "foreshadow",
   "write",
   "finale",
   "rewrite",
@@ -57,6 +59,7 @@ export async function POST(request: Request, context: RouteContext) {
       indices?: unknown;
       instruction?: unknown;
       useReview?: unknown;
+      wrapUpBrief?: unknown;
       source?: unknown;
       confirmPublish?: unknown;
       decisionId?: unknown;
@@ -86,6 +89,8 @@ export async function POST(request: Request, context: RouteContext) {
 
     const instruction =
       typeof body.instruction === "string" ? body.instruction.slice(0, 500) : "";
+    const wrapUpBrief =
+      typeof body.wrapUpBrief === "string" ? body.wrapUpBrief.trim().slice(0, 2000) : "";
 
     const active = getActiveJob(slug);
     if (active) {
@@ -101,6 +106,7 @@ export async function POST(request: Request, context: RouteContext) {
       indices,
       instruction,
       useReview: body.useReview === true,
+      ...(body.type === "wrapup" && wrapUpBrief ? { wrapUpBrief } : {}),
       source:
         body.type === "repair" && body.source === "draft"
           ? "draft"

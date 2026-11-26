@@ -85,6 +85,16 @@ export interface PlanForeshadow {
   updatedAt: string;
 }
 
+// 收尾大纲要逐条处理的伏笔：既包括从未排期的，也包括排过期但正文没真正回收的。
+export interface WrapUpForeshadowItem {
+  text: string;
+  plantChapter: number;
+  // 已排定的回收章；0 表示还没排期。
+  plannedResolveChapter: number;
+  // 正文是否已确认埋设；未埋设的偏离项没有回收对象。
+  planted: boolean;
+}
+
 export interface PlanTimelineEntry {
   id: string;
   chapter: number;
@@ -560,7 +570,10 @@ export interface MemoryRetrievalResult {
   truncated: boolean;
   chapterIndices: number[];
   sources: string[];
+  // 实际注入提示词的未回收伏笔（受条数上限约束）。
   openForeshadows: OpenForeshadow[];
+  // 未截断前的真实未回收数量，用于日志如实说明，避免把上限当成总数。
+  openForeshadowTotal: number;
 }
 
 export interface MemoryStatsView {
@@ -640,6 +653,7 @@ export type ChapterVersionSource =
   | "ai-write"
   | "ai-rewrite"
   | "ai-repair"
+  | "ai-polish"
   | "user"
   | "restore"
   | "system";
@@ -756,8 +770,14 @@ export interface ChapterWriteOptions {
   storyContext?: string;
   // 本章计划台账文本；只作为创作计划，不代表已经发生。
   planContext?: string;
+  // 人物塑造 Skill 生成的、仅限本章相关人物的内在设定。
+  characterDesignContext?: string;
+  // 文风优化 Skill 的项目级文风约束。
+  proseStyleContext?: string;
   // 全书完结章：收束主线、回收伏笔、交代人物结局，不留新的重大悬念。
   finale?: boolean;
+  // 最近三章的开头文本；写作时据此要求本章换一种开头结构。
+  previousOpenings?: { index: number; opening: string }[];
 }
 
 export interface ProjectDetail {
@@ -804,6 +824,8 @@ export interface JobParams {
   indices?: number[];
   instruction?: string;
   useReview?: boolean;
+  // 收尾大纲的作者自定义要求（必须回收哪些伏笔、人物去向、最终场景等）。
+  wrapUpBrief?: string;
   // 定点修复的问题来源：总体审校报告、章节审校遗留问题，或未采用草稿。
   source?: "audit" | "review" | "draft";
   // 番茄发布是有外部副作用的操作，必须由发起端显式确认。
@@ -827,6 +849,8 @@ export interface Job {
   type:
     | "plan"
     | "extend"
+    | "wrapup"
+    | "foreshadow"
     | "write"
     | "finale"
     | "rewrite"

@@ -52,6 +52,58 @@ export function appendChapterOutline(outlineMd: string, chapters: ChapterPlan[])
   return `${base}${base ? "\n\n" : ""}${section}\n`;
 }
 
+// 删除章节时只重建自动同步的章节细纲段落，用户在标记之外写的主线内容保持原样。
+export function removeChapterOutline(
+  outlineMd: string,
+  index: number,
+  remaining: ChapterPlan[],
+): string {
+  const start = outlineMd.indexOf(CHAPTER_SECTION_START);
+  const end = outlineMd.indexOf(CHAPTER_SECTION_END);
+  if (start >= 0 && end > start) {
+    const before = outlineMd.slice(0, start).replace(/\s+$/u, "");
+    const after = outlineMd.slice(end + CHAPTER_SECTION_END.length).replace(/^\s*/u, "");
+    const section = buildChapterOutlineSection(remaining);
+    const parts = [before, section, after].filter((part) => part.trim().length > 0);
+    return parts.length ? `${parts.join("\n\n").trimEnd()}\n` : "";
+  }
+  return removeOutlineHeadingBlock(outlineMd, index);
+}
+
+// 旧项目没有同步标记时，按标题层级删除该章小节，避免留下孤儿章节。
+function removeOutlineHeadingBlock(markdown: string, index: number): string {
+  const lines = markdown.split(/\r?\n/);
+  const heading = new RegExp(
+    `^(#{2,4})[ \\t]*第\\s*${index}\\s*章(?:[ \\t]|$|[·•:：\\-—])`,
+  );
+  let startLine = -1;
+  let level = 0;
+  for (let line = 0; line < lines.length; line += 1) {
+    const match = heading.exec(lines[line]);
+    if (match) {
+      startLine = line;
+      level = match[1].length;
+      break;
+    }
+  }
+  if (startLine < 0) return markdown;
+
+  let endLine = lines.length;
+  for (let line = startLine + 1; line < lines.length; line += 1) {
+    const next = /^(#{1,6})[ \t]+/u.exec(lines[line]);
+    if (next && next[1].length <= level) {
+      endLine = line;
+      break;
+    }
+  }
+
+  const kept = [...lines.slice(0, startLine), ...lines.slice(endLine)]
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return kept ? `${kept}\n` : "";
+}
+
 export function missingOutlineChapters(
   plan: ProjectPlan,
   outlineMd: string,

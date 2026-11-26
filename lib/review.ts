@@ -1,4 +1,12 @@
-import { deadNameSuspicions, openingRepeatSuspicion } from "./canon";
+import {
+  deadNameSuspicions,
+  formulaicOpeningSuspicion,
+  formulaicPassageSuspicion,
+  openingImagerySuspicion,
+  openingLinkSuspicion,
+  openingRepeatSuspicion,
+  openingStructureSuspicion,
+} from "./canon";
 import { applyChapterStory, storyChecks } from "./story";
 import type {
   CanonFacts,
@@ -167,9 +175,27 @@ function uniqueIssues(issues: ContinuityIssue[]): ContinuityIssue[] {
 export function reviewSuspicions(input: ReviewSuspicionInput): ReviewSuspicionResult {
   const storyIssues = storySuspicionsForChapter(input);
   const hardIssues = storyIssues.filter((issue) => issue.severity === "critical");
+  // 人名在每章开头都会出现，做开头比对时必须先排除，否则会把正常点名当成意象重复。
+  const knownNames = [
+    ...input.project.characters.map((item) => item.name),
+    ...input.canon.characters.flatMap((item) => [
+      item.name,
+      ...(item.aliases ?? []),
+    ]),
+  ];
   const suspicions = uniqueIssues([
     ...deadNameSuspicions(input.canon, input.text, input.chapter.index),
     ...openingRepeatSuspicion(input.previousEnding, input.text),
+    ...formulaicOpeningSuspicion(input.text, input.previousChapters),
+    ...openingImagerySuspicion(input.text, input.previousChapters, knownNames),
+    ...openingStructureSuspicion(input.text, input.previousChapters),
+    ...openingLinkSuspicion(
+      input.text,
+      input.previousEnding,
+      Math.max(1, input.chapter.index - 1),
+      knownNames,
+    ),
+    ...formulaicPassageSuspicion(input.text),
     ...chapterRepetitionSuspicion(
       input.chapter,
       input.text,

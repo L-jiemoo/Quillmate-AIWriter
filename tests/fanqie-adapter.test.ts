@@ -3,6 +3,8 @@ import {
   classifyFanqieFailure,
   DEFAULT_SELECTORS,
   hasFanqieAuthCookie,
+  isTypoContinueButton,
+  isTypoWarningText,
   mergeFanqieSelectors,
   PublishUncertainError,
   validateFanqiePublishRequest,
@@ -97,6 +99,25 @@ describe("番茄登录态与选择器", () => {
     expect(merged.confirmButton).toEqual(["button.ok"]);
     expect(merged.titleInput).toEqual(DEFAULT_SELECTORS.titleInput);
     expect(DEFAULT_SELECTORS.bookEntry).toEqual([".completion-book-item"]);
+  });
+});
+
+describe("番茄错别字提示", () => {
+  it("识别错别字拦截弹窗，不误伤发布设置弹窗", () => {
+    expect(
+      isTypoWarningText("发布提示 检测到你还有错别字未修改，是否确定提交？"),
+    ).toBe(true);
+    expect(isTypoWarningText("错别字 0 是否使用 AI 辅助创作 确认提交")).toBe(false);
+    expect(isTypoWarningText("请选择发布时间")).toBe(false);
+  });
+
+  it("「提交」按钮视为忽略错别字继续发布", () => {
+    expect(isTypoContinueButton("提交")).toBe(true);
+    expect(isTypoContinueButton(" 提 交 ")).toBe(true);
+    expect(isTypoContinueButton("仍然发布")).toBe(true);
+    expect(isTypoContinueButton("取消")).toBe(false);
+    expect(isTypoContinueButton("确定")).toBe(false);
+    expect(isTypoContinueButton("确认提交")).toBe(false);
   });
 });
 

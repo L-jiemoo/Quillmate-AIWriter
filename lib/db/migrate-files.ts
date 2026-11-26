@@ -51,6 +51,8 @@ export interface MigrationResult {
 const JOB_TYPES = [
   "plan",
   "extend",
+  "wrapup",
+  "foreshadow",
   "write",
   "finale",
   "rewrite",
@@ -298,6 +300,9 @@ function parseJob(raw: unknown): Job | null {
     params.instruction = rawParams.instruction.slice(0, 500);
   }
   if (typeof rawParams.useReview === "boolean") params.useReview = rawParams.useReview;
+  if (typeof rawParams.wrapUpBrief === "string" && rawParams.wrapUpBrief.trim()) {
+    params.wrapUpBrief = rawParams.wrapUpBrief.trim().slice(0, 2000);
+  }
   if (rawParams.source === "review" || rawParams.source === "audit") {
     params.source = rawParams.source;
   }

@@ -130,6 +130,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       relation?: unknown;
       event?: unknown;
       foreshadow?: unknown;
+      foreshadows?: unknown;
       delete?: { kind?: string; id?: string };
       confirm?: unknown;
     }>(request);
@@ -228,6 +229,37 @@ export async function PATCH(request: Request, context: RouteContext) {
         foreshadow,
       ];
       unsuppress(foreshadow.id);
+    }
+
+    // 批量收敛伏笔：长篇写完几十章后逐条点「确认回收」不现实，
+    // 这里一次把选中的未回收伏笔统一置为已回收/已废弃。
+    if (body.foreshadows && typeof body.foreshadows === "object") {
+      const raw = body.foreshadows as Record<string, unknown>;
+      const status = raw.status === "resolved" || raw.status === "abandoned" ? raw.status : "";
+      const ids = Array.isArray(raw.ids)
+        ? [...new Set(raw.ids.map((id) => String(id).trim()).filter(Boolean))].slice(0, 2000)
+        : [];
+      if (!status || !ids.length) throw new Error("批量修改伏笔需要记录 ID 和状态");
+      requireConfirm(body, "confirm", true, "批量修改伏笔需要二次确认");
+      const resolvedChapter =
+        status === "resolved" ? requireChapter(raw.resolvedChapter ?? data.latestWritten) : 0;
+      const resolution =
+        status === "resolved" ? String(raw.resolution ?? "").trim() || "作者确认已回收" : "";
+      const targets = new Set(ids);
+      next.foreshadows = next.foreshadows.map((item) => {
+        if (!targets.has(item.id)) return item;
+        return (
+          normalizeForeshadowRecord({
+            ...item,
+            status,
+            resolvedChapter,
+            resolution,
+            source: "manual",
+            updatedAt: now,
+          }) ?? item
+        );
+      });
+      for (const id of ids) unsuppress(id);
     }
 
     const deletion = body.delete;

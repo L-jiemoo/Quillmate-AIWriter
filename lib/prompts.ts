@@ -1,4 +1,9 @@
-import { formatCanonForPrompt, formatIssuesForPrompt } from "./canon";
+import {
+  classifyOpening,
+  formatCanonForPrompt,
+  formatIssuesForPrompt,
+  OPENING_KIND_LABELS,
+} from "./canon";
 import { formatCausalBaseline, type CausalBaseline } from "./repair-causal";
 
 import type { ChatMessage } from "./llm";
@@ -10,6 +15,7 @@ import type {
   ContinuityIssue,
   PlanRelation,
   ProjectMeta,
+  WrapUpForeshadowItem,
 } from "./types";
 
 const JSON_ONLY = "你的输出必须是严格合法的 JSON，不要输出 JSON 之外的任何文字。";
@@ -366,6 +372,185 @@ ${clip(context.storyContext?.trim() || "（未检索到剧情台账；不得虚�
   ];
 }
 
+// 收尾大纲：不是普通续排，而是把主线、支线和未回收伏笔逐条落到具体章节，
+// 生成完毕后应能直接进入完结章。作者的收尾要求属于硬约束，优先于模型偏好。
+export function wrapUpMessages(
+  meta: ProjectMeta,
+  plan: { chapters: ChapterPlan[] },
+  bible: string,
+  outlineMd: string,
+  recentSummaries: string[],
+  count: number,
+  startIndex: number,
+  context: {
+    canon?: CanonFacts;
+    characters?: Character[];
+    storyContext?: string;
+    brief?: string;
+    openForeshadows?: WrapUpForeshadowItem[];
+    writtenThrough?: number;
+    finalBatch?: boolean;
+  } = {},
+): ChatMessage[] {
+  const tail = plan.chapters
+    .slice(-8)
+    .map((chapter) => `第 ${chapter.index} 章《${chapter.title}》：${chapter.summary}`)
+    .join("\n");
+  const existingTitles = plan.chapters
+    .slice(-80)
+    .map((chapter) => `第 ${chapter.index} 章《${chapter.title}》`)
+    .join("、");
+  const summaries = recentSummaries.length
+    ? recentSummaries.join("\n")
+    : "（还没有已写章节摘要）";
+  const lastIndex = startIndex + count - 1;
+  const writtenThrough = context.writtenThrough ?? 0;
+  const openForeshadows = (context.openForeshadows ?? [])
+    .map((item) => ({ ...item, text: item.text.trim() }))
+    .filter((item) => item.text);
+  const foreshadowList = openForeshadows.length
+    ? openForeshadows
+        .map((item, index) => {
+          const parts = [
+            item.plantChapter > 0 ? `第 ${item.plantChapter} 章埋` : "",
+            item.plannedResolveChapter > 0
+              ? `原计划第 ${item.plannedResolveChapter} 章回收，正文未确认回收`
+              : "未排期",
+            item.planted ? "" : "正文未确认埋设",
+          ].filter(Boolean);
+          return `${index + 1}. ${item.text}（${parts.join("；")}）`;
+        })
+        .join("\n")
+    : "（没有登记在册的未回收伏笔；如剧情台账里仍有悬而未决的线索，请按台账处理）";
+  const brief = context.brief?.trim() || "（未填写，按主线与分卷目标自然收束）";
+
+  return [
+    {
+      role: "system",
+      content: `你是一位资深中文网络小说策划，擅长长篇收尾：把散落的主线、支线和伏笔逐条收束到具体章节，让读者看到结局而不是烂尾。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `《${meta.title}》（${meta.genre} / ${meta.tone}）的现有大纲已排到第 ${startIndex - 1} 章${
+        writtenThrough ? `，正文已写到第 ${writtenThrough} 章` : ""
+      }。请设计 ${count} 章「收尾细纲」，把全书推向结局：第 ${lastIndex} 章写完后，下一章应当可以直接写完结章，不需要再补新的主线铺垫。
+
+【世界观圣经】
+${clip(bible, 3000)}
+
+【主线大纲】
+${clip(outlineMd, 3000)}
+
+【最近章节细纲】
+${tail || "（暂无）"}
+
+【现有章节标题（不得复用）】
+${existingTitles || "（暂无）"}
+
+【最近已写章节摘要】
+${clip(summaries, 3000)}
+
+【不可违背的事实台账（来自已写章节）】
+${formatCanonForPrompt(context.canon)}
+
+【核心人物档案】
+${formatCharacterProfiles(context.characters ?? [])}
+
+【剧情台账（人物状态、关系、事件与未回收伏笔）】
+${clip(context.storyContext?.trim() || "（未检索到剧情台账；不得虚构已发生事实）", 4000)}
+
+【尚未回收的伏笔（必须逐条处理，不得遗漏）】
+${foreshadowList}
+
+【作者的收尾要求（硬性约束，优先级高于你自己对结局的偏好）】
+${clip(brief, 2000)}
+
+请输出 JSON：
+{
+  "chapters": [
+    {"index": ${startIndex}, "title": "章节标题（不含“第X章”前缀）", "summary": "本章 80-150 字剧情梗概，写清收束了哪条线", "keyBeats": ["关键事件1", "关键事件2"]}
+  ],
+  "planLedger": {
+    "events": [
+      {"id": "plan-wrapup-event-${startIndex}-1", "name": "计划事件名称", "chapter": ${startIndex}, "thread": "收束线（主线/支线/感情线）", "participants": ["人物"], "premise": "事件前提", "process": "事件经过", "expectedResult": "预期结果", "impact": "对后续剧情的影响", "relatedEventIds": [], "importance": "major"}
+    ],
+    "characterChanges": [],
+    "foreshadows": [
+      {"id": "plan-wrapup-foreshadow-1", "text": "与【尚未回收的伏笔】中某一条完全一致的原文", "plantChapter": ${startIndex - 1}, "resolveChapter": ${startIndex}, "purpose": "回收方式与作用", "eventIds": [], "resolveCondition": "回收条件"}
+    ],
+    "timeline": [],
+    "items": [
+      {"id": "plan-wrapup-item-1", "item": "已登记或新引入的关键物品", "chapter": ${startIndex}, "changeType": "transfer|state|location|introduce|destroy|other", "holder": "新持有人", "location": "新位置", "state": "新状态", "reason": "变化原因", "eventIds": []}
+    ]
+  }
+}
+
+要求：
+- chapters 从 index ${startIndex} 开始连续编号，共 ${count} 章；每章都要有明确的收束动作，不能只是铺垫或日常。
+- 不得开新坑：不引入新的主线谜团、新的长线反派或需要跨卷揭晓的伏笔；只允许本章埋下并在本章或本批内回收的小钩子。
+- 对【尚未回收的伏笔】里的每一条，必须在 planLedger.foreshadows 中给出安排：text 与该条原文一致，plantChapter 填它原本的埋设章节，resolveChapter 填本批中安排回收的章节号。标注“原计划第 X 章回收，正文未确认回收”的属于已经跳票的计划，必须重新指定回收章节（可以晚于原计划，但必须落在本批区间）；标注“正文未确认埋设”的条目，要么在本批补写埋设并回收，要么明确说明彻底放弃，不能静默跳过；确实无法回收的，要在对应章节的 summary 与 events.expectedResult 里写明为何不再追究，不要默不作声地丢掉。
+- 支线和配角要有归宿：明确交代其结局、退出方式或阶段性收束，不能留下悬空的关系。
+- 主角的核心目标在本批末尾必须给出阶段性结果（达成、失败或付出代价后改变），为完结章留下明确的落点。
+- planLedger 只登记本批章节的计划，chapter 必须落在 ${startIndex}-${lastIndex}；新 id 统一使用 plan-wrapup- 前缀，不得复用已有台账 id；不得包含 status 或 actualChapter。
+- 每个新章节至少关联一个计划事件；人物变化、物品和时间线只写成计划，不代表已经发生。
+- 物品变化必须写清 changeType、持有人、位置、状态和原因；沿用既有物品名称，新增物品用 introduce 并说明来源。
+- 新章节标题必须互不相同，且不得与【现有章节标题（不得复用）】中的任何一条重复。
+- 必须尊重事实台账、人物档案和剧情台账，不得推翻已经发生的事实；人物不得知道其尚未掌握的信息。
+- 作者的收尾要求必须逐条落实；某条要求与其他设定冲突时，优先保住已发生事实，并在日志性文字（summary 或 impact）里说明取舍。
+- 不要为了制造悬念而刻意拖延已经具备解决条件的剧情，也不要靠新冲突硬撑篇幅。
+${context.finalBatch
+  ? "- 这是最后一批收尾章节：最后 1-2 章必须完成核心冲突的收束，交代主要人物去向，并把情绪落到可以接完结章的位置。"
+  : "- 本批不是最后一批收尾章节：保持向结局推进的动势，不要在中途提前用完大结局的情绪。"}`,
+    },
+  ];
+}
+
+// 伏笔自动分类：只根据正文摘要判断“是否已经回收”，避免把悬念推进误判成回收。
+export function foreshadowClassifyMessages(
+  meta: ProjectMeta,
+  foreshadows: { id: string; text: string; plantedChapter: number }[],
+  chapterDigests: string,
+  latestChapter: number,
+): ChatMessage[] {
+  const items = foreshadows
+    .map(
+      (item, index) =>
+        `${index + 1}. [${item.id}] 第 ${item.plantedChapter} 章埋：${item.text}`,
+    )
+    .join("\n");
+
+  return [
+    {
+      role: "system",
+      content: `你是一位严谨的中文网文编辑，负责核对伏笔有没有在正文里真正回收。宁可判“未回收”，也不要把悬念推进当成已回收。${JSON_ONLY}`,
+    },
+    {
+      role: "user",
+      content: `《${meta.title}》正文已写到第 ${latestChapter} 章。下面是各章正文摘要，以及 ${foreshadows.length} 条仍登记为“未回收”的伏笔。
+
+【章节正文摘要】
+${clip(chapterDigests, 12000)}
+
+【待判定伏笔】
+${items}
+
+判定规则：
+- resolved：摘要里明确交代了结果、真相、约定兑现或后果，读者已经得到答案；必须给出发生章节号和一句证据。
+- open：只是再次提及、加深悬念、推进线索、埋下新问题，都算未回收。
+- abandoned：作者明确推翻或放弃这条设定（比如设定被改写、相关人物已死且不再追究）；这种情况很少，不要滥用。
+- 拿不准一律 open。不要为了让台账好看而猜。
+- 每条伏笔都必须出现在输出里，id 原样返回。
+
+请输出 JSON：
+{
+  "items": [
+    {"id": "fs-1", "verdict": "open|resolved|abandoned", "chapter": 0, "evidence": "第几章哪句话/哪件事算回收", "confidence": "high|medium|low"}
+  ]
+}`,
+    },
+  ];
+}
+
 export function titleRepairMessages(
   chapters: ChapterPlan[],
   forbiddenTitles: string[],
@@ -580,6 +765,16 @@ export function writerMessages(
   // 避免重写后的结尾和旧下一章开头互相打架。
   const nextOpening = options.nextOpening?.trim() ?? "";
   const rewriteNote = options.rewriteInstruction?.trim() ?? "";
+  // 只给“类型标签”，不给前章原句：原句会被模型当成素材反复用。
+  const recentOpenings = options.previousOpenings ?? [];
+  const openingKinds = recentOpenings.length
+    ? recentOpenings
+        .map(
+          (item) =>
+            `- 第 ${item.index} 章：${OPENING_KIND_LABELS[classifyOpening(item.opening)]}`,
+        )
+        .join("\n")
+    : "（本章为全书第一章，没有前章开头可参照）";
 
   return [
     {
@@ -595,10 +790,13 @@ ${clip(bible, 4000)}
 
 【主要人物档案】
 ${clip(characterJson, 6000)}
-
+${options.characterDesignContext?.trim() ? `\n${options.characterDesignContext.trim()}\n` : ""}
 【不可违背的事实台账（来自已写章节）】
 ${formatCanonForPrompt(options.canon)}
 ${options.memoryContext?.trim() ? `\n【长期记忆（来自已写章节，按当前章节相关度检索）】\n${options.memoryContext.trim()}\n` : ""}${options.storyContext?.trim() ? `\n【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】\n${options.storyContext.trim()}\n` : ""}${options.planContext?.trim() ? `\n【本章计划台账（创作计划，不代表已经发生）】\n${clip(options.planContext.trim(), 2400)}\n` : ""}${options.reviewFeedback?.trim() ? `\n【上一版审校发现的严重问题（新稿中仍存在则必须解决，已不存在的不要强行改剧情）】\n${clip(options.reviewFeedback.trim(), 2400)}\n` : ""}
+【最近三章的开头方式（本章必须换一种，不得重复其中任何一种）】
+${openingKinds}
+
 【上一章结尾（原文）】
 ${ending}
 ${nextOpening ? `\n【下一章开头（供收束参考）】\n${clip(nextOpening, 800)}\n` : ""}
@@ -623,9 +821,17 @@ ${previous}
 - 如果本章细纲不足以支撑目标字数，只能在本章场景内扩展动作、对话、细节和心理，不能拉入后续剧情来凑字数。
 - 不得把人物猜测、谎言或计划写成客观事实；如果细纲与事实台账冲突，以事实台账为准，并在正文中自然暴露冲突。
 
-【写作要求】
-${options.finale ? `- 这是全书完结章：必须收束主线核心冲突，回收或明确交代主要伏笔，交代主要人物的结局或阶段性归宿；不要留下新的重大悬念、续集钩子或“故事才刚刚开始”式结尾，结尾要自然收束。\n` : ""}${options.mode === "rewrite" ? "- 这是在重写已有章节：不要照抄旧稿，按细纲和重写要求重新组织场景与叙述。\n" : ""}${rewriteNote ? `- 本次重写要求：${rewriteNote}\n` : ""}- 本章开头必须直接承接【上一章结尾（原文）】中的人物动作、场景和情绪，不要复述上一章，也不要无交代地另起一场戏。
-- 如果本章细纲要求换场或时间跳跃，必须在前 200 字内用动作、对话或叙述交代过渡。
+${options.proseStyleContext?.trim() ? `【文风约束（项目技能配置）】\n${options.proseStyleContext.trim()}\n\n` : ""}【写作要求】
+${options.finale ? `- 这是全书完结章：必须收束主线核心冲突，回收或明确交代主要伏笔，交代主要人物的结局或阶段性归宿；不要留下新的重大悬念、续集钩子或“故事才刚刚开始”式结尾，结尾要自然收束。\n` : ""}${options.mode === "rewrite" ? "- 这是在重写已有章节：不要照抄旧稿，按细纲和重写要求重新组织场景与叙述。\n" : ""}${rewriteNote ? `- 本次重写要求：${rewriteNote}\n` : ""}- 本章开头必须承接【上一章结尾（原文）】中的位置、人物身体状态（伤势、疲劳、手里拿着什么）和未完成动作，至少对上两项；不要复述上一章，也不要无交代地另起一场戏。
+- 承接不等于继续描写上一章结尾：开头第一段不得把上一章结尾出现的物件、天气或声音当作描写主体，这些都只能作为背景出现一次。
+- 开头第一段必须出现至少一个新要素：人物做出与上一章结尾不同的动作、进入一个新地点、出现新人物或新信息、或明确的时间推进。
+- 开头要写成正在发生的现场，不要写成事后结论：禁止“X 是被……的”判断句，也禁止“人物被外界刺激唤醒、惊醒、打断”这一类“刺激—反应”句式。
+- 开头方式要在动作中间态、对话直入、环境或物件细节、结果先行、明确的时间跳跃之间轮换；最近三章用过的开头方式不要重复。
+- 不同章节的开头不要反复使用同一件道具、同一种天气或同一种声音作为开场意象。
+- 如果本章细纲要求换场或时间跳跃，必须在前 200 字内用动作、对话或叙述交代过渡，并给出明确的时间信号（如“次日卯时”“三天后”）。
+- 情绪必须由动作、对话或环境细节承载，不要用“他感到”“他不由得”“他心中一沉”这类句子直接解释情绪。
+- 同一章内不要用同一个生理动作（呼吸、握拳、皱眉、苦笑）反复表达不同的情绪；一种情绪只用一次具体反应。
+- 章末不要替读者总结本章意义，也不要写“这一切才刚刚开始”式预告，把最后一段落在一个具体的动作、画面或对话上。
 ${nextOpening ? "- 本章结尾必须能自然过渡到【下一章开头（供收束参考）】，不要与其矛盾。\n" : ""}- 严格遵守【不可违背的事实台账】：已死亡角色不得以活人身份行动；关键物品的持有人、形态与状态不得随意改写；日期、天数和死线必须前后一致。
 - 【长期记忆】只来自已写章节的摘要/事件/人物/规则检索结果；记忆中没有记录的人物、物品、关系和事件，不得补写成既定事实。检索不到时按本章细纲自然推进，不要虚构“前文已经发生”的内容。
 - 如果【长期记忆】与事实台账冲突，以事实台账为准；如果与本章细纲冲突，以已写事实为准并自然处理。
@@ -641,6 +847,80 @@ ${nextOpening ? "- 本章结尾必须能自然过渡到【下一章开头（供�
 - 用场景、动作和对话推进剧情，避免大段总结式叙述。
 
 直接开始正文。`,
+    },
+  ];
+}
+
+// 写作完成后的文风自检重写：只在套话密度超标时调用一次，
+// 只改表达不改剧情，避免把问题留到审校才提示。
+export function styleRepairMessages(
+  original: string,
+  report: {
+    hits: { term: string; count: number }[];
+    perKilo: number;
+    endingCliche: string;
+  },
+): ChatMessage[] {
+  const terms = report.hits
+    .slice(0, 12)
+    .map((hit) => `${hit.term}×${hit.count}`)
+    .join("、");
+  return [
+    {
+      role: "system",
+      content:
+        "你是中文小说文字编辑，只做表达层修改。你不改剧情、人物关系、对话内容、段落顺序，也不增删情节。",
+    },
+    {
+      role: "user",
+      content: `下面这章正文存在明显的套话与模板化表达。
+命中情况：${terms}（每千字约 ${report.perKilo.toFixed(1)} 处）${
+        report.endingCliche ? `\n章末总结句：${report.endingCliche}` : ""
+      }
+
+改写要求：
+- 删掉解释情绪的副词与生理反应（如“不由得”“深吸一口气”“心中一沉”），改用具体动作、对话或环境细节；
+- 同一情绪不要重复用同一个动作；
+- 章末不要替读者下结论，把最后一段落在具体画面、动作或对话上；
+- 未命中的句子尽量逐字保留。
+
+不得改动剧情、人物关系、对话内容与段落顺序；改写后总字数与原文相差不超过 10%。
+只输出改写后的完整正文，不要任何说明或代码围栏。
+
+【正文】
+${original}`,
+    },
+  ];
+}
+
+// 开头自检用的定点重写：只允许改第一段，其余必须逐字保留。
+export function openingRepairMessages(
+  original: string,
+  problems: string[],
+): ChatMessage[] {
+  const list = problems.map((item, index) => `${index + 1}. ${item}`).join("\n");
+  return [
+    {
+      role: "system",
+      content:
+        "你是中文小说文字编辑，只改写章节开头第一段。不改剧情、人物关系、对话内容和后续段落。",
+    },
+    {
+      role: "user",
+      content: `本章开头存在以下问题：
+${list}
+
+改写要求：
+- 只改写第一段（不超过前 150 字），从第二段起到结尾逐字保留；
+- 换一种开头方式：动作中间态、对话直入、环境或物件细节、结果先行、明确的时间跳跃，任选一种，但不要与上面指出的问题重复；
+- 必须保留与上一章结尾的位置、人物身体状态或未完成动作中的至少一项衔接；
+- 第一段要出现一个新要素：新动作、新信息、新人物或明确的时间推进；
+- 不得改动剧情事实、人物关系与任何具体结果。
+
+只输出改写后的完整正文，不要任何说明或代码围栏。
+
+【正文】
+${original}`,
     },
   ];
 }
@@ -875,6 +1155,7 @@ ${clip(chapterText, 16000)}
 9. 伏笔连续性：回收是否有埋设依据，是否提前宣布回收。
 10. 章节内容重复：是否大段复述前文或与旧章重复。
 11. 章节与大纲偏离：本章是否明显缺少细纲要求的关键事件。
+12. 章首承接：开头是否只是在延续上一章结尾的物件、天气或声音，缺少新动作、新信息、新人物或时间推进。这类问题最多记为 warning。
 
 问题判断：
 - 不要为了完成审校清单而强行生成问题；没有问题就返回空 issues。
@@ -904,6 +1185,7 @@ ${clip(chapterText, 16000)}
 - 【本章架构计划】不是已发生事实：正文没有落实计划事件/关系本身不判 critical；但正文把物品或关系写到计划外，且没有过渡、也没有登记偏离时，按 warning 记录并提示需要登记台账变更。
 - 架构既定事实不可静默改写；只有正文明确写出相反事实时才判 critical，推断或人物怀疑不算。
 - 自动检查线索只是待核实提示：核对后确认是回忆、尸体、幻象、遗物或他人转述的，不要输出这一条，也不要在 issues 里写“机械检查误报 / 不构成复活 / 不属问题 / 应标为 ignore”这类说明。
+- 自动检查线索里的“章首公式化”“章首意象重复”“章首句式重复”“章首衔接”“文风套话”都属于文风与衔接提示：可以记为 warning，并在 detail 里给出具体改写方向，但不得据此判 critical，也不得为了消除它改动剧情事实；改写开头结构时仍要保持与上一章结尾的衔接。
 - issues 只保留确实需要作者修改的问题；确认不是问题就直接不输出，不要为了解释误报而保留空问题，也不要为了凑问题把可忽略项标成 warning。
 - continuityOk 只有在没有任何 critical 时才为 true。
 

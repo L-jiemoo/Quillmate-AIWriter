@@ -1,9 +1,11 @@
 import {
   auditChapter,
   auditRepairRegression,
+  classifyForeshadows,
   confirmRepairRegressions,
   extendPlan,
   extractChapterFacts,
+  type ExtendedPlanResult,
   generateCharacters,
   generatePlan,
   generateRelationGraph,
@@ -16,6 +18,11 @@ import {
   writeChapter,
 } from "./agents";
 import { parseAuditReport } from "./audit";
+import { applyForeshadowVerdicts } from "./foreshadow-auto";
+import {
+  buildWritingSkillContext,
+  loadWritingSkillBase,
+} from "./skills/context";
 import {
   canonForChapter,
   countCritical,
@@ -52,14 +59,19 @@ import {
   buildMemoryContext,
 } from "./memory";
 import {
+  applyWrapUpForeshadowPlans,
   detectFuturePlanConsumption,
   emptyPlanLedger,
   ensureItemRegistryCoverage,
   formatPlanContext,
   mergePlanLedgers,
+  mergeStoryForeshadowsIntoPlan,
   normalizePlanLedger,
+  planForeshadowResolutions,
   planLedgerIdCollisions,
+  planLedgerIds,
   reconcileChapterPlan,
+  unresolvedForeshadows,
 } from "./plan-ledger";
 import { promptVersionInfo } from "./prompt-store";
 import { findPublishEntry } from "./publish-ledger";
@@ -99,6 +111,7 @@ import {
   applyChapterStory,
   buildEffectiveStory,
   buildStoryContext,
+  finalizeStory,
   storyChecks,
 } from "./story";
 import {
@@ -138,6 +151,7 @@ import type {
   ExtractedStory,
   Job,
   JobParams,
+  PlanLedger,
   ProjectDetail,
   ProjectMemory,
   ProjectMeta,
@@ -148,6 +162,8 @@ import type {
 const JOB_LABELS: Record<Job["type"], string> = {
   plan: "生成架构与角色",
   extend: "补充章节大纲",
+  wrapup: "补充收尾大纲",
+  foreshadow: "自动分类伏笔",
   write: "自动写作",
   finale: "生成完结章",
   rewrite: "重写章节",
@@ -278,6 +294,13 @@ async function runJob(job: Job, params: JobParams): Promise<void> {
         break;
       case "extend":
         await runExtend(job, params.count ?? 10);
+        break;
+      case "wrapup":
+        await runWrapUp(job, params.count ?? 5, params.wrapUpBrief ?? "");
+        break;
+      case "foreshadow":
+        // count 在这里表示“只看最近 N 章”，0 或未传则参考全部已写章节。
+        await runForeshadowClassify(job, params.count ?? 0);
         break;
       case "write":
         paused = await runWrite(job, params.count ?? 1);
@@ -506,18 +529,265 @@ async function runExtend(job: Job, requested: number): Promise<void> {
       characters: detail.characters,
       storyContext: storyRetrieval.text,
     },
+    {
+      onProgress: (message) => logJob(job, message),
+      reservedPlanIds: planLedgerIds(
+        detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt),
+      ),
+    },
+  );
+  throwIfCancelled(job);
+  await commitOutlineExtension(job, detail, extended, { topic: "续排" });
+}
+
+// 自动分类：让模型对照正文摘要判断每条伏笔是否已经回收。
+// 只自动写「高置信 + 有具体章节」的结论，其余只落“疑似回收”提示，避免误关悬念。
+async function runForeshadowClassify(job: Job, recentChapters = 0): Promise<void> {
+  const detail = await getProjectDetail(job.slug);
+  if (!detail.plan.chapters.length) {
+    throw new Error("还没有章节大纲，请先生成架构与角色");
+  }
+  const [memory, stored] = await Promise.all([getMemory(job.slug), getStory(job.slug)]);
+  const effectiveMemory = buildEffectiveMemory(detail, memory);
+  let story = buildEffectiveStory(detail, effectiveMemory, stored);
+
+  const pending = story.foreshadows.filter(
+    (item) => item.status !== "resolved" && item.status !== "abandoned",
+  );
+  if (!pending.length) {
+    job.result = "没有需要分类的伏笔";
+    logJob(job, "剧情台账里的伏笔都已回收或废弃，无需分类。");
+    return;
+  }
+
+  const allChapters = Object.values(effectiveMemory.chapters)
+    .filter((chapter) => chapter.source !== "summary")
+    .sort((left, right) => left.index - right.index);
+  const limit = Math.max(0, Math.round(Number(recentChapters) || 0));
+  const chapters =
+    limit > 0 && allChapters.length > limit ? allChapters.slice(-limit) : allChapters;
+  const digests = chapters
+    .map((chapter) => {
+      const events = chapter.events.slice(0, 5).join("；");
+      return `第 ${chapter.index} 章：${chapter.summary}${events ? `（${events}）` : ""}`;
+    })
+    .join("\n");
+  if (!digests.trim()) {
+    throw new Error("还没有可用于判断的正文摘要，请先完成写作或重建长期记忆");
+  }
+
+  const maxChapter = Math.max(...detail.plan.chapters.map((chapter) => chapter.index));
+  logJob(
+    job,
+    `自动分类：待判定伏笔 ${pending.length} 条，参考 ${chapters.length} 章正文摘要。`,
+  );
+  const verdicts = await classifyForeshadows(
+    detail.meta,
+    pending.map((item) => ({
+      id: item.id,
+      text: item.text,
+      plantedChapter: item.plantedChapter,
+    })),
+    digests,
+    Math.max(maxChapter, ...chapters.map((chapter) => chapter.index)),
     { onProgress: (message) => logJob(job, message) },
   );
   throwIfCancelled(job);
-  const chapters = extended.chapters;
-  const baseLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
-  const collisions = planLedgerIdCollisions(baseLedger, extended.planLedger);
-  if (collisions.length) {
+
+  const applied = applyForeshadowVerdicts(story, verdicts, maxChapter);
+  story = applied.ledger;
+
+  const finalized = finalizeStory(detail, effectiveMemory, story);
+  await saveStory(job.slug, finalized);
+  const remaining = finalized.foreshadows.filter(
+    (item) => item.status !== "resolved" && item.status !== "abandoned",
+  ).length;
+  job.result = `自动分类：已回收 ${applied.resolvedCount} 条，废弃 ${applied.abandonedCount} 条，仍待回收 ${remaining} 条`;
+  logJob(
+    job,
+    `自动分类完成：已回收 ${applied.resolvedCount} 条、已废弃 ${applied.abandonedCount} 条、仍待回收 ${remaining} 条${
+      applied.suspiciousCount
+        ? `；另有 ${applied.suspiciousCount} 条标记为“疑似回收”，请在伏笔页复核`
+        : ""
+    }。`,
+  );
+}
+
+// 收尾工程：把全书推向结局的一批章节。与普通续排共用生成/提交链路，
+// 但提示词换成“逐条回收伏笔”，并把排定的回收章节回填进既有计划台账。
+async function runWrapUp(job: Job, requested: number, brief: string): Promise<void> {
+  const count = Math.max(1, Math.min(30, Math.round(Number(requested) || 5)));
+  const detail = await getProjectDetail(job.slug);
+
+  if (!detail.plan.chapters.length) {
+    throw new Error("还没有章节大纲，请先生成架构与角色");
+  }
+  const completedChapter = detail.planLedger?.completedChapter ?? 0;
+  if (completedChapter) {
     throw new Error(
-      `补充大纲的计划 ID 与既有台账冲突（${collisions.slice(0, 5).join("、")}），本次未提交，避免覆盖已有剧情安排`,
+      `全书已于第 ${completedChapter} 章完结，不能再补充收尾大纲；如需续写请先取消完结标记`,
     );
   }
-  const mergedLedger = mergePlanLedgers(baseLedger, extended.planLedger);
+
+  const startIndex = Math.max(...detail.plan.chapters.map((chapter) => chapter.index)) + 1;
+  const writtenThrough = detail.state.written.length
+    ? Math.max(...detail.state.written)
+    : 0;
+  // 只带最近 6 章摘要，控制上下文长度；收尾判断主要依赖台账与伏笔清单。
+  const summaries = Object.keys(detail.state.summaries)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .slice(-6)
+    .map((index) => `第 ${index} 章：${detail.state.summaries[String(index)]}`);
+
+  const [memory, storedStory] = await Promise.all([getMemory(job.slug), getStory(job.slug)]);
+  const story = buildEffectiveStory(detail, memory, storedStory);
+  const lastPlanned = detail.plan.chapters[detail.plan.chapters.length - 1];
+  const storyRetrieval = buildStoryContext(
+    detail,
+    {
+      index: startIndex,
+      title: "",
+      summary: lastPlanned?.summary ?? "",
+      keyBeats: lastPlanned?.keyBeats ?? [],
+    },
+    memory,
+    story,
+    { budget: getRuntimeConfig().storyContextChars },
+  );
+
+  // 计划台账和剧情台账长期对不上时，收尾会漏掉正文里真实存在的未回收伏笔。
+  // 先把剧情台账的未回收线索补登记进计划台账并落库，收尾清单和界面才能同时看到。
+  let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
+  const mergedStory = mergeStoryForeshadowsIntoPlan(planLedger, story.foreshadows);
+  if (mergedStory.added.length) {
+    planLedger = mergedStory.ledger;
+    await savePlanLedger(job.slug, planLedger);
+    // 后面提交大纲时会读取 detail.planLedger，这里同步内存副本，避免又写回旧台账。
+    detail.planLedger = planLedger;
+    logJob(
+      job,
+      `已从剧情台账补登 ${mergedStory.added.length} 条未回收伏笔到计划台账：${mergedStory.added
+        .slice(0, 5)
+        .map((item) => item.text)
+        .join("、")}${mergedStory.added.length > 5 ? "……" : ""}`,
+    );
+  }
+
+  // 用“实际未回收”而不是“没排过期”：已排期但正文没真正收掉的伏笔同样要进收尾清单。
+  const unresolved = unresolvedForeshadows(planLedger);
+  const overdue = unresolved.filter((item) => item.resolveChapter > 0).length;
+  const unplanted = unresolved.filter((item) => !item.actualPlantChapter).length;
+  const unresolvedNotes = [
+    overdue ? `${overdue} 条已排期但正文未确认回收` : "",
+    unplanted ? `${unplanted} 条正文未确认埋设` : "",
+  ].filter(Boolean);
+  logJob(
+    job,
+    `收尾大纲：从第 ${startIndex} 章起新增 ${count} 章，正文已写至第 ${writtenThrough} 章，待回收伏笔 ${unresolved.length} 条${
+      unresolvedNotes.length ? `（其中 ${unresolvedNotes.join("，")}）` : ""
+    }。`,
+  );
+  if (brief.trim()) {
+    logJob(job, `已带入作者收尾要求（${brief.trim().length} 字）。`);
+  }
+  if (!unresolved.length) {
+    const plannedTotal = planLedger.foreshadows.length;
+    logJob(
+      job,
+      plannedTotal
+        ? `提示：计划台账里 ${plannedTotal} 条伏笔都已标记为已回收或已取消，收尾将按主线与剧情台账自然收束。`
+        : "提示：计划台账里没有登记伏笔，收尾只按主线与剧情台账收束；剧情台账里的未回收线索会作为背景参考，不会被当作必办清单。",
+    );
+  }
+
+  const extended = await extendPlan(
+    detail.meta,
+    detail.plan,
+    detail.bible,
+    detail.outlineMd,
+    summaries,
+    count,
+    {
+      canon: detail.canon,
+      characters: detail.characters,
+      storyContext: storyRetrieval.text,
+    },
+    {
+      mode: "wrapup",
+      wrapUp: {
+        brief: brief.trim(),
+        openForeshadows: unresolved.map((item) => ({
+          text: item.text,
+          plantChapter: item.plantChapter,
+          plannedResolveChapter: item.resolveChapter,
+          planted: item.actualPlantChapter > 0,
+        })),
+        writtenThrough,
+      },
+      onProgress: (message) => logJob(job, message),
+      reservedPlanIds: planLedgerIds(planLedger),
+    },
+  );
+  throwIfCancelled(job);
+  await commitOutlineExtension(job, detail, extended, {
+    topic: "收尾",
+    backfillForeshadows: true,
+  });
+}
+
+async function commitOutlineExtension(
+  job: Job,
+  detail: ProjectDetail,
+  extended: ExtendedPlanResult,
+  options: { topic: string; backfillForeshadows?: boolean },
+): Promise<void> {
+  const { topic } = options;
+  const chapters = extended.chapters;
+  let baseLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
+  let addition = extended.planLedger;
+
+  if (options.backfillForeshadows) {
+    const backfill = applyWrapUpForeshadowPlans(baseLedger, addition);
+    baseLedger = backfill.base;
+    addition = backfill.addition;
+    const clipList = (list: string[]) =>
+      `${list.slice(0, 5).join("、")}${list.length > 5 ? "……" : ""}`;
+    if (backfill.resolved.length) {
+      logJob(
+        job,
+        `已为 ${backfill.resolved.length} 条未回收伏笔排定回收章节：${clipList(backfill.resolved)}`,
+      );
+    }
+    if (backfill.rescheduled.length) {
+      logJob(
+        job,
+        `其中 ${backfill.rescheduled.length} 条属于逾期改期（原计划章节正文未确认回收）：${clipList(backfill.rescheduled)}`,
+      );
+    }
+    if (backfill.unmatched.length) {
+      logJob(
+        job,
+        `提示：${backfill.unmatched.length} 条回收计划没对上既有伏笔，已作为新增计划保留：${clipList(backfill.unmatched)}`,
+      );
+    }
+    if (backfill.unassigned.length) {
+      logJob(
+        job,
+        `提示：之后仍有 ${backfill.unassigned.length} 条未回收伏笔没有排进本批收尾，写作前建议人工确认或再补一批收尾：${clipList(backfill.unassigned)}`,
+      );
+    }
+  }
+
+  const collisions = planLedgerIdCollisions(baseLedger, addition);
+  if (collisions.length) {
+    throw new Error(
+      `${topic}的计划 ID 与既有台账冲突（${collisions
+        .slice(0, 5)
+        .join("、")}），本次未提交，避免覆盖已有剧情安排。通常是上一次同批次生成的残留条目还在；可到「计划台账」页删掉这些条目后重试。`,
+    );
+  }
+  const mergedLedger = mergePlanLedgers(baseLedger, addition);
   const beforeItemCount = mergedLedger.itemRegistry.length;
   let nextLedger = ensureItemRegistryCoverage(mergedLedger);
   if (nextLedger.itemRegistry.length > beforeItemCount) {
@@ -527,7 +797,7 @@ async function runExtend(job: Job, requested: number): Promise<void> {
       .slice(0, 8);
     logJob(
       job,
-      `续排计划里有未登记的物品，已自动补进物品基线：${added.join("、")}${
+      `${topic}计划里有未登记的物品，已自动补进物品基线：${added.join("、")}${
         nextLedger.itemRegistry.length - beforeItemCount > 8 ? "……" : ""
       }`,
     );
@@ -583,10 +853,10 @@ async function runExtend(job: Job, requested: number): Promise<void> {
     );
   }
 
-  job.result = `新增 ${chapters.length} 章大纲`;
+  job.result = `${topic}新增 ${chapters.length} 章大纲`;
   logJob(
     job,
-    `已补充 ${chapters.length} 章，当前大纲共 ${plan.chapters.length} 章，主线大纲已同步更新`,
+    `${topic}完成：新增 ${chapters.length} 章，当前大纲共 ${plan.chapters.length} 章，主线大纲已同步更新`,
   );
 }
 
@@ -649,6 +919,53 @@ async function persistChapterMemory(
   }
 }
 
+// 写完一章后，如果正文声称回收了某些伏笔，就地让模型按本章摘要确认一次。
+// 只自动落库「高置信 + 明确章节」的结论；低置信仍只留“疑似回收”，避免误关悬念。
+async function autoConfirmChapterForeshadows(
+  job: Job,
+  detail: ProjectDetail,
+  memory: ProjectMemory,
+  story: StoryLedger,
+  chapterMemory: ChapterMemory,
+): Promise<StoryLedger> {
+  const index = chapterMemory.index;
+  const marker = `第 ${index} 章`;
+  const candidates = story.foreshadows.filter(
+    (item) =>
+      item.status !== "resolved" &&
+      item.status !== "abandoned" &&
+      Boolean(item.resolutionCandidate && item.resolutionCandidate.startsWith(marker)),
+  );
+  if (!candidates.length) return story;
+  const digest = `第 ${index} 章：${chapterMemory.summary}${
+    chapterMemory.events.length ? `（${chapterMemory.events.slice(0, 5).join("；")}）` : ""
+  }`;
+  const maxChapter = Math.max(index, ...detail.plan.chapters.map((chapter) => chapter.index));
+  try {
+    const verdicts = await classifyForeshadows(
+      detail.meta,
+      candidates.map((item) => ({
+        id: item.id,
+        text: item.text,
+        plantedChapter: item.plantedChapter,
+      })),
+      digest,
+      index,
+    );
+    const applied = applyForeshadowVerdicts(story, verdicts, maxChapter);
+    if (!applied.resolvedCount && !applied.abandonedCount) return applied.ledger;
+    logJob(
+      job,
+      `第 ${index} 章伏笔自动确认：回收 ${applied.resolvedCount} 条、废弃 ${applied.abandonedCount} 条。`,
+    );
+    return finalizeStory(detail, memory, applied.ledger);
+  } catch (error) {
+    // 自动确认是增强能力，失败不能影响已经落库的正文与台账。
+    logJob(job, `第 ${index} 章伏笔自动确认失败，保留原状态：${errorMessage(error)}`);
+    return story;
+  }
+}
+
 async function persistChapterStory(
   job: Job,
   detail: ProjectDetail,
@@ -659,7 +976,7 @@ async function persistChapterStory(
 ): Promise<StoryLedger> {
   if (!chapterMemory) return stored;
   try {
-    const next = applyChapterStory(
+    let next = applyChapterStory(
       detail,
       memory,
       stored,
@@ -667,6 +984,7 @@ async function persistChapterStory(
       extracted,
       chapterMemory,
     );
+    next = await autoConfirmChapterForeshadows(job, detail, memory, next, chapterMemory);
     await saveStory(job.slug, next);
     logJob(
       job,
@@ -692,14 +1010,36 @@ function logMemoryRetrieval(
   chapterIndex: number,
   retrieval: ReturnType<typeof buildMemoryContext>,
 ): void {
+  const injected = retrieval.openForeshadows.length;
+  const total = retrieval.openForeshadowTotal;
+  // 注入条数有上限，日志要区分“本次注入多少”和“记忆里实际还有多少”。
+  const foreshadowNote =
+    total > injected
+      ? `注入 ${injected} 条未回收伏笔（记忆中未回收共 ${total} 条）`
+      : `${injected} 条未回收伏笔`;
   logJob(
     job,
-    `第 ${chapterIndex} 章长期记忆检索：命中 ${retrieval.chapterIndices.length} 个历史章节、${
-      retrieval.openForeshadows.length
-    } 个未回收伏笔，约 ${retrieval.tokenEstimate} tokens${
+    `第 ${chapterIndex} 章长期记忆检索：命中 ${retrieval.chapterIndices.length} 个历史章节、${foreshadowNote}，约 ${retrieval.tokenEstimate} tokens${
       retrieval.truncated ? "（已按预算截断）" : ""
     }。`,
   );
+}
+
+// 写作前把“这章该收哪些伏笔”讲清楚，任务日志里能直接看出调度是否生效。
+function logForeshadowSchedule(
+  job: Job,
+  ledger: PlanLedger,
+  chapterIndex: number,
+  totalChapters: number,
+): void {
+  const schedule = planForeshadowResolutions(ledger, chapterIndex, totalChapters);
+  if (!schedule.length) return;
+  const must = schedule.filter((item) => item.urgency === "must").length;
+  const soon = schedule.filter((item) => item.urgency === "soon").length;
+  const parts = [`待回收 ${schedule.length} 条`];
+  if (must) parts.push(`${must} 条必须本章收束`);
+  if (soon) parts.push(`${soon} 条应尽快回收`);
+  logJob(job, `第 ${chapterIndex} 章伏笔回收调度：${parts.join("，")}。`);
 }
 
 function logStoryRetrieval(
@@ -2201,6 +2541,8 @@ async function runWrite(
 
   assertCanonReady(detail);
   logPromptProfile(job);
+  const skillBase = await loadWritingSkillBase(job.slug);
+  if (skillBase.warning) logJob(job, skillBase.warning);
 
   const history = Object.keys(detail.state.summaries)
     .map(Number)
@@ -2227,6 +2569,11 @@ async function runWrite(
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
+  // 全书总章数：伏笔回收调度要靠它算“还剩多少篇幅”。
+  const totalChapters = detail.plan.chapters.reduce(
+    (max, item) => Math.max(max, item.index),
+    0,
+  );
   let paused = false;
 
   // 逐章串行：每章写完立即落盘并更新摘要，任务中途失败时，
@@ -2243,12 +2590,21 @@ async function runWrite(
       budget: getRuntimeConfig().storyContextChars,
     });
     logStoryRetrieval(job, chapter.index, storyRetrieval);
-    const planContext = formatPlanContext(planLedger, chapterPlan);
+    const planContext = formatPlanContext(planLedger, chapterPlan, { totalChapters });
     logJob(
       job,
       planContext
         ? `第 ${chapter.index} 章计划台账已注入（计划不代表已发生）。`
         : `第 ${chapter.index} 章没有登记计划台账。`,
+    );
+    logForeshadowSchedule(job, planLedger, chapter.index, totalChapters);
+    const skillContext = buildWritingSkillContext(
+      skillBase,
+      detail,
+      chapterPlan,
+      planLedger.events
+        .filter((event) => event.chapter === chapter.index)
+        .flatMap((event) => event.participants),
     );
     let text = await writeChapter(
       detail.meta,
@@ -2262,7 +2618,16 @@ async function runWrite(
         memoryContext: retrieval.text,
         storyContext: storyRetrieval.text,
         planContext,
+        characterDesignContext: skillContext.designContext,
+        proseStyleContext: skillContext.proseContext,
         finale: options.finale === true,
+        previousOpenings: detail.chapters
+          .filter((item) => item.index < chapter.index && item.content.trim())
+          .slice(-3)
+          .map((item) => ({
+            index: item.index,
+            opening: item.content.trim().slice(0, 160),
+          })),
       },
     );
     if (!text.trim()) throw new Error(`第 ${chapter.index} 章正文为空，请重试`);
@@ -2493,6 +2858,8 @@ async function runRewrite(
 
   assertCanonReady(detail);
   logPromptProfile(job);
+  const skillBase = await loadWritingSkillBase(job.slug);
+  if (skillBase.warning) logJob(job, skillBase.warning);
 
   const takeEnding = (text: string): string => {
     const trimmed = text.trim();
@@ -2519,6 +2886,10 @@ async function runRewrite(
   let memory = await getMemory(job.slug);
   let story = buildEffectiveStory(detail, memory, await getStory(job.slug));
   let planLedger = detail.planLedger ?? emptyPlanLedger(detail.meta.updatedAt);
+  const totalChapters = detail.plan.chapters.reduce(
+    (max, item) => Math.max(max, item.index),
+    0,
+  );
   let paused = false;
 
   for (const target of targets) {
@@ -2576,7 +2947,16 @@ async function runRewrite(
       budget: getRuntimeConfig().storyContextChars,
     });
     logStoryRetrieval(job, target.index, storyRetrieval);
-    const planContext = formatPlanContext(planLedger, chapterPlan);
+    const planContext = formatPlanContext(planLedger, chapterPlan, { totalChapters });
+    logForeshadowSchedule(job, planLedger, target.index, totalChapters);
+    const skillContext = buildWritingSkillContext(
+      skillBase,
+      detail,
+      chapterPlan,
+      planLedger.events
+        .filter((event) => event.chapter === target.index)
+        .flatMap((event) => event.participants),
+    );
     let text = await writeChapter(
       detail.meta,
       detail.bible,
@@ -2593,6 +2973,15 @@ async function runRewrite(
         memoryContext: retrieval.text,
         storyContext: storyRetrieval.text,
         planContext,
+        characterDesignContext: skillContext.designContext,
+        proseStyleContext: skillContext.proseContext,
+        previousOpenings: detail.chapters
+          .filter((item) => item.index < target.index && item.content.trim())
+          .slice(-3)
+          .map((item) => ({
+            index: item.index,
+            opening: item.content.trim().slice(0, 160),
+          })),
       },
     );
     if (!text.trim()) throw new Error(`第 ${target.index} 章正文为空，请重试`);

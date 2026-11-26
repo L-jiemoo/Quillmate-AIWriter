@@ -120,6 +120,31 @@ describe("任务持久化与重启恢复", () => {
     expect(raw.status).toBe("interrupted");
   });
 
+  it("中断记录只回放最后一个中断任务，之后跑过新任务就不再回放", async () => {
+    const slug = await newProject("中断后继续");
+    const interrupted = jobs.acquireProjectSlot(slug, "write", { count: 1 });
+    interrupted.status = "running";
+    interrupted.startedAt = new Date().toISOString();
+    interrupted.updatedAt = interrupted.startedAt;
+    await jobs.persistJob(interrupted);
+    jobs.releaseProjectSlot(slug, interrupted.id);
+
+    jobs.__reloadJobStoreForTests();
+    expect(jobs.getInterruptedJobs(slug).map((item) => item.id)).toEqual([
+      interrupted.id,
+    ]);
+
+    // 中断之后又跑了一次别的任务：旧的中断记录不应再反复出现在任务台。
+    const next = jobs.acquireProjectSlot(slug, "audit", {});
+    next.status = "done";
+    next.createdAt = new Date(Date.now() + 1000).toISOString();
+    next.updatedAt = next.createdAt;
+    await jobs.persistJob(next);
+    jobs.releaseProjectSlot(slug, next.id);
+
+    expect(jobs.getInterruptedJobs(slug)).toEqual([]);
+  });
+
   it("任务完成后落盘包含开始和结束时间", async () => {
     const slug = await newProject("落盘");
     const job = await pipeline.startJob(slug, "export");

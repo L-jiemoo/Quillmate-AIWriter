@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PanelSkeleton } from "@/components/ui/Loading";
+import { BusyLabel, PanelSkeleton } from "@/components/ui/Loading";
 import type {
   CharacterRelation,
   CharacterState,
@@ -14,7 +14,7 @@ import type {
   StoryLedger,
   StoryStatsView,
 } from "@/lib/types";
-import { itemOwnershipAt, relationsAt } from "@/lib/plan-view";
+import { isForeshadowOverdue, itemOwnershipAt, relationsAt } from "@/lib/plan-view";
 import { errorMessage } from "@/lib/utils";
 
 type StoryView =
@@ -41,6 +41,17 @@ const FORESHADOW_LABEL: Record<ForeshadowStatus, string> = {
   resolved: "已回收",
   abandoned: "已废弃",
 };
+
+// 连载几十章后伏笔列表很长，按状态分开看比一路滚动有效。
+type ForeshadowFilter = "all" | "open" | "resolved" | "abandoned" | "overdue";
+
+const FORESHADOW_FILTERS: { key: ForeshadowFilter; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "open", label: "未回收" },
+  { key: "resolved", label: "已回收" },
+  { key: "abandoned", label: "已废弃" },
+  { key: "overdue", label: "已超期" },
+];
 
 interface StoryViewData {
   chapter: number;
@@ -246,6 +257,8 @@ export function StoryTab({
   const [relationDraft, setRelationDraft] = useState<CharacterRelation | null>(null);
   const [eventDraft, setEventDraft] = useState<PlotEvent | null>(null);
   const [foreshadowDraft, setForeshadowDraft] = useState<ForeshadowRecord | null>(null);
+  const [foreshadowFilter, setForeshadowFilter] = useState<ForeshadowFilter>("open");
+  const [bulkMarking, setBulkMarking] = useState(false);
 
   const writtenChapters = useMemo(
     () => detail.chapters.filter((item) => item.written).map((item) => item.index),
@@ -266,6 +279,39 @@ export function StoryTab({
     () => itemOwnershipAt(detail.planLedger, chapter),
     [detail.planLedger, chapter],
   );
+  // 当前时间点下仍需要处理的伏笔（长篇里往往几十条，逐条点太慢）。
+  const openForeshadowsInView = useMemo(
+    () =>
+      (data?.foreshadows ?? []).filter(
+        (item) => item.status !== "resolved" && item.status !== "abandoned",
+      ),
+    [data],
+  );
+  const foreshadowCounts = useMemo(() => {
+    const all = data?.foreshadows ?? [];
+    return {
+      all: all.length,
+      open: openForeshadowsInView.length,
+      resolved: all.filter((item) => item.status === "resolved").length,
+      abandoned: all.filter((item) => item.status === "abandoned").length,
+      overdue: all.filter((item) => isForeshadowOverdue(item, latestWritten)).length,
+    };
+  }, [data, openForeshadowsInView, latestWritten]);
+  const visibleForeshadows = useMemo(() => {
+    const all = data?.foreshadows ?? [];
+    switch (foreshadowFilter) {
+      case "open":
+        return openForeshadowsInView;
+      case "resolved":
+        return all.filter((item) => item.status === "resolved");
+      case "abandoned":
+        return all.filter((item) => item.status === "abandoned");
+      case "overdue":
+        return all.filter((item) => isForeshadowOverdue(item, latestWritten));
+      default:
+        return all;
+    }
+  }, [data, foreshadowFilter, openForeshadowsInView, latestWritten]);
 
   const loadStory = useCallback(async () => {
     setLoading(true);
@@ -373,6 +419,53 @@ export function StoryTab({
     if (!id) return;
     if (!window.confirm("删除后不可自动恢复，确定删除这条手工维护的剧情台账记录？")) return;
     await savePatch({ delete: { kind, id }, confirm: true });
+  }
+
+  // 交给模型逐条判断，避免几十上百条伏笔全靠人工点。
+  function startClassify() {
+    if (!openForeshadowsInView.length || disabled) return;
+    if (
+      !window.confirm(
+        `将调用模型对照 ${writtenChapters.length} 章正文摘要，为 ${openForeshadowsInView.length} 条伏笔判断是否已回收。\n\n只有高置信、能指出具体章节的结论才会自动标为已回收；其余只登记“疑似回收”供你复核，不会被悄悄关掉。\n\n继续？`,
+      )
+    ) {
+      return;
+    }
+    void onStartJob("foreshadow");
+  }
+
+  // 一次性把当前时间点下所有未回收伏笔收敛掉，避免每章提示都被同一批旧伏笔占据。
+  async function markAllForeshadows(status: "resolved" | "abandoned") {
+    if (bulkMarking || saving || disabled) return;
+    const targets = openForeshadowsInView;
+    if (!targets.length) return;
+    const label = status === "resolved" ? "已回收" : "已废弃";
+    const overdue = targets.filter((item) => isForeshadowOverdue(item, latestWritten)).length;
+    const detailText =
+      status === "resolved"
+        ? `会统一写入回收章节「第 ${chapter} 章」，之后不再提示回收。`
+        : "表示这些线索不再追究，之后不再提示回收。";
+    const overdueNote = overdue ? `\n其中 ${overdue} 条已经超过预计回收章节。` : "";
+    if (
+      !window.confirm(
+        `确定把第 ${chapter} 章时间点下 ${targets.length} 条未回收伏笔全部标记为${label}？${overdueNote}\n\n${detailText}\n批量操作会覆盖这些伏笔当前的状态，请确认正文已经交代或确实打算放弃。`,
+      )
+    ) {
+      return;
+    }
+    setBulkMarking(true);
+    try {
+      await savePatch({
+        foreshadows: {
+          ids: targets.map((item) => item.id),
+          status,
+          resolvedChapter: chapter,
+        },
+        confirm: true,
+      });
+    } finally {
+      setBulkMarking(false);
+    }
   }
 
   if (loading && !story) {
@@ -986,6 +1079,41 @@ export function StoryTab({
             <h2 className="panel-title">伏笔生命周期</h2>
             <div className="memory-actions">
               <span className="muted small">AI 只能给出回收候选，确认回收由作者操作</span>
+              {openForeshadowsInView.length &&
+              foreshadowFilter !== "resolved" &&
+              foreshadowFilter !== "abandoned" ? (
+                <>
+                  <button
+                    className="btn btn-sm"
+                    type="button"
+                    disabled={bulkMarking || saving || disabled}
+                    onClick={() => void markAllForeshadows("resolved")}
+                  >
+                    {bulkMarking ? (
+                      <BusyLabel>处理中…</BusyLabel>
+                    ) : (
+                      `全部标记已回收（${openForeshadowsInView.length}）`
+                    )}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    type="button"
+                    disabled={bulkMarking || saving || disabled}
+                    onClick={() => void markAllForeshadows("abandoned")}
+                  >
+                    全部标记已废弃
+                  </button>
+                </>
+              ) : null}
+              <button
+                className="btn"
+                type="button"
+                disabled={disabled || bulkMarking || saving || !openForeshadowsInView.length}
+                onClick={startClassify}
+                title="调用模型对照正文摘要判断哪些伏笔已经回收"
+              >
+                AI 自动分类
+              </button>
               <button
                 className="btn"
                 type="button"
@@ -995,10 +1123,33 @@ export function StoryTab({
               </button>
             </div>
           </div>
-          <div className="panel-body story-split">
+          <div className="panel-body">
+            <div
+              className="segmented segmented-sm story-filter"
+              role="tablist"
+              aria-label="伏笔筛选"
+            >
+              {FORESHADOW_FILTERS.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={foreshadowFilter === item.key}
+                  className={`segmented-item ${foreshadowFilter === item.key ? "active" : ""}`}
+                  onClick={() => {
+                    setForeshadowFilter(item.key);
+                    setForeshadowDraft(null);
+                  }}
+                >
+                  {item.label}
+                  <span className="segmented-count">{foreshadowCounts[item.key]}</span>
+                </button>
+              ))}
+            </div>
+            <div className="story-split">
             <div className="story-list">
-              {data?.foreshadows.length ? (
-                data.foreshadows.map((record) => (
+              {visibleForeshadows.length ? (
+                visibleForeshadows.map((record) => (
                   <button
                     key={record.id}
                     type="button"
@@ -1016,7 +1167,17 @@ export function StoryTab({
                   </button>
                 ))
               ) : (
-                <p className="muted">还没有伏笔记录。生成基础台账，或在 AI 重建后从正文抽取。</p>
+                <p className="muted">
+                  {foreshadowFilter === "open"
+                    ? "没有未回收的伏笔。"
+                    : foreshadowFilter === "resolved"
+                      ? "还没有标记为已回收的伏笔。"
+                      : foreshadowFilter === "abandoned"
+                        ? "没有已废弃的伏笔。"
+                        : foreshadowFilter === "overdue"
+                          ? "没有超过预计回收章节的伏笔。"
+                          : "还没有伏笔记录。生成基础台账，或在 AI 重建后从正文抽取。"}
+                </p>
               )}
             </div>
             {foreshadowDraft ? (
@@ -1169,6 +1330,7 @@ export function StoryTab({
                 </div>
               </div>
             ) : null}
+            </div>
           </div>
         </section>
       ) : null}

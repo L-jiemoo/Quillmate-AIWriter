@@ -717,13 +717,11 @@ kbd {
 }
 
 .project-grid {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--surface-1);
-  box-shadow: var(--shadow-sm);
+  --pf-scale: 0.78;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--space-4);
+  align-items: start;
 }
 
 .project-card {
@@ -731,18 +729,23 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-5);
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: transparent;
-  transition: background var(--dur) var(--ease), padding-left var(--dur) var(--ease);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    padding-top 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.15);
 }
 
 .project-card::before {
   content: "";
   position: absolute;
-  top: 12px;
-  bottom: 12px;
+  top: var(--space-4);
+  bottom: var(--space-4);
   left: 0;
   width: 2px;
   border-radius: var(--radius-pill);
@@ -752,14 +755,11 @@ kbd {
   transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 
-.project-card:last-child {
-  border-bottom: 0;
-}
-
 .project-card:hover,
 .project-card:focus-within {
   background: var(--surface-2);
-  padding-left: calc(var(--space-5) + 4px);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-md);
 }
 
 .project-card:hover::before,
@@ -768,12 +768,34 @@ kbd {
   transform: scaleY(1);
 }
 
+/* 折页抽出时会向上越界，卡片顶部预留同等高度的空白，避免被裁切 */
+.project-card:has(.pf-toggle:checked) {
+  padding-top: calc(162px * var(--pf-scale, 0.78) + 8px);
+}
+
 .project-card-link {
   position: relative;
   z-index: 1;
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--space-3);
+  min-width: 0;
+}
+
+.project-row {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.project-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-tools {
@@ -883,6 +905,183 @@ kbd {
 .project-card:focus-within .project-open {
   opacity: 1;
   transform: translateX(0);
+}
+
+/* ---------- 作品档案夹 ---------- */
+
+.project-card .pf {
+  --pf-w: 321px;
+  --pf-h: 270px;
+  --pf-back: var(--surface-2);
+  --pf-back-shadow: inset 0 0 8px 2px var(--line);
+  --pf-flap-fill: var(--surface-2);
+  --pf-flap-fill-opacity: 0.96;
+  --pf-flap-stroke: var(--line-strong);
+  --pf-card-fill: var(--surface-hover);
+  --pf-card-stroke: var(--line-hover);
+  --pf-card-line: var(--line-strong);
+  position: relative;
+  display: block;
+  align-self: center;
+  flex: 0 0 auto;
+  width: calc(var(--pf-w) * var(--pf-scale));
+  height: calc(var(--pf-h) * var(--pf-scale));
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+[data-theme="light"] .project-card .pf {
+  --pf-back: var(--surface-3);
+  --pf-back-shadow: inset 0 0 8px 2px var(--line);
+  --pf-flap-fill: var(--surface-3);
+  --pf-flap-fill-opacity: 1;
+  --pf-flap-stroke: var(--line-hover);
+  --pf-card-fill: var(--surface-2);
+  --pf-card-stroke: var(--line-hover);
+  --pf-card-line: var(--line);
+}
+
+.project-card .pf-toggle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.project-card .pf-stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--pf-w);
+  height: var(--pf-h);
+  transform: translate(-50%, -50%) scale(var(--pf-scale));
+  transform-origin: center;
+  perspective: 800px;
+}
+
+.project-card .pf-back {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--pf-w);
+  height: var(--pf-h);
+  border-radius: 25px;
+  background-color: var(--pf-back);
+  box-shadow: var(--pf-back-shadow);
+  transform: translate(-50%, -50%);
+}
+
+.project-card .pf-cards {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  height: 0;
+}
+
+.project-card .pf-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transition: transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+
+.project-card .pf-card-1 {
+  transform: translate(-50%, -50%) translate(40px, -10px) rotate(10deg);
+}
+
+.project-card .pf-card-2 {
+  transform: translate(-50%, -50%) translate(3px, -20px) rotate(2deg);
+  transition-delay: 0.02s;
+}
+
+.project-card .pf-card-3 {
+  transform: translate(-50%, -50%) translate(-40px, -22px) rotate(-5deg);
+}
+
+.project-card .pf:hover .pf-card-1 {
+  transform: translate(-50%, -50%) translate(40px, -30px) rotate(14deg);
+  transition-delay: 0.12s;
+}
+
+.project-card .pf:hover .pf-card-2 {
+  transform: translate(-50%, -50%) translate(3px, -35px) rotate(-1deg);
+  transition-delay: 0.06s;
+}
+
+.project-card .pf:hover .pf-card-3 {
+  transform: translate(-50%, -50%) translate(-40px, -44px) rotate(-9deg);
+  transition-delay: 0s;
+}
+
+.project-card .pf-toggle:checked ~ .pf-stage .pf-card-1 {
+  transform: translate(-50%, -50%) translate(70px, -160px) rotate(18deg);
+  transition-delay: 0.1s;
+}
+
+.project-card .pf-toggle:checked ~ .pf-stage .pf-card-2 {
+  transform: translate(-50%, -50%) translate(0, -180px) rotate(-3deg);
+  transition-delay: 0.05s;
+}
+
+.project-card .pf-toggle:checked ~ .pf-stage .pf-card-3 {
+  transform: translate(-50%, -50%) translate(-65px, -170px) rotate(-14deg);
+  transition-delay: 0s;
+}
+
+.project-card .pf-flap {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 321px;
+  height: 241px;
+  margin-top: 16px;
+  transform: translate(-50%, -50%) rotateX(-15deg);
+  transform-origin: bottom center;
+  transform-style: preserve-3d;
+  transition: transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+.project-card .pf:hover .pf-flap {
+  transform: translate(-50%, -50%) rotateX(-45deg);
+}
+
+.project-card .pf-toggle:checked ~ .pf-stage .pf-flap {
+  transform: translate(-50%, -50%) rotateX(-55deg);
+}
+
+.project-card .pf-flap-blur {
+  position: absolute;
+  inset: 0;
+  clip-path: path(
+    "M0 25C0 11.1929 11.1929 0 25 0H136.084C143.044 0 149.689 2.90139 154.42 8.00608L178.08 33.5343C182.811 38.639 189.456 41.5404 196.416 41.5404H296C309.807 41.5404 321 52.7333 321 66.5404V216C321 229.807 309.807 241 296 241H25C11.1929 241 0 229.807 0 216V25Z"
+  );
+  -webkit-clip-path: path(
+    "M0 25C0 11.1929 11.1929 0 25 0H136.084C143.044 0 149.689 2.90139 154.42 8.00608L178.08 33.5343C182.811 38.639 189.456 41.5404 196.416 41.5404H296C309.807 41.5404 321 52.7333 321 66.5404V216C321 229.807 309.807 241 296 241H25C11.1929 241 0 229.807 0 216V25Z"
+  );
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+.project-card .pf-flap svg {
+  position: absolute;
+  inset: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-card,
+  .project-card .pf-card,
+  .project-card .pf-flap {
+    transition: none;
+  }
 }
 
 /* ---------- 面板 ---------- */
@@ -1105,6 +1304,29 @@ textarea.input {
 
 .checkbox-row:hover {
   color: var(--ink-1);
+}
+
+/* 批量润色：章节多选面板，保持与章节列表同宽、可滚动 */
+.chapter-batch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.chapter-batch-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.chapter-batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .checkbox-row input:not(.switch) {
@@ -1596,9 +1818,10 @@ input.switch:disabled {
 .side-column {
   position: sticky;
   top: calc(var(--topbar-h) + var(--space-4));
-  max-height: calc(100vh - var(--topbar-h) - var(--space-7));
+  align-self: start;
+  max-height: calc(100vh - var(--topbar-h) - var(--space-5));
   overflow-y: auto;
-  /* 不设置 scrollbar-width：Chromium 会因此改用原生滚动条并忽略 ::-webkit-scrollbar。 */
+  overscroll-behavior: contain;
   scroll-margin-top: 90px;
 }
 
@@ -1625,6 +1848,7 @@ input.switch:disabled {
 }
 
 .workspace-nav-back {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1636,8 +1860,28 @@ input.switch:disabled {
   transition: color var(--dur) var(--ease);
 }
 
+/* 与顶栏「模型设置」一致：悬停时从左侧展开一条渐变下划线。 */
+.workspace-nav-back::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  left: 10px;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--gradient-bright);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--dur) var(--ease);
+}
+
 .workspace-nav-back:hover {
   color: var(--accent-bright);
+}
+
+.workspace-nav-back:hover::after,
+.workspace-nav-back:focus-visible::after {
+  transform: scaleX(1);
 }
 
 .workspace-nav-label {
@@ -1645,6 +1889,24 @@ input.switch:disabled {
   color: var(--ink-4);
   font-size: 10px;
   letter-spacing: 0.14em;
+}
+
+.workspace-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.workspace-nav-group + .workspace-nav-group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.workspace-nav-group-label {
+  padding: 4px 10px 3px;
+  color: var(--ink-4);
+  font-size: 10px;
 }
 
 .workspace-nav-item {
@@ -2897,6 +3159,10 @@ input.switch:disabled {
   color: var(--warning);
 }
 
+.story-filter {
+  margin-bottom: var(--space-3);
+}
+
 .story-split {
   display: grid;
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
@@ -3103,15 +3369,71 @@ input.switch:disabled {
 .job-actions {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 9px;
+  padding-top: var(--space-3);
+}
+
+.job-actions-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-3);
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.job-actions-toggle:hover {
+  border-color: var(--line-accent);
+  color: var(--ink-0);
+}
+
+.job-actions-toggle span:last-child {
+  color: var(--accent-bright);
+  font-size: var(--text-lg);
+  line-height: 1;
 }
 
 .job-section-label {
-  margin: var(--space-1) 0 -2px;
-  color: var(--ink-4);
-  font-size: 10.5px;
+  margin: 10px 0 0;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink-1);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.02em;
+}
+
+.job-actions > .job-section-label:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.job-actions > .hint {
+  margin: -4px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.job-actions > .job-divider {
+  display: none;
+}
+
+.job-actions > .btn,
+.job-actions > .job-input-row,
+.job-actions > .job-rewrite-row,
+.job-actions > .input,
+.job-actions > .checkbox-row {
+  margin-top: 0;
 }
 
 .job-input-row {
@@ -4180,10 +4502,15 @@ input.switch:disabled {
 /* ---------- 响应式 ---------- */
 
 @media (max-width: 1120px) {
-  .dashboard-grid,
   .publish-grid,
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 新建作品继续留在右栏，窄屏下也保持吸顶跟随滚动 */
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr) var(--create-panel-w);
+    gap: var(--space-5);
   }
 
   .hero {
@@ -4194,10 +4521,6 @@ input.switch:disabled {
 
   .hero-aside {
     max-width: 560px;
-  }
-
-  .create-panel {
-    position: static;
   }
 
   .workspace-layout {
@@ -4235,8 +4558,17 @@ input.switch:disabled {
   }
 
   .workspace-nav-label,
+  .workspace-nav-group-label,
   .workspace-buddy {
     display: none;
+  }
+
+  .workspace-nav-group,
+  .workspace-nav-group + .workspace-nav-group {
+    display: contents;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
 
   .workspace-nav-back {
@@ -4285,6 +4617,16 @@ input.switch:disabled {
 }
 
 @media (max-width: 900px) {
+  /* 双栏放不下时改为上下堆叠，新建作品独占一行 */
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-6);
+  }
+
+  .create-panel {
+    position: static;
+  }
+
   .story-split {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -4368,12 +4710,6 @@ input.switch:disabled {
     align-items: flex-start;
     flex-direction: column;
     gap: var(--space-2);
-  }
-
-  .project-card,
-  .project-card:hover,
-  .project-card:focus-within {
-    padding: var(--space-4);
   }
 
   .project-title {
@@ -4654,4 +4990,304 @@ input.switch:disabled {
   .job-log-line {
     animation-delay: 0ms !important;
   }
+}
+
+/* ---------- Skills / 技能页 ---------- */
+
+.skills {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.skill-panel {
+  margin-top: var(--space-4);
+}
+
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.skill-switch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skill-switch {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.skill-switch input {
+  margin-top: 4px;
+}
+
+.skill-switch > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-version {
+  color: var(--ink-4);
+  font-size: var(--text-xs);
+}
+
+.skill-ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--space-3);
+}
+
+.skill-inline-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.skill-catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skill-catalog-item {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.skill-catalog-item header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.skill-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.skill-log-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: var(--text-xs);
+}
+
+.skill-log-status {
+  font-weight: 600;
+}
+
+.skill-log-status.status-success {
+  color: var(--success);
+}
+
+.skill-log-status.status-error {
+  color: var(--danger);
+}
+
+.skill-log-status.status-cancelled {
+  color: var(--warning);
+}
+
+.skill-log-main {
+  color: var(--ink-2);
+}
+
+.chip-danger {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.skill-notice {
+  margin: 0 0 var(--space-3);
+}
+
+.skill-batch-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.skill-batch-candidates {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.skill-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-3);
+}
+
+.skill-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.skill-candidate header {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.skill-check {
+  margin: 8px 0;
+  padding: 6px 0 6px 10px;
+  border-left: 3px solid var(--accent-line);
+}
+
+.skill-design-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+.skill-panel-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: var(--space-3);
+}
+
+.char-skill-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: -2px 0 var(--space-3);
+}
+
+.char-design-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.char-design-summary span {
+  margin-right: 6px;
+  color: var(--ink-4);
+}
+
+.link-btn {
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  color: var(--accent-bright);
+  cursor: pointer;
+  font-size: var(--text-xs);
+}
+
+.polish-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.polish-view-tabs {
+  display: flex;
+  gap: 8px;
+  margin: var(--space-3) 0;
+}
+
+.polish-diff {
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--prose-bg);
+}
+
+.diff-block {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-serif);
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+.diff-equal {
+  color: var(--ink-2);
+}
+
+.diff-added {
+  border-left: 2px solid var(--success);
+  background: var(--success-soft);
+}
+
+.diff-removed {
+  border-left: 2px solid var(--danger);
+  background: var(--danger-soft);
+  opacity: 0.82;
+  text-decoration: line-through;
+}
+
+.polish-text {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--prose-bg);
+  color: var(--prose-ink);
+  font-family: var(--font-serif);
+  line-height: 1.85;
+  white-space: pre-wrap;
+}
+
+.polish-change-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.polish-change-list li {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.polish-change-list strong {
+  margin: 0 8px;
 }

@@ -42,6 +42,8 @@ function preferredChoice(decision: RepairDecisionView, useRecommended: boolean):
 const TYPE_LABEL: Record<Job["type"], string> = {
   plan: "生成架构",
   extend: "补充大纲",
+  wrapup: "补充收尾大纲",
+  foreshadow: "自动分类伏笔",
   write: "自动写作",
   finale: "生成完结章",
   rewrite: "重写章节",
@@ -89,6 +91,8 @@ export function JobPanel({
 }) {
   const [count, setCount] = useState("1");
   const [extendCount, setExtendCount] = useState("10");
+  const [wrapUpCount, setWrapUpCount] = useState("5");
+  const [wrapUpBrief, setWrapUpBrief] = useState("");
   const [rewriteInput, setRewriteInput] = useState("");
   const [rewriteInstruction, setRewriteInstruction] = useState("");
   const [useReview, setUseReview] = useState(false);
@@ -98,6 +102,7 @@ export function JobPanel({
   const [decisionError, setDecisionError] = useState("");
   const [decisionDismissed, setDecisionDismissed] = useState(false);
   const [defaultRecommended, setDefaultRecommended] = useState(true);
+  const [showJobActions, setShowJobActions] = useState(!job || (job.status !== "running" && job.status !== "queued"));
   const defaultRecommendedRef = useRef(true);
   const decisionIdRef = useRef<string | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -199,11 +204,26 @@ export function JobPanel({
     ? Math.max(...detail.plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
   const completedChapter = detail.planLedger?.completedChapter ?? 0;
+  // 计划台账分两类：还没排回收章节的，以及排了回收章节但正文始终没确认回收的。
+  const plannedForeshadows = (detail.planLedger?.foreshadows ?? []).filter(
+    (item) => item.status !== "cancelled",
+  );
+  const openForeshadows = plannedForeshadows.filter(
+    (item) => !item.resolveChapter && item.status !== "realized",
+  ).length;
+  const unconfirmedForeshadows = plannedForeshadows.filter(
+    (item) => item.resolveChapter > 0 && item.status !== "realized",
+  ).length;
+  const pendingForeshadows = openForeshadows + unconfirmedForeshadows;
 
   useEffect(() => {
     const node = consoleRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [job?.logs.length]);
+
+  useEffect(() => {
+    if (running) setShowJobActions(false);
+  }, [running]);
 
   function startPlan() {
     if (
@@ -223,6 +243,21 @@ export function JobPanel({
 
   function startExtend() {
     void onStartJob("extend", { count: Math.max(1, Number(extendCount) || 10) });
+  }
+
+  function startWrapUp() {
+    const total = Math.max(1, Number(wrapUpCount) || 5);
+    if (
+      !window.confirm(
+        `将从第 ${nextIndex} 章起追加 ${total} 章收尾大纲，逐条安排未回收伏笔的回收章节，并收束支线为完结章做准备。\n\n已写正文不会改动。继续？`,
+      )
+    ) {
+      return;
+    }
+    void onStartJob("wrapup", {
+      count: total,
+      wrapUpBrief: wrapUpBrief.trim(),
+    });
   }
 
   function startFinale() {
@@ -412,7 +447,16 @@ export function JobPanel({
           {job?.error ? <p className="form-error">{job.error}</p> : null}
         </div>
 
-        <div className="job-actions">
+        <button
+          type="button"
+          className="job-actions-toggle"
+          aria-expanded={showJobActions}
+          onClick={() => setShowJobActions((visible) => !visible)}
+        >
+          <span>{showJobActions ? "收起任务列表" : "启动其他任务"}</span>
+          <span aria-hidden="true">{showJobActions ? "−" : "+"}</span>
+        </button>
+        {showJobActions ? <div className="job-actions">
           {running && job?.type === "repair" ? (
             <button
               className="btn btn-block"
@@ -518,11 +562,59 @@ export function JobPanel({
           </div>
 
           <div className="job-divider" />
+          <p className="job-section-label">收尾工程</p>
+          <p className="hint">
+            {completedChapter
+              ? `全书已完结：第 ${completedChapter} 章。`
+              : !hasArchitecture
+                ? "生成架构与角色后，可以在完结前先补一批收尾大纲。"
+                : pendingForeshadows > 0
+                  ? `计划台账：${openForeshadows} 条未排回收章节${
+                      unconfirmedForeshadows
+                        ? `，${unconfirmedForeshadows} 条已排章节但正文未确认回收`
+                        : ""
+                    }；收尾大纲会把这些伏笔重新落到具体章节。`
+                  : "计划台账里的伏笔都已确认回收；收尾大纲会按主线与剧情台账自然收束，为完结章铺路。"}
+          </p>
+          <div className="job-input-row">
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={30}
+              value={wrapUpCount}
+              onChange={(event) => setWrapUpCount(event.target.value)}
+              aria-label="收尾章节数"
+            />
+            <button
+              className="btn btn-block"
+              onClick={startWrapUp}
+              disabled={running || !hasArchitecture || Boolean(completedChapter)}
+            >
+              生成 {wrapUpCount} 章收尾大纲
+            </button>
+          </div>
+          <textarea
+            className="input textarea-sm"
+            rows={3}
+            value={wrapUpBrief}
+            maxLength={2000}
+            onChange={(event) => setWrapUpBrief(event.target.value)}
+            placeholder="可选：收尾要求。例如“必须回收玉佩与旧案两条伏笔；男主活到最后；倒数第二章安排决战”"
+            aria-label="收尾要求"
+          />
+          <p className="hint">
+            收尾要求会作为硬约束写进提示词；与已发生事实冲突时，优先保住事实台账。
+          </p>
+
+          <div className="job-divider" />
           <p className="job-section-label">完结</p>
           <p className="hint">
             {completedChapter
               ? `全书已完结：第 ${completedChapter} 章。不能再自动写作或补充大纲。`
-              : "按现有计划收束全书，生成完结章后项目标记为已完结。"}
+              : pendingForeshadows > 0
+                ? `按现有计划收束全书。计划台账仍有 ${pendingForeshadows} 条伏笔未确认回收，建议先补一批收尾大纲。`
+                : "按现有计划收束全书，生成完结章后项目标记为已完结。"}
           </p>
           <button
             className="btn btn-block"
@@ -590,7 +682,7 @@ export function JobPanel({
           >
             总体审校全书（{writtenIndexes.size} 章）
           </button>
-        </div>
+        </div> : null}
 
       </div>
 

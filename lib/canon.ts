@@ -345,6 +345,51 @@ export function canonForChapter(
   };
 }
 
+// 删除章节后移除只由该章确立的事实；无法确认来源的人物状态降级为“未知”，
+// 避免已删除正文里的死亡、位置或物品归属继续约束后续写作。
+export function removeChapterFacts(
+  canon: CanonFacts,
+  chapter: number,
+  latestChapter: number,
+  updatedAt = nowIso(),
+): CanonFacts {
+  const characters: CanonCharacter[] = [];
+  for (const item of canon.characters) {
+    if (item.chapter === chapter && item.statusChapter === chapter) continue;
+    if (item.statusChapter === chapter) {
+      characters.push({
+        ...item,
+        status: "unknown",
+        statusChapter: 0,
+        location: "",
+        note: "",
+      });
+      continue;
+    }
+    characters.push(
+      item.chapter === chapter
+        ? { ...item, chapter: latestChapter, location: "", note: "" }
+        : item,
+    );
+  }
+
+  return {
+    characters,
+    items: canon.items.filter((item) => item.chapter !== chapter),
+    timeline: {
+      // 时间线最新日期只可能来自被删章节时，不能继续当成已知事实。
+      currentDay: canon.lastChapter <= chapter ? "" : canon.timeline.currentDay,
+      deadlines: canon.timeline.deadlines.filter((item) => item.chapter !== chapter),
+    },
+    rules: [...canon.rules],
+    facts: (canon.facts ?? []).filter(
+      (fact) => !(fact.establishedAt === "chapter" && fact.chapter === chapter),
+    ),
+    lastChapter: Math.min(canon.lastChapter, latestChapter),
+    updatedAt,
+  };
+}
+
 function normalizeCanonCharacter(input: unknown): CanonCharacter | null {
   const record = (input ?? {}) as Record<string, unknown>;
   const name = str(record.name).trim();
@@ -1419,6 +1464,424 @@ export function openingRepeatSuspicion(
       type: "章首重复",
       evidence: best.slice(0, 120),
       detail: "本章开头与上一章结尾存在大段重复，可能是在复述上一章而没有推进场景。",
+    },
+  ];
+}
+
+// 每章都用“X 是被一阵敲门声吵醒的”这类“刺激—反应”开头，读起来就是模板。
+// 只认“被……吵醒/惊醒/惊动/打断”这一类高置信度形态，且只看开头第一句，
+// 避免把正文里的正常被动句误判成开头公式化。
+const FORMULAIC_OPENING =
+  /被[^。！？]{0,24}(吵醒|惊醒|惊动|叫醒|吼醒|唤醒|拽回|拉回|扯回|打断)/u;
+
+function openingFirstSentence(text: string): string {
+  const head = text.replace(/\s+/gu, "").slice(0, 200);
+  const match = head.match(/^[^。！？]*[。！？]?/u);
+  return (match?.[0] ?? head).trim();
+}
+
+function isFormulaicOpening(text: string): boolean {
+  return FORMULAIC_OPENING.test(openingFirstSentence(text));
+}
+
+// 开头方式分类：写作前把最近三章的类型交给模型，让它换一种结构。
+// 分类只看首句，标签是可读的中文短语，不把原句喂给模型，避免又变成素材。
+export type OpeningKind =
+  | "wake"
+  | "judgement"
+  | "time"
+  | "dialogue"
+  | "scene"
+  | "action"
+  | "other";
+
+export const OPENING_KIND_LABELS: Record<OpeningKind, string> = {
+  wake: "被动唤醒或打断式",
+  judgement: "事后判断式",
+  time: "时间起兴式",
+  dialogue: "对话直入式",
+  scene: "环境或物件起笔",
+  action: "动作中间态",
+  other: "其他",
+};
+
+const OPENING_SCENE_WORDS =
+  /(天色|天光|窗外|院子|屋里|街道|空气|风|雨|雪|雾|阳光|月光|灯|门|走廊|废墟|山林|夜色)/u;
+const OPENING_ACTION_HINTS =
+  /(把|抓|握|推|拉|抬|低|转|跑|走|站|坐|蹲|伸手|回头|停|盯|看|听|摸)/u;
+
+export function classifyOpening(text: string): OpeningKind {
+  const first = openingFirstSentence(text);
+  if (!first) return "other";
+  if (/[“”"「」]/u.test(first)) return "dialogue";
+  if (FORMULAIC_OPENING.test(first)) return "wake";
+  if (/是被[^。！？]{0,40}(的|了)/u.test(first)) return "judgement";
+  if (OPENING_TIME_MARKERS.test(first.slice(0, 8))) return "time";
+  if (OPENING_ACTION_HINTS.test(first)) return "action";
+  if (OPENING_SCENE_WORDS.test(first)) return "scene";
+  return "other";
+}
+
+export function formulaicOpeningSuspicion(
+  chapterText: string,
+  previousChapters: { index: number; content: string }[],
+): ContinuityIssue[] {
+  const first = openingFirstSentence(chapterText);
+  if (first.length < 6 || !FORMULAIC_OPENING.test(first)) return [];
+
+  // 只看最近三章：更早的章节就算同款开头，也不构成“最近都这么写”的观感。
+  const recent = previousChapters
+    .slice(-3)
+    .filter((chapter) => isFormulaicOpening(chapter.content));
+  const sibling = recent.map((chapter) => `第 ${chapter.index} 章`).join("、");
+
+  return [
+    {
+      severity: "warning",
+      type: "章首公式化",
+      evidence: first.slice(0, 120),
+      detail: sibling
+        ? `本章开头与${sibling}同样使用“被……吵醒/惊动”式开头，连续多章读起来像模板。建议改成动作中间态、对话直入或环境细节切入，并保留上一章结尾的位置、身体状态和未完成动作。`
+        : "本章开头把现场写成了事后结论（“X 是被……吵醒的”），读者会站在故事外面。建议从动作中间态、声音细节或结果切入，再交代原因。",
+    },
+  ];
+}
+
+// 上一章结尾写了某个道具，模型就可能每章开头都从同一件东西写起。
+// 用相邻章节开头的双字组合重合度做粗检测：只报“最近三章里至少两章
+// 出现同一个非人名双字词”，具体是否成问题交给审校模型判断。
+const OPENING_STOP_CHARS = new Set(
+  "的了是在他她它我你您们不就都和与及或而但很更最这那哪一有没也还又再才只把被将从向对于为所以如因由至到着地得么什怎上下里外".split(
+    "",
+  ),
+);
+
+function openingGrams(text: string, excludedNames: string[]): Set<string> {
+  const head = text.replace(/[\s\p{P}]/gu, "").slice(0, 90);
+  const grams = new Set<string>();
+  for (let index = 0; index + 2 <= head.length; index += 1) {
+    const pair = head.slice(index, index + 2);
+    if (OPENING_STOP_CHARS.has(pair[0]) || OPENING_STOP_CHARS.has(pair[1])) {
+      continue;
+    }
+    // 人名会天然在每章开头出现，不算“意象重复”。
+    if (excludedNames.some((name) => name.length > 1 && name.includes(pair))) {
+      continue;
+    }
+    grams.add(pair);
+  }
+  return grams;
+}
+
+export function openingImagerySuspicion(
+  chapterText: string,
+  previousChapters: { index: number; content: string }[],
+  excludedNames: string[] = [],
+): ContinuityIssue[] {
+  const current = openingGrams(chapterText, excludedNames);
+  if (current.size < 2) return [];
+
+  const hits = new Map<string, Set<number>>();
+  for (const chapter of previousChapters.slice(-3)) {
+    for (const gram of openingGrams(chapter.content, excludedNames)) {
+      if (!current.has(gram)) continue;
+      const indexes = hits.get(gram) ?? new Set<number>();
+      indexes.add(chapter.index);
+      hits.set(gram, indexes);
+    }
+  }
+
+  const repeated = [...hits.entries()]
+    .filter(([, indexes]) => indexes.size >= 2)
+    .sort((left, right) => right[1].size - left[1].size)
+    .slice(0, 4);
+  if (!repeated.length) return [];
+
+  const terms = repeated.map(([gram]) => `「${gram}」`).join("、");
+  const chapters = [...new Set(repeated.flatMap(([, indexes]) => [...indexes]))]
+    .sort((left, right) => left - right)
+    .map((index) => `第 ${index} 章`)
+    .join("、");
+
+  return [
+    {
+      severity: "warning",
+      type: "章首意象重复",
+      evidence: chapterText.trim().slice(0, 80),
+      detail: `本章开头与${chapters}的开头都出现了${terms}，连续多章用同一批意象开场容易读成模板。建议开头第一段引入新动作、新信息或新人物，把上一章结尾的物件降为背景。`,
+    },
+  ];
+}
+
+// 骨架比对：把首句的实词压缩成 W，只保留虚词和标点，
+// 这样“陆闲是被一阵敲门声吵醒的”和“她是在一个雨天接到电话的”会落到同一副骨架，
+// 换成别的题材、换掉具体名词也躲不开。
+const OPENING_FUNCTION_CHARS = new Set(
+  "的了是在被把将向对和与也就都而但很更最有没还又再才只着过地得么什怎为之其于如所".split(
+    "",
+  ),
+);
+const OPENING_PUNCTUATION = /[。！？，、；：“”‘’"'（）()]/u;
+
+function openingStructure(text: string): string {
+  const first = openingFirstSentence(text);
+  let skeleton = "";
+  for (const char of first) {
+    if (OPENING_PUNCTUATION.test(char)) {
+      skeleton += char;
+    } else if (OPENING_FUNCTION_CHARS.has(char)) {
+      skeleton += char;
+    } else if (!skeleton.endsWith("W")) {
+      skeleton += "W";
+    }
+  }
+  return skeleton;
+}
+
+// 骨架串很短，用编辑距离类的 LCS 比例比 bigram 交集更稳。
+function lcsRatio(left: string, right: string): number {
+  const a = [...left];
+  const b = [...right];
+  if (!a.length || !b.length) return 0;
+  let previous = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = new Array<number>(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] =
+        a[i - 1] === b[j - 1]
+          ? previous[j - 1] + 1
+          : Math.max(previous[j], current[j - 1]);
+    }
+    previous = current;
+  }
+  return previous[b.length] / Math.max(a.length, b.length);
+}
+
+export function openingStructureSuspicion(
+  chapterText: string,
+  previousChapters: { index: number; content: string }[],
+): ContinuityIssue[] {
+  const skeleton = openingStructure(chapterText);
+  // 骨架里的功能字太少时说明首句过短或全是实词，比对没有意义。
+  if (skeleton.replace(/W/gu, "").length < 2) return [];
+
+  const matched = previousChapters.slice(-3).filter((chapter) => {
+    const other = openingStructure(chapter.content);
+    return other.length >= 4 && lcsRatio(skeleton, other) >= 0.6;
+  });
+  // 只和一章相似可能是巧合；连续三章里出现两次才算模板。
+  if (matched.length < 2) return [];
+
+  const chapters = matched.map((chapter) => `第 ${chapter.index} 章`).join("、");
+  return [
+    {
+      severity: "warning",
+      type: "章首句式重复",
+      evidence: openingFirstSentence(chapterText).slice(0, 120),
+      detail: `本章开头与${chapters}使用同一副句式骨架（${skeleton}），连续多章读起来像同一个模板。建议换一种开头结构：动作中间态、对话直入、结果先行或明确的时间跳跃；换结构时仍要保留与上一章结尾的位置、身体状态或未完成动作的衔接。`,
+    },
+  ];
+}
+
+// 换开头结构时最容易一起丢掉的是衔接。这里检查开头有没有留下可识别的锚点：
+// 时间推进、视角代词、回忆/梦境提示、人物名，或上一章结尾出现过的实词。
+const OPENING_TIME_MARKERS =
+  /(次日|翌日|第二天|隔天|三日后|三天后|数日后|半月后|一月后|与此同时|同一时刻|片刻后|半个时辰后|入夜|天亮|午后|黄昏|清晨|拂晓|傍晚|深夜)/u;
+const OPENING_PRONOUNS = /(他|她|它|我|他们|她们)/u;
+const OPENING_RECALL_MARKERS = /(梦|回忆|想起|记得|记忆|恍然)/u;
+
+function contentGrams(text: string, excludedNames: string[]): Set<string> {
+  const clean = text.replace(/[\s\p{P}]/gu, "");
+  const grams = new Set<string>();
+  for (let index = 0; index + 2 <= clean.length; index += 1) {
+    const pair = clean.slice(index, index + 2);
+    if (OPENING_STOP_CHARS.has(pair[0]) || OPENING_STOP_CHARS.has(pair[1])) {
+      continue;
+    }
+    if (excludedNames.some((name) => name.length > 1 && name.includes(pair))) {
+      continue;
+    }
+    grams.add(pair);
+  }
+  return grams;
+}
+
+export function openingLinkSuspicion(
+  chapterText: string,
+  previousEnding: string,
+  previousIndex: number,
+  knownNames: string[] = [],
+): ContinuityIssue[] {
+  const ending = previousEnding.replace(/[\s\p{P}]/gu, "");
+  if (ending.length < 20) return []; // 全书第一章或上一章没有正文时不判断
+
+  const head = chapterText.replace(/[\s\p{P}]/gu, "").slice(0, 120);
+  if (head.length < 10) return [];
+
+  if (OPENING_TIME_MARKERS.test(head)) return [];
+  if (OPENING_PRONOUNS.test(head)) return [];
+  if (OPENING_RECALL_MARKERS.test(head)) return [];
+  if (knownNames.some((name) => name.length > 1 && head.includes(name))) {
+    return [];
+  }
+
+  // 同场景延续：上一章结尾的实词在开头复现，也算有锚点（与“意象重复”是两回事）。
+  const endingGrams = contentGrams(ending.slice(-200), knownNames);
+  for (const gram of contentGrams(head, knownNames)) {
+    if (endingGrams.has(gram)) return [];
+  }
+
+  return [
+    {
+      severity: "warning",
+      type: "章首衔接",
+      evidence: chapterText.trim().slice(0, 80),
+      detail: `本章开头没有沿用第 ${previousIndex} 章结尾的人物、地点或物件，也没有时间推进、回忆或梦境提示，读者可能觉得另起了一场戏。建议在前 100 字内补一个锚点：同一空间里的物件、人物的身体状态，或上一章没做完的那个动作。`,
+    },
+  ];
+}
+
+// 正文中段的公式化不像开头那样有稳定的骨架，但落点是固定的高频词与句式。
+// 词表只用于检测、不写进写作提示词，避免像“敲门声”那样被模型当成默认素材。
+// 权重按“是否几乎只在套话里出现”分级：文学性作品里高频但正常的词只记 0.5。
+const FORMULAIC_TERMS: { term: string; weight: number }[] = [
+  { term: "不由得", weight: 1 },
+  { term: "不禁", weight: 1 },
+  { term: "忍不住", weight: 1 },
+  { term: "顿时", weight: 1 },
+  { term: "霎时", weight: 1 },
+  { term: "刹那间", weight: 1 },
+  { term: "心中一沉", weight: 1 },
+  { term: "心中一紧", weight: 1 },
+  { term: "心头一紧", weight: 1 },
+  { term: "心头一震", weight: 1 },
+  { term: "心中一暖", weight: 1 },
+  { term: "鼻子一酸", weight: 1 },
+  { term: "眼眶一热", weight: 1 },
+  { term: "深吸一口气", weight: 1 },
+  { term: "深吸了一口气", weight: 1 },
+  { term: "攥紧拳头", weight: 1 },
+  { term: "握紧拳头", weight: 1 },
+  { term: "眉头微皱", weight: 1 },
+  { term: "眉头一皱", weight: 1 },
+  { term: "嘴角勾起", weight: 1 },
+  { term: "勾起一抹", weight: 1 },
+  { term: "苦涩一笑", weight: 1 },
+  { term: "苦笑一声", weight: 1 },
+  { term: "瞳孔骤缩", weight: 1 },
+  { term: "瞳孔一缩", weight: 1 },
+  { term: "倒吸一口凉气", weight: 1 },
+  { term: "仿佛", weight: 0.5 },
+  { term: "似乎", weight: 0.5 },
+  { term: "竟然", weight: 0.5 },
+  { term: "微微", weight: 0.5 },
+  { term: "缓缓", weight: 0.5 },
+  { term: "轻轻", weight: 0.5 },
+  { term: "淡淡", weight: 0.5 },
+];
+
+const FORMULAIC_PATTERNS: {
+  label: string;
+  pattern: RegExp;
+  weight: number;
+}[] = [
+  {
+    label: "空气凝固",
+    pattern: /空气(仿佛|似乎|好像|瞬间)?(凝固|安静下来|安静得)/gu,
+    weight: 2,
+  },
+  {
+    label: "不知过了多久",
+    pattern: /(不知|不知道)过了多久/gu,
+    weight: 2,
+  },
+  {
+    label: "时间静止",
+    pattern: /时间(仿佛|似乎)?(一分一秒|静止|凝固)/gu,
+    weight: 2,
+  },
+];
+
+const FORMULAIC_ENDING = /(这一切|这)?(才|仅仅|只是|不过)(才)?(刚刚)?开始/u;
+
+export interface FormulaicHit {
+  term: string;
+  count: number;
+  weight: number;
+}
+
+export interface FormulaicPassageReport {
+  chars: number;
+  score: number;
+  perKilo: number;
+  hits: FormulaicHit[];
+  endingCliche: string;
+  shouldRewrite: boolean;
+}
+
+export function analyzeFormulaicPassage(text: string): FormulaicPassageReport {
+  const chars = text.replace(/\s/gu, "").length;
+  const hits: FormulaicHit[] = [];
+  let score = 0;
+
+  for (const item of FORMULAIC_TERMS) {
+    const count = text.split(item.term).length - 1;
+    if (!count) continue;
+    hits.push({ term: item.term, count, weight: item.weight });
+    score += count * item.weight;
+  }
+  for (const item of FORMULAIC_PATTERNS) {
+    const matches = text.match(item.pattern);
+    if (!matches?.length) continue;
+    hits.push({ term: item.label, count: matches.length, weight: item.weight });
+    score += matches.length * item.weight;
+  }
+
+  // 章末总结句单独加权：它替读者下结论，是最容易被察觉的机械感来源。
+  const tail = text.replace(/\s+/gu, "").slice(-140);
+  const endingCliche = FORMULAIC_ENDING.test(tail) ? tail.slice(-60) : "";
+  if (endingCliche) {
+    hits.push({ term: "章末总结句", count: 1, weight: 3 });
+    score += 3;
+  }
+
+  hits.sort(
+    (left, right) =>
+      right.count * right.weight - left.count * left.weight,
+  );
+  const perKilo = chars ? (score / chars) * 1000 : 0;
+  return {
+    chars,
+    score,
+    perKilo,
+    hits,
+    endingCliche,
+    // 阈值偏保守：每千字 1.5 分且至少 3 种表现才认为成问题，避免误伤正常用词。
+    shouldRewrite: perKilo >= 1.5 && hits.length >= 3,
+  };
+}
+
+export function formulaicPassageSuspicion(
+  chapterText: string,
+): ContinuityIssue[] {
+  const report = analyzeFormulaicPassage(chapterText);
+  if (!report.shouldRewrite) return [];
+
+  const terms = report.hits
+    .slice(0, 6)
+    .map((hit) => `${hit.term}×${hit.count}`)
+    .join("、");
+  return [
+    {
+      severity: "warning",
+      type: "文风套话",
+      evidence: report.hits
+        .slice(0, 5)
+        .map((hit) => hit.term)
+        .join("、"),
+      detail: `本章套话密度偏高：${terms}（每千字约 ${report.perKilo.toFixed(1)} 处${
+        report.endingCliche ? "，并含章末总结句" : ""
+      }）。建议删掉解释情绪的副词和生理反应，改用具体动作、对话或环境细节承载情绪；同一情绪不要重复用同一个动作。`,
     },
   ];
 }

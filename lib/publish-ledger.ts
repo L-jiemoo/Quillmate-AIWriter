@@ -124,6 +124,34 @@ export function removePublishEntry(
   return { version: PUBLISH_LEDGER_VERSION, records, updatedAt: nowIso() };
 }
 
+// 批量人工标记：一次算完整批结果，调用方只需写一次台账，
+// 避免几十章「全部标记」时反复读盘/写盘。
+export function applyPublishStates(
+  ledger: PublishLedger,
+  input: {
+    bookId: string;
+    bookName: string;
+    chapters: number[];
+    published: boolean;
+  },
+): PublishLedger {
+  let next = ledger;
+  for (const chapter of input.chapters) {
+    next = input.published
+      ? upsertPublishEntry(next, {
+          platform: "fanqie",
+          bookId: input.bookId.trim(),
+          bookName: input.bookName.trim(),
+          chapter,
+          status: "published",
+          at: nowIso(),
+          message: "人工确认已发布",
+        })
+      : removePublishEntry(next, input.bookId, input.bookName, chapter);
+  }
+  return next;
+}
+
 // 旧项目只有发布历史日志；首次读取台账时把“成功且正式发布”的记录迁移过来。
 export function derivePublishLedger(
   history: PublishRecord[],

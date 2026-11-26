@@ -6,6 +6,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import type { ProjectSummary } from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
+import { ProjectFolder } from "./ProjectFolder";
 
 const INITIAL_FORM = {
   title: "",
@@ -134,29 +135,33 @@ export function Dashboard({ initialProjects }: { initialProjects: ProjectSummary
                   : 0;
                 return (
                   <article key={project.slug} className="project-card">
-                    <Link href={`/projects/${project.slug}`} className="project-card-link">
-                      <div className="project-top">
-                        <h3 className="project-title">{project.title}</h3>
-                        <span className="chip">{project.genre}</span>
-                      </div>
-                      <div className="project-tags">
-                        <span className="tag">{project.tone}</span>
-                        <span className="tag">
-                          {project.written}/{project.planned || "?"} 章
-                        </span>
-                        <span className="tag">{project.words.toLocaleString("zh-CN")} 字</span>
-                      </div>
-                      <div className="progress">
-                        <span style={{ width: `${progress}%` }} />
-                      </div>
-                      <div className="project-foot">
-                        <span className="muted small">
-                          更新于{" "}
-                          {new Date(project.updatedAt).toLocaleString("zh-CN", { hour12: false })}
-                        </span>
-                        <span className="project-open">打开工作台</span>
-                      </div>
-                    </Link>
+                    <div className="project-row">
+                      <ProjectFolder
+                        uid={project.slug}
+                        label={`打开作品《${project.title}》工作台`}
+                        href={`/projects/${project.slug}`}
+                      />
+                      <Link href={`/projects/${project.slug}`} className="project-card-link">
+                        <div className="project-top">
+                          <h3 className="project-title">{project.title}</h3>
+                          <span className="chip">{project.genre}</span>
+                        </div>
+                        <p className="project-meta muted small">
+                          {project.tone} · {project.written}/{project.planned || "?"} 章 ·{" "}
+                          {project.words.toLocaleString("zh-CN")} 字
+                        </p>
+                        <div className="progress">
+                          <span style={{ width: `${progress}%` }} />
+                        </div>
+                        <div className="project-foot">
+                          <span className="muted small">
+                            更新于{" "}
+                            {new Date(project.updatedAt).toLocaleString("zh-CN", { hour12: false })}
+                          </span>
+                          <span className="project-open">打开工作台</span>
+                        </div>
+                      </Link>
+                    </div>
                     <div className="project-tools">
                       <button
                         type="button"

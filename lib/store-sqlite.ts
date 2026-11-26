@@ -12,7 +12,11 @@ import {
   planEntriesForChapters,
 } from "./plan-ledger";
 import { normalizeStory } from "./story";
-import { derivePublishLedger, removePublishEntry, upsertPublishEntry } from "./publish-ledger";
+import {
+  applyPublishStates,
+  derivePublishLedger,
+  upsertPublishEntry,
+} from "./publish-ledger";
 import {
   appendChapterOutline,
   checkPlanOutlineConsistency,
@@ -21,12 +25,15 @@ import {
 } from "./plan-consistency";
 import { assertValidChapterPlans } from "./plan-validation";
 import {
+  backupFile,
   readJsonStrict,
   readTextOptional,
   readTextStrict,
   StorageError,
   writeJsonSafe,
 } from "./storage";
+import { assertDeletableChapter, buildChapterDeletion } from "./chapter-deletion";
+import { removeRepairDecisionsForChapter } from "./repair-decision";
 import {
   CHAPTER_VERSION_SOURCES,
   characterFingerprint,
@@ -55,6 +62,7 @@ import type {
   AuditReport,
   CommitArchitectureResult,
   CreateProjectInput,
+  DeleteChapterResult,
   FixPlanConsistencyResult,
   IntegrityIssue,
   IntegrityReport,
@@ -1051,6 +1059,7 @@ export async function saveChapter(
   index: number,
   content: string,
   title?: string,
+  options: { source?: "user" | "ai-polish"; note?: string } = {},
 ): Promise<ChapterContent> {
   if (!Number.isInteger(index) || index < 1) throw new Error("章节序号不合法");
 
@@ -1060,10 +1069,10 @@ export async function saveChapter(
 
   const nextTitle = title && title.trim() ? title.trim() : chapter.title;
   await writeChapterFile(slug, index, content, {
-    source: "user",
+    source: options.source ?? "user",
     title: nextTitle,
     summary: chapter.summary,
-    note: "手动保存",
+    note: options.note ?? "手动保存",
   });
   if (nextTitle !== chapter.title) {
     repo.updateChapterTitle(slug, index, nextTitle);
@@ -1088,6 +1097,106 @@ export async function saveChapter(
     words: countWords(content),
     written: true,
   };
+}
+
+// 只允许删除最后一章：它不参与后续章节编号，删除后不需要迁移其他章节的正文和台账。
+export async function deleteChapter(
+  slug: string,
+  index: number,
+): Promise<DeleteChapterResult> {
+  if (!Number.isInteger(index) || index < 1) throw new Error("章节序号不合法");
+  const file = repo.getProjectFile(slug);
+  const plan = repo.getPlan(slug);
+  assertDeletableChapter(plan, index);
+
+  const ledger = await getPublishLedger(slug);
+  const published = Object.values(ledger.records).filter(
+    (entry) => entry.platform === "fanqie" && entry.chapter === index,
+  );
+  if (published.length) {
+    const status = published.some((entry) => entry.status === "published")
+      ? "已发布"
+      : "待人工确认";
+    throw new Error(
+      `第 ${index} 章存在番茄发布记录（${status}），请先在「发布」页处理后再删除`,
+    );
+  }
+
+  const state = repo.getState(slug);
+  const canon = repo.getCanon(slug);
+  const memory = normalizeMemory(repo.getMemory(slug));
+  const hasMemory =
+    Object.keys(memory.chapters).length > 0 ||
+    memory.volumes.length > 0 ||
+    memory.book.source === "manual";
+  const story = normalizeStory(repo.getStory(slug));
+  const hasStory =
+    story.states.length > 0 ||
+    story.relations.length > 0 ||
+    story.events.length > 0 ||
+    story.foreshadows.length > 0 ||
+    story.suppressedIds.length > 0;
+  const planLedger = repo.getPlanLedger(slug);
+  const outlineMd = await readText(projectFile(slug, "outline.md"));
+
+  const at = nowIso();
+  const result = buildChapterDeletion({
+    plan,
+    state,
+    canon,
+    memory: hasMemory ? memory : null,
+    story: hasStory ? story : null,
+    planLedger,
+    outlineMd,
+    index,
+    updatedAt: at,
+  });
+
+  const chapterFile = await chapterPath(slug, index);
+  await backupFile(chapterFile, projectBackup(slug, `chapters/${index}.md`));
+  await removeRepairDecisionsForChapter(slug, index);
+  // 大纲是文件而不是数据库行：先写大纲，失败时数据库保持原样，章节仍可由「补全大纲」恢复。
+  if (result.outlineMd !== outlineMd) {
+    await writeText(
+      projectFile(slug, "outline.md"),
+      textWithNewline(result.outlineMd),
+      projectBackup(slug, "outline.md"),
+    );
+  }
+  repo.deleteChapterRecords(slug, index, {
+    plan: result.plan,
+    canon: result.canon,
+    memory: result.memory,
+    story: result.story,
+    planLedger: result.planLedger,
+    at,
+  });
+
+  await fs.rm(chapterFile, { force: true });
+  await fs.rm(versionDir(slug, index), { recursive: true, force: true });
+  await removeChapterDraftFiles(slug, index);
+
+  return { deleted: index, remainingChapters: result.plan.chapters.length };
+}
+
+async function removeChapterDraftFiles(
+  slug: string,
+  index: number,
+): Promise<void> {
+  const dir = projectFile(slug, "drafts");
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return;
+  }
+  const prefix = `${index}-`;
+  await Promise.all(
+    entries
+      .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".md"))
+      .map((entry) => fs.rm(path.join(dir, entry), { force: true })),
+  );
 }
 
 export async function buildBookText(slug: string): Promise<{
@@ -1232,18 +1341,16 @@ export async function resolvePublishOutcome(
   slug: string,
   input: { bookId: string; bookName: string; chapter: number; published: boolean },
 ): Promise<PublishLedger> {
+  return resolvePublishOutcomes(slug, { ...input, chapters: [input.chapter] });
+}
+
+// 批量版：几十章一起标记时只写一次台账。
+export async function resolvePublishOutcomes(
+  slug: string,
+  input: { bookId: string; bookName: string; chapters: number[]; published: boolean },
+): Promise<PublishLedger> {
   const ledger = await getPublishLedger(slug);
-  const next = input.published
-    ? upsertPublishEntry(ledger, {
-        platform: "fanqie",
-        bookId: input.bookId.trim(),
-        bookName: input.bookName.trim(),
-        chapter: input.chapter,
-        status: "published",
-        at: nowIso(),
-        message: "人工确认已发布",
-      })
-    : removePublishEntry(ledger, input.bookId, input.bookName, input.chapter);
+  const next = applyPublishStates(ledger, input);
   repo.replacePublishLedger(slug, next);
   return next;
 }

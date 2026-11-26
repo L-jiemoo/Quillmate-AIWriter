@@ -19,6 +19,8 @@ import type { Job, JobLog, JobParams, JobStatus } from "./types";
 const JOB_TYPES = [
   "plan",
   "extend",
+  "wrapup",
+  "foreshadow",
   "write",
   "finale",
   "rewrite",
@@ -101,6 +103,10 @@ function normalizeParams(input: unknown): JobParams {
     params.instruction = record.instruction.slice(0, 500);
   }
   if (typeof record.useReview === "boolean") params.useReview = record.useReview;
+  if (typeof record.wrapUpBrief === "string") {
+    const brief = record.wrapUpBrief.trim().slice(0, 2000);
+    if (brief) params.wrapUpBrief = brief;
+  }
   if (typeof record.decisionId === "string" && record.decisionId.trim()) {
     params.decisionId = record.decisionId.trim();
   }
@@ -573,10 +579,17 @@ export function getActiveJob(slug: string): Job | undefined {
   return job && activeStatus(job.status) ? job : undefined;
 }
 
+// 只回放“最后一次尝试本身就是中断”的任务：
+// 中断之后只要又跑过别的任务，说明用户已经继续工作，旧记录不再反复占用 AI 输出窗口。
 export function getInterruptedJobs(slug: string): Job[] {
-  return persistence()
-    .readAll()
-    .filter((job) => job.slug === slug && job.status === "interrupted")
+  const scoped = persistence().readAll().filter((job) => job.slug === slug);
+  if (!scoped.length) return [];
+  const newest = scoped.reduce((latest, job) =>
+    job.createdAt > latest.createdAt ? job : latest,
+  );
+  if (newest.status !== "interrupted") return [];
+  return scoped
+    .filter((job) => job.status === "interrupted" && job.createdAt === newest.createdAt)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 

@@ -21,6 +21,8 @@ const STATUS_FACE: Record<BuddyMood, BuddyFace> = {
 const JOB_FACE: Record<Job["type"], BuddyFace> = {
   plan: { emoji: "📐", label: "正在搭故事框架" },
   extend: { emoji: "🧩", label: "正在补大纲" },
+  wrapup: { emoji: "🎬", label: "正在排收尾大纲" },
+  foreshadow: { emoji: "🧵", label: "正在分类伏笔" },
   write: { emoji: "✍️", label: "正在写章节" },
   finale: { emoji: "🏁", label: "正在写完结章" },
   rewrite: { emoji: "🪄", label: "正在重写" },

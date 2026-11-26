@@ -17,6 +17,7 @@ export type {
   AuditReport,
   CommitArchitectureResult,
   CreateProjectInput,
+  DeleteChapterResult,
   FixPlanConsistencyResult,
   IntegrityIssue,
   IntegrityReport,
@@ -213,6 +214,12 @@ export async function saveChapter(
   return (await backend()).saveChapter(...args);
 }
 
+export async function deleteChapter(
+  ...args: Parameters<StoreModule["deleteChapter"]>
+): ReturnType<StoreModule["deleteChapter"]> {
+  return (await backend()).deleteChapter(...args);
+}
+
 export async function buildBookText(
   ...args: Parameters<StoreModule["buildBookText"]>
 ): ReturnType<StoreModule["buildBookText"]> {
@@ -271,6 +278,12 @@ export async function resolvePublishOutcome(
   ...args: Parameters<StoreModule["resolvePublishOutcome"]>
 ): ReturnType<StoreModule["resolvePublishOutcome"]> {
   return (await backend()).resolvePublishOutcome(...args);
+}
+
+export async function resolvePublishOutcomes(
+  ...args: Parameters<StoreModule["resolvePublishOutcomes"]>
+): ReturnType<StoreModule["resolvePublishOutcomes"]> {
+  return (await backend()).resolvePublishOutcomes(...args);
 }
 
 export async function checkProjectIntegrity(

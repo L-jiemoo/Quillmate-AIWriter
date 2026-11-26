@@ -1,12 +1,17 @@
 export type PromptAgent =
   | "architect"
   | "extend-plan"
+  | "wrapup-plan"
+  | "foreshadow-classify"
   | "title-repair"
   | "character-designer"
   | "writer"
   | "fact-extractor"
   | "auditor"
-  | "repair-editor";
+  | "repair-editor"
+  | "character-naming"
+  | "character-design"
+  | "prose-style";
 
 export interface PromptCatalogEntry {
   label: string;
@@ -26,6 +31,16 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
     version: "2026.11.20-p9",
     description: "在既有大纲后续排新章节，并同步登记计划台账。",
   },
+  "wrapup-plan": {
+    label: "收尾大纲",
+    version: "2026.11.24-w1",
+    description: "按作者收尾要求逐条安排未回收伏笔的回收章节，收束支线并为完结章铺路。",
+  },
+  "foreshadow-classify": {
+    label: "伏笔自动分类",
+    version: "2026.11.24-f1",
+    description: "对照正文摘要判断每条伏笔是否已回收，只对高置信且有证据的结论改状态。",
+  },
   "title-repair": {
     label: "章节改名",
     version: "2026.11.18-p7",
@@ -38,7 +53,7 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   writer: {
     label: "写作",
-    version: "2026.11.23-p13",
+    version: "2026.11.24-p16",
     description: "续写或重写章节正文，并区分计划、事实与实际剧情。",
   },
   "fact-extractor": {
@@ -48,13 +63,28 @@ export const PROMPT_CATALOG: Record<PromptAgent, PromptCatalogEntry> = {
   },
   auditor: {
     label: "连续性与质量审校",
-    version: "2026.11.23-p15",
+    version: "2026.11.24-p16",
     description: "检查人物、时间线、规则、因果、伏笔、计划和物品/关系漂移。",
   },
   "repair-editor": {
     label: "定点修复",
     version: "2026.11.23-p14",
     description: "只修改与审校问题直接相关的正文段落。",
+  },
+  "character-naming": {
+    label: "人物命名",
+    version: "2026.11.24-s1",
+    description: "按项目背景生成候选姓名，做重名、近音、形近和风格筛查。",
+  },
+  "character-design": {
+    label: "人物塑造",
+    version: "2026.11.24-s1",
+    description: "基于人物档案、关系图与台账补全人物内在设定并做一致性检查。",
+  },
+  "prose-style": {
+    label: "文风优化",
+    version: "2026.11.24-s2",
+    description: "在不改变事实的前提下优化句式、描写、对话与节奏。",
   },
 };
 

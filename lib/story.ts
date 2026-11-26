@@ -1,5 +1,6 @@
 import { canonForChapter } from "./canon";
 import { buildEffectiveMemory, estimateTokens } from "./memory";
+import { isForeshadowOverdue } from "./plan-view";
 import { nowIso } from "./utils";
 import type {
   CanonCharacterStatus,
@@ -1107,6 +1108,70 @@ export function applyChapterStory(
   return normalizeStory(ledger);
 }
 
+// 删除章节后清理该章的状态、关系、事件和伏笔记录；只在该章完成的伏笔回收回退为待回收。
+export function dropChapterStory(
+  story: StoryLedger,
+  chapter: number,
+  updatedAt = nowIso(),
+): StoryLedger {
+  const removedEvents = story.events.filter((event) => event.chapter === chapter);
+  const removedEventIds = new Set(removedEvents.map((event) => event.id));
+  const droppedIds = [
+    ...story.states.filter((state) => state.chapter === chapter).map((state) => state.id),
+    ...story.relations
+      .filter((relation) => relation.chapter === chapter)
+      .map((relation) => relation.id),
+    ...removedEvents.map((event) => event.id),
+    ...story.foreshadows
+      .filter((foreshadow) => foreshadow.plantedChapter === chapter)
+      .map((foreshadow) => foreshadow.id),
+  ];
+
+  const states = story.states
+    .filter((state) => state.chapter !== chapter)
+    .map((state) => ({
+      ...state,
+      eventIds: state.eventIds.filter((id) => !removedEventIds.has(id)),
+    }));
+  const relations = story.relations
+    .filter((relation) => relation.chapter !== chapter)
+    .map((relation) => ({
+      ...relation,
+      eventIds: relation.eventIds.filter((id) => !removedEventIds.has(id)),
+    }));
+  const events = story.events
+    .filter((event) => event.chapter !== chapter)
+    .map((event) => ({
+      ...event,
+      relatedEventIds: event.relatedEventIds.filter((id) => !removedEventIds.has(id)),
+    }));
+  const foreshadows = story.foreshadows
+    .filter((foreshadow) => foreshadow.plantedChapter !== chapter)
+    .map((foreshadow) => ({
+      ...foreshadow,
+      eventIds: foreshadow.eventIds.filter((id) => !removedEventIds.has(id)),
+      ...(foreshadow.resolvedChapter === chapter
+        ? {
+            status: "pending" as const,
+            resolution: "",
+            resolvedChapter: 0,
+            resolutionCandidate: "",
+          }
+        : {}),
+    }));
+
+  return normalizeStory({
+    ...story,
+    states,
+    relations,
+    events,
+    foreshadows,
+    // 记录被删除的 ID，避免之后从摘要或记忆重新 seed 时又补回已删章节的内容。
+    suppressedIds: [...new Set([...story.suppressedIds, ...droppedIds])],
+    updatedAt,
+  });
+}
+
 export function characterStatesAt(
   ledger: StoryLedger,
   chapter: number,
@@ -1170,17 +1235,8 @@ export function foreshadowsAt(
   return ledger.foreshadows.filter((item) => item.plantedChapter <= chapter);
 }
 
-export function isForeshadowOverdue(
-  record: ForeshadowRecord,
-  latestChapter: number,
-): boolean {
-  return (
-    record.expectedEndChapter > 0 &&
-    latestChapter > record.expectedEndChapter &&
-    record.status !== "resolved" &&
-    record.status !== "abandoned"
-  );
-}
+// 实现放在 plan-view，客户端组件可以直接用而不把 node:crypto 带进浏览器包。
+export { isForeshadowOverdue };
 
 export function storyStats(detail: ProjectDetail, ledger: StoryLedger): StoryStatsView {
   const latest = latestWrittenChapter(detail);

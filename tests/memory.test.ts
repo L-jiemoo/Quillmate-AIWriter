@@ -209,6 +209,24 @@ describe("分层记忆解析与聚合", () => {
     expect(collectOpenForeshadows(memory, 4)).toEqual([]);
   });
 
+  it("区分本次注入条数与记忆中真实的未回收总数", () => {
+    const detail = fixture();
+    const memory = buildEffectiveMemory(detail, null);
+    memory.chapters["1"].source = "ai";
+    memory.chapters["1"].foreshadowsPlanted = Array.from(
+      { length: 15 },
+      (_, index) => `伏笔线索${index + 1}`,
+    );
+
+    const retrieval = buildMemoryContext(detail, detail.plan.chapters[3], memory, {
+      recentWindow: 0,
+    });
+
+    // 注入有 12 条上限，但日志要能说出真实还有多少条。
+    expect(retrieval.openForeshadows).toHaveLength(12);
+    expect(retrieval.openForeshadowTotal).toBe(15);
+  });
+
   it("旧项目 summary 记忆中的大纲伏笔不会被当成实际埋设", () => {
     const detail = fixture();
     const memory = buildEffectiveMemory(detail, null);

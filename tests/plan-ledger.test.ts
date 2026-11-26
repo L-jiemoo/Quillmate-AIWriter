@@ -4,8 +4,11 @@ import {
   assertValidPlanLedger,
   derivePlanLedger,
   formatPlanContext,
+  mergeStoryForeshadowsIntoPlan,
   normalizePlanLedger,
+  planForeshadowResolutions,
   reconcileChapterPlan,
+  removePlanLedgerEntry,
   sanitizeGeneratedPlanLedger,
 } from "@/lib/plan-ledger";
 import type {
@@ -68,20 +71,20 @@ function baseLedger(): PlanLedger {
     events: [
       {
         id: "plan-event-1",
-        name: "发现玉佩",
+        name: "发现测试物品",
         chapter: 1,
         participants: ["角色甲"],
-        process: "角色甲在客栈发现玉佩",
+        process: "角色甲发现测试物品",
         expectedResult: "得到关键线索",
       },
     ],
     foreshadows: [
       {
         id: "plan-foreshadow-1",
-        text: "玉佩的秘密",
+        text: "测试伏笔乙",
         plantChapter: 1,
         resolveChapter: 3,
-        purpose: "引出旧案",
+        purpose: "引出测试案件",
       },
     ],
     updatedAt: AT,
@@ -147,7 +150,7 @@ describe("计划台账模型", () => {
   it("旧大纲迁移只生成 planned，不产生实际埋设章节", () => {
     const ledger = derivePlanLedger(
       plan(),
-      "- 伏笔：玉佩的秘密（第1章埋，第3章回收）。",
+      "- 伏笔：测试伏笔乙（第1章埋，第3章回收）。",
     );
     expect(ledger.foreshadows).toHaveLength(1);
     expect(ledger.foreshadows[0]).toMatchObject({
@@ -173,11 +176,165 @@ describe("计划台账模型", () => {
   });
 });
 
+describe("伏笔回收调度", () => {
+  function openLedger(items: Array<Record<string, unknown>>): PlanLedger {
+    const ledger = normalizePlanLedger({ foreshadows: items });
+    for (const item of ledger.foreshadows) item.actualPlantChapter = item.plantChapter;
+    return ledger;
+  }
+
+  it("剩余篇幅不足 3 章时强制本章回收", () => {
+    const slots = planForeshadowResolutions(
+      openLedger([{ id: "f1", text: "测试伏笔丙", plantChapter: 1, resolveChapter: 0 }]),
+      10,
+      12,
+    );
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({
+      urgency: "must",
+      suggestedResolveChapter: 10,
+      remainingChapters: 3,
+      overdue: false,
+    });
+  });
+
+  it("篇幅充足时给出回收窗口且不挤占结尾，同章会错开", () => {
+    const ledger = openLedger([
+      { id: "f1", text: "测试伏笔戊", plantChapter: 1, resolveChapter: 0 },
+      {
+        id: "f2",
+        text: "测试伏笔己",
+        plantChapter: 1,
+        resolveChapter: 0,
+        resolveCondition: "测试条件",
+      },
+    ]);
+    const slots = planForeshadowResolutions(ledger, 2, 20);
+    expect(slots).toHaveLength(2);
+    for (const slot of slots) {
+      expect(slot.urgency).toBe("later");
+      expect(slot.suggestedResolveChapter).toBeGreaterThan(2);
+      expect(slot.suggestedResolveChapter).toBeLessThanOrEqual(19);
+    }
+    expect(new Set(slots.map((slot) => slot.suggestedResolveChapter)).size).toBe(2);
+  });
+
+  it("本章新埋的伏笔不会被要求同章回收", () => {
+    const ledger = normalizePlanLedger({
+      foreshadows: [{ id: "f1", text: "测试伏笔壬", plantChapter: 10, resolveChapter: 0 }],
+    });
+    const slots = planForeshadowResolutions(ledger, 10, 12);
+    expect(slots[0]).toMatchObject({ urgency: "soon", suggestedResolveChapter: 11 });
+  });
+
+  it("逾期未回收的伏笔优先本章收束", () => {
+    const slots = planForeshadowResolutions(
+      openLedger([{ id: "f1", text: "测试伏笔辛", plantChapter: 1, resolveChapter: 4 }]),
+      8,
+      20,
+    );
+    expect(slots[0]).toMatchObject({
+      urgency: "must",
+      overdue: true,
+      plannedResolveChapter: 4,
+      suggestedResolveChapter: 8,
+    });
+  });
+
+  it("已排期但尚未到期的伏笔不重复催促", () => {
+    const slots = planForeshadowResolutions(
+      openLedger([{ id: "f1", text: "测试物品", plantChapter: 1, resolveChapter: 8 }]),
+      5,
+      12,
+    );
+    expect(slots).toHaveLength(0);
+  });
+
+  it("从未埋设的偏离伏笔不进入回收调度", () => {
+    const ledger = normalizePlanLedger({
+      foreshadows: [
+        { id: "f1", text: "测试线索", plantChapter: 1, resolveChapter: 0, status: "deviated" },
+      ],
+    });
+    expect(planForeshadowResolutions(ledger, 5, 12)).toHaveLength(0);
+  });
+
+  it("章节计划上下文会带上回收调度", () => {
+    const ledger = openLedger([
+      { id: "f1", text: "测试伏笔庚", plantChapter: 1, resolveChapter: 0 },
+    ]);
+    const text = formatPlanContext(ledger, plan().chapters[1], { totalChapters: 8 });
+    expect(text).toContain("未排期伏笔回收调度");
+    expect(text).toContain("测试伏笔庚");
+  });
+});
+
+describe("计划台账手动清理", () => {
+  it("删除计划伏笔会连同偏离记录一起清掉", () => {
+    const ledger = normalizePlanLedger({
+      foreshadows: [{ id: "f1", text: "测试伏笔甲", plantChapter: 1, resolveChapter: 2 }],
+      deviations: [
+        {
+          id: "d1",
+          planType: "foreshadow",
+          planId: "f1",
+          chapter: 2,
+          expected: "回收",
+          actual: "未回收",
+          reason: "正文没写",
+          at: AT,
+        },
+      ],
+    });
+    const next = removePlanLedgerEntry(ledger, "foreshadow", "f1");
+    expect(next.foreshadows).toHaveLength(0);
+    expect(next.deviations).toHaveLength(0);
+  });
+
+  it("删除计划事件会清掉其它计划里的断裂引用", () => {
+    const ledger = normalizePlanLedger({
+      events: [{ id: "e1", name: "发现测试物品", chapter: 1 }],
+      foreshadows: [
+        { id: "f1", text: "测试伏笔甲", plantChapter: 1, resolveChapter: 0, eventIds: ["e1"] },
+      ],
+    });
+    const next = removePlanLedgerEntry(ledger, "event", "e1");
+    expect(next.events).toHaveLength(0);
+    expect(next.foreshadows[0].eventIds).toEqual([]);
+  });
+});
+
+describe("剧情台账补登计划伏笔", () => {
+  it("补登未回收伏笔，跳过已回收与重复项", () => {
+    const ledger = normalizePlanLedger({
+      foreshadows: [{ id: "f1", text: "测试伏笔甲", plantChapter: 2, resolveChapter: 0 }],
+    });
+    const result = mergeStoryForeshadowsIntoPlan(ledger, [
+      { id: "s1", text: "测试伏笔甲", plantedChapter: 2, status: "developing" },
+      { id: "s2", text: "测试伏笔丙", plantedChapter: 3, status: "pending" },
+      { id: "s3", text: "已经收掉的线索", plantedChapter: 4, status: "resolved" },
+      { id: "s4", text: "作者放弃的线索", plantedChapter: 5, status: "abandoned" },
+    ]);
+
+    expect(result.added).toHaveLength(1);
+    expect(result.added[0]).toMatchObject({
+      id: "plan-story-s2",
+      text: "测试伏笔丙",
+      plantChapter: 3,
+      resolveChapter: 0,
+      status: "partially_realized",
+      actualPlantChapter: 3,
+      actualResolveChapter: 0,
+    });
+    expect(result.ledger.foreshadows).toHaveLength(2);
+  });
+});
+
 describe("事实台账冲突保护", () => {
   const base = canon({
     items: [
       {
-        name: "玉佩",
+        name: "测试物品",
         aliases: [],
         holder: "角色甲",
         state: "完整",
@@ -193,7 +350,7 @@ describe("事实台账冲突保护", () => {
       summary: "角色乙出现。",
       characters: [],
       items: [
-        { name: "玉佩", aliases: [], holder, state: "完整", note: "", evidence },
+        { name: "测试物品", aliases: [], holder, state: "完整", note: "", evidence },
       ],
       timeline: null,
       rules: [],
@@ -209,7 +366,7 @@ describe("事实台账冲突保护", () => {
   it("证据同时点名物品和新持有人时才允许转移", () => {
     const result = mergeCanon(
       base,
-      extracted("角色乙", "角色乙从角色甲手中拿走玉佩。"),
+      extracted("角色乙", "角色乙从角色甲手中拿走测试物品。"),
       2,
       "write",
     );
@@ -224,19 +381,19 @@ describe("章节完成后的计划对账", () => {
       ledger: baseLedger(),
       chapter: 1,
       chapterMemory: memory({
-        summary: "角色甲在客栈发现玉佩，得到旧案线索。",
-        events: ["角色甲在客栈发现玉佩"],
+        summary: "本章完成测试物品的发现。",
+        events: [],
       }),
       storyEvents: [
         {
           id: "evt-1-1",
-          name: "角色甲在客栈发现玉佩",
+          name: "角色甲发现测试物品",
           chapter: 1,
           time: "",
-          location: "客栈",
+          location: "测试场景",
           participants: ["角色甲"],
           cause: "",
-          process: "角色甲在客栈发现玉佩，得到旧案线索。",
+          process: "角色甲发现测试物品，得到测试线索。",
           result: "",
           impact: "",
           relatedEventIds: [],
@@ -251,7 +408,7 @@ describe("章节完成后的计划对账", () => {
     expect(event.status).toBe("realized");
     expect(event.actualChapter).toBe(1);
     expect(event.actualEventIds).toEqual(["evt-1-1"]);
-    expect(event.evidence).toContain("发现玉佩");
+    expect(event.evidence).toContain("发现测试物品");
   });
 
   it("正文没有对应事件时标记偏离，并记录偏离原因", () => {
@@ -274,7 +431,7 @@ describe("章节完成后的计划对账", () => {
     const result = reconcileChapterPlan({
       ledger: baseLedger(),
       chapter: 1,
-      chapterMemory: memory({ summary: "角色甲在客栈休息。" }),
+      chapterMemory: memory({ summary: "角色甲在测试场景休息。" }),
       canon: canon(),
     });
     const foreshadow = result.ledger.foreshadows[0];
@@ -288,15 +445,38 @@ describe("章节完成后的计划对账", () => {
       ledger: baseLedger(),
       chapter: 1,
       chapterMemory: memory({
-        summary: "角色甲发现玉佩背面的刻字。",
-        foreshadowsPlanted: ["玉佩的秘密"],
+        summary: "角色甲发现测试物品背面的刻字。",
+        foreshadowsPlanted: ["测试伏笔乙"],
       }),
       canon: canon(),
     });
     const foreshadow = result.ledger.foreshadows[0];
     expect(foreshadow.actualPlantChapter).toBe(1);
-    expect(foreshadow.evidence).toContain("玉佩的秘密");
+    expect(foreshadow.evidence).toContain("测试伏笔乙");
     expect(foreshadow.status).not.toBe("deviated");
+  });
+
+  it("正文自行回收未排期伏笔时回填计划回收章", () => {
+    const ledger = normalizePlanLedger({
+      foreshadows: [
+        { id: "f1", text: "测试伏笔丙", plantChapter: 1, resolveChapter: 0 },
+      ],
+    });
+    ledger.foreshadows[0].actualPlantChapter = 1;
+    const result = reconcileChapterPlan({
+      ledger,
+      chapter: 6,
+      chapterMemory: memory({
+        index: 6,
+        summary: "角色甲把测试物件插回测试容器，测试痕迹与测试案件记录对上了。",
+        foreshadowsResolved: ["测试伏笔丙"],
+      }),
+      canon: canon(),
+    });
+    const foreshadow = result.ledger.foreshadows[0];
+    expect(foreshadow.resolveChapter).toBe(6);
+    expect(foreshadow.actualResolveChapter).toBe(6);
+    expect(foreshadow.status).toBe("realized");
   });
 
   it("到达计划回收章节但没有回收证据时不能标记已回收", () => {

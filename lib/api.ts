@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { StorageError } from "./storage";
+import { SkillError } from "./skills/types";
 import { errorMessage, isSafeSlug } from "./utils";
 
 const MAX_JSON_BYTES = 5 * 1024 * 1024;
@@ -108,6 +109,12 @@ export function apiError(error: unknown, fallbackStatus = 400): NextResponse {
   if (error instanceof StorageError) {
     const mapped = storageMessage(error);
     return NextResponse.json({ error: mapped.message }, { status: mapped.status });
+  }
+  if (error instanceof SkillError) {
+    return NextResponse.json(
+      { error: redactSecrets(error.message), code: error.code },
+      { status: error.status },
+    );
   }
 
   const message = redactSecrets(errorMessage(error)).trim() || "操作失败";

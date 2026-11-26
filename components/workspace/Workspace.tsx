@@ -11,7 +11,9 @@ import { ContinuityTab } from "./ContinuityTab";
 import { JobPanel } from "./JobPanel";
 import { MemoryTab } from "./MemoryTab";
 import { OverviewTab } from "./OverviewTab";
+import { PlanTab } from "./PlanTab";
 import { PublishTab } from "./PublishTab";
+import { SkillsTab } from "./SkillsTab";
 import { StoryTab } from "./StoryTab";
 
 type TabKey =
@@ -21,7 +23,9 @@ type TabKey =
   | "continuity"
   | "memory"
   | "story"
-  | "publish";
+  | "plan"
+  | "publish"
+  | "skills";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "总览" },
@@ -30,7 +34,15 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "continuity", label: "连续性" },
   { key: "memory", label: "记忆" },
   { key: "story", label: "剧情台账" },
+  { key: "plan", label: "计划台账" },
   { key: "publish", label: "发布" },
+  { key: "skills", label: "技能" },
+];
+
+const TAB_GROUPS: { label: string; keys: TabKey[] }[] = [
+  { label: "创作", keys: ["overview", "characters", "chapters"] },
+  { label: "连续性", keys: ["continuity", "memory", "story", "plan"] },
+  { label: "交付", keys: ["publish", "skills"] },
 ];
 
 function isTerminalStatus(status: Job["status"]): boolean {
@@ -341,16 +353,24 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
             <span>返回作品库</span>
           </Link>
           <span className="workspace-nav-label">稿房目录</span>
-          {TABS.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={`workspace-nav-item ${tab === item.key ? "active" : ""}`}
-              aria-current={tab === item.key ? "page" : undefined}
-              onClick={() => setTab(item.key)}
-            >
-              <span>{item.label}</span>
-            </button>
+          {TAB_GROUPS.map((group) => (
+            <div className="workspace-nav-group" key={group.label}>
+              <span className="workspace-nav-group-label">{group.label}</span>
+              {group.keys.map((key) => {
+                const item = TABS.find((candidate) => candidate.key === key)!;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    className={`workspace-nav-item ${tab === item.key ? "active" : ""}`}
+                    aria-current={tab === item.key ? "page" : undefined}
+                    onClick={() => setTab(item.key)}
+                  >
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
           ))}
           <a
             className={`workspace-buddy mood-${buddy.mood}`}
@@ -414,6 +434,9 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
                 disabled={running}
               />
             ) : null}
+            {tab === "plan" ? (
+              <PlanTab detail={detail} onRefresh={refresh} disabled={running} />
+            ) : null}
             {tab === "publish" ? (
               <PublishTab
                 detail={detail}
@@ -422,6 +445,7 @@ export function Workspace({ initialDetail }: { initialDetail: ProjectDetail }) {
                 disabled={running}
               />
             ) : null}
+            {tab === "skills" ? <SkillsTab detail={detail} /> : null}
           </div>
         </section>
 

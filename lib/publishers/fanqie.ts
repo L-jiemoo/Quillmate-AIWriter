@@ -1,6 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Locator, Page } from "playwright";
 import { ARTIFACT_DIR, BROWSER_PROFILE_DIR, getBrowserChannel } from "../config";
 import { nowIso } from "../utils";
 import type { FanqieSelectors } from "../types";
@@ -8,8 +8,10 @@ import {
   classifyFanqieFailure,
   DEFAULT_SELECTORS,
   hasFanqieAuthCookie,
+  isTypoWarningText,
   mergeFanqieSelectors,
   PublishUncertainError,
+  TYPO_CONTINUE_BUTTON_NAMES,
   validateFanqiePublishRequest,
 } from "./fanqie-core";
 
@@ -187,7 +189,51 @@ const TYPO_DIALOG_SELECTORS = [
   "[role='dialog']",
   ".publish-modal-confirm",
   ".auto-editor-error-modal",
+  // 番茄的错别字提醒有时不带 arco 类名，只挂一个业务 class，
+  // 因此补上遮罩层与业务关键词这两类兜底选择器。
+  ".arco-modal-wrapper",
+  "[class*='typo']",
+  "[class*='spell']",
 ];
+
+// 按钮文案规则集中在 fanqie-core，便于单测覆盖平台改版后的新文案。
+// 只点明确表示“继续/忽略/不修改/仍然提交”的按钮；不使用泛化的“确定/继续”，
+// 否则可能误点“继续编辑”把正文带回编辑器，或误提交发布设置。
+const TYPO_CONTINUE_BUTTONS = TYPO_CONTINUE_BUTTON_NAMES;
+
+// 弹窗被遮罩层挡住时 click 会超时，回退到 DOM 原生 click。
+async function clickIfVisible(locator: Locator): Promise<boolean> {
+  if (!(await locator.count().catch(() => 0))) return false;
+  if (!(await locator.isVisible().catch(() => false))) return false;
+  try {
+    await locator.click({ timeout: 3000 });
+    return true;
+  } catch {
+    try {
+      await locator.evaluate((el) => (el as HTMLElement).click());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function visibleTypoDialogText(page: Page): Promise<string> {
+  for (const selector of TYPO_DIALOG_SELECTORS) {
+    const dialogs = page.locator(selector);
+    const count = await dialogs.count().catch(() => 0);
+    for (let i = 0; i < count; i += 1) {
+      const dialog = dialogs.nth(i);
+      if (!(await dialog.isVisible().catch(() => false))) continue;
+      const text = (await dialog.innerText().catch(() => ""))
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!isTypoWarningText(text)) continue;
+      return text;
+    }
+  }
+  return "";
+}
 
 // 平台的错别字提醒会挡住后续发布设置；只处理明确含“错别字/错字”的弹窗。
 // 其它内容安全提示仍交给人工判断，不能替用户盲点。
@@ -196,17 +242,12 @@ async function dismissTypoWarnings(
   log: LogFn,
   checkCancelled?: () => void,
 ): Promise<number> {
-  // 只点明确表示“继续发布/忽略”的按钮；不使用泛化的“确定”，防止误提交发布设置。
-  const continueButtons = [
-    /仍然?(发布|提交)/,
-    /仍要(发布|提交)/,
-    /继续(发布|提交)?/,
-    /忽略/,
-    /不用修改/,
-  ];
   let dismissed = 0;
-  for (let round = 0; round < 3; round += 1) {
+  for (let round = 0; round < 6; round += 1) {
     checkCancelled?.();
+    const text = await visibleTypoDialogText(page);
+    if (!text) break;
+
     let clicked = false;
     for (const selector of TYPO_DIALOG_SELECTORS) {
       const dialogs = page.locator(selector);
@@ -214,26 +255,44 @@ async function dismissTypoWarnings(
       for (let i = 0; i < count; i += 1) {
         const dialog = dialogs.nth(i);
         if (!(await dialog.isVisible().catch(() => false))) continue;
-        const text = (await dialog.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
-        if (!/错别字|错字/.test(text)) continue;
-        // 发布设置弹窗本身可能显示“错别字 0”统计，绝不能在这里自动点确认。
-        if (/是否使用\s*AI|确认提交/.test(text)) continue;
-        for (const name of continueButtons) {
+        const dialogText = (await dialog.innerText().catch(() => ""))
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!isTypoWarningText(dialogText)) continue;
+        for (const name of TYPO_CONTINUE_BUTTONS) {
           const button = dialog.getByRole("button", { name }).first();
-          if (!(await button.count().catch(() => 0))) continue;
-          if (!(await button.isVisible().catch(() => false))) continue;
-          await button.click().catch(() => undefined);
-          log(`已跳过平台错别字提示：${text.slice(0, 80)}`);
+          if (!(await clickIfVisible(button))) continue;
+          log(`已跳过平台错别字提示（${selector}）：${dialogText.slice(0, 80)}`);
           dismissed += 1;
           clicked = true;
           await page.waitForTimeout(600);
           break;
         }
+        // 个别版本的按钮不带 role，只有 arco-btn 类名，按同一条文案规则再兜一次。
+        if (!clicked) {
+          for (const name of TYPO_CONTINUE_BUTTONS) {
+            const button = dialog
+              .locator("button, [role='button'], .arco-btn")
+              .filter({ hasText: name })
+              .first();
+            if (!(await clickIfVisible(button))) continue;
+            log(`已跳过平台错别字提示（${selector}，文本兜底）：${dialogText.slice(0, 80)}`);
+            dismissed += 1;
+            clicked = true;
+            await page.waitForTimeout(600);
+            break;
+          }
+        }
         if (clicked) break;
       }
       if (clicked) break;
     }
-    if (!clicked) break;
+    // 能看到弹窗却找不到按钮，说明按钮文案超出已知范围：
+    // 留一条日志，比无声空等更容易定位。
+    if (!clicked) {
+      log(`检测到错别字提示但未找到可点的继续按钮：${text.slice(0, 120)}`);
+      break;
+    }
   }
   return dismissed;
 }
@@ -305,9 +364,14 @@ async function submitForReview(
   checkCancelled?: () => void,
 ): Promise<void> {
   checkCancelled?.();
+  // 正文写完后平台可能已经弹出错别字提醒，挡住「下一步」按钮。
+  await dismissTypoWarnings(page, log, checkCancelled);
   await clickFirst(page, selectors.publishButton, "下一步", log);
   await page.waitForTimeout(1500);
   checkCancelled?.();
+  // 点「下一步」后可能立刻弹错别字提醒，先点掉再去找「仅基础检测」，
+  // 否则弹窗会挡住检测选项，导致后续一直等不到发布设置。
+  await dismissTypoWarnings(page, log, checkCancelled);
   await chooseBasicCheck(page, log, checkCancelled);
   await page.waitForTimeout(1200);
   checkCancelled?.();
@@ -408,6 +472,10 @@ async function submitForReview(
   let submitted = false;
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
+    // 确认提交后平台还可能再弹一次错别字提示，这里必须自动点继续，
+    // 否则会白等 20 秒并被判定为“结果不确定”，把整本发布停下来。
+    // 注意此时不再传 checkCancelled：确认后已无法安全中断。
+    if (await dismissTypoWarnings(page, log)) continue;
     const stillOpen = await modal.isVisible().catch(() => false);
     const bodyText = await page.locator("body").innerText().catch(() => "");
     if (!stillOpen || /提交成功|发布成功|已提交|审核中/.test(bodyText)) {
@@ -418,11 +486,14 @@ async function submitForReview(
   }
   if (!submitted) {
     const shot = await snapshot(page, "fanqie-submit-blocked");
+    const stuckTypo = await visibleTypoDialogText(page);
     // 确认按钮已经点过，可能已提交成功也可能被拦截；交给人工核对，不能自动重发。
     throw new PublishUncertainError(
       `第 ${chapterIndex} 章点击确认后无法确认提交结果，可能已被平台拦截或仍在处理${
-        shot ? `（截图：${shot}）` : ""
-      }`,
+        stuckTypo
+          ? `；页面仍停留在错别字提示弹窗，未找到可点的继续按钮（提示内容：${stuckTypo.slice(0, 80)}）`
+          : ""
+      }${shot ? `（截图：${shot}）` : ""}`,
     );
   }
   log(`第 ${chapterIndex} 章已提交发布`);

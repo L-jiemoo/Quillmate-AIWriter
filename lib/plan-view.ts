@@ -1,4 +1,5 @@
 import type {
+  ForeshadowRecord,
   PlanItem,
   PlanItemChange,
   PlanLedger,
@@ -6,6 +7,19 @@ import type {
 } from "./types";
 
 // 纯只读切片：客户端 UI 和服务端都能用，不依赖 node:crypto 或存储层。
+
+// 放在这里而不是 story.ts：story.ts 依赖 canon，会顺带把 node:crypto 拉进浏览器包。
+export function isForeshadowOverdue(
+  record: ForeshadowRecord,
+  latestChapter: number,
+): boolean {
+  return (
+    record.expectedEndChapter > 0 &&
+    latestChapter > record.expectedEndChapter &&
+    record.status !== "resolved" &&
+    record.status !== "abandoned"
+  );
+}
 
 function normalizeName(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/gu, "");

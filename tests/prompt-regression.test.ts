@@ -12,7 +12,9 @@ import {
   extendMessages,
   factExtractorMessages,
   repairRegressionMessages,
+  foreshadowClassifyMessages,
   titleRepairMessages,
+  wrapUpMessages,
   writerMessages,
 } from "@/lib/prompts";
 import { PROMPT_AGENTS, PROMPT_CATALOG } from "@/lib/prompt-registry";
@@ -46,18 +48,18 @@ describe("典型小说审校提示词回归", () => {
       detail.canon,
       detail.characters,
       chapter,
-      "张三在密室里发现了一行旧字。",
-      "上一章结尾：张三推开门。",
+      "角色甲在密室里发现了一行旧字。",
+      "上一章结尾：角色甲推开门。",
       [
         {
           severity: "warning",
           type: "死亡人物出现",
-          evidence: "李四走进来",
-          detail: "李四已在第 2 章死亡。",
+          evidence: "角色乙走进来",
+          detail: "角色乙已在第 2 章死亡。",
         },
       ],
       "下一章开头：旧字发光。",
-      "【人物动态状态】李四：第 2 章死亡。",
+      "【人物动态状态】角色乙：第 2 章死亡。",
     )
       .map((message) => message.content)
       .join("\n");
@@ -79,7 +81,7 @@ describe("典型小说审校提示词回归", () => {
         detail.canon,
         detail.characters,
         detail.plan.chapters[3],
-        "张三进入密室。",
+        "角色甲进入密室。",
         "",
         [],
         "",
@@ -115,7 +117,7 @@ describe("典型小说审校提示词回归", () => {
         detail.canon,
         detail.characters,
         detail.plan.chapters[3],
-        "张三进入密室。",
+        "角色甲进入密室。",
         "",
         [],
         "",
@@ -137,7 +139,7 @@ describe("典型小说审校提示词回归", () => {
         detail.canon,
         detail.characters,
         detail.plan.chapters[3],
-        "张三进入密室。",
+        "角色甲进入密室。",
         "",
         [],
         "",
@@ -167,8 +169,8 @@ describe("典型小说审校提示词回归", () => {
       repairRegressionMessages(
         detail.meta,
         detail.plan.chapters[3],
-        "张三进入密室。",
-        "张三走进密室，发现旧字。",
+        "角色甲进入密室。",
+        "角色甲走进密室，发现旧字。",
         "",
         detail.canon,
         detail.characters,
@@ -240,13 +242,13 @@ describe("典型小说审校提示词回归", () => {
       chapterRepairPatchMessages(
         detail.meta,
         detail.plan.chapters[3],
-        "张三进入密室。",
+        "角色甲进入密室。",
         [
           {
             severity: "critical",
             type: "物品归属",
-            evidence: "张三拿着账本。",
-            detail: "账本应属李四。",
+            evidence: "角色甲拿着账本。",
+            detail: "账本应属角色乙。",
           },
         ],
         detail.canon,
@@ -270,13 +272,13 @@ describe("典型小说审校提示词回归", () => {
     const text = chapterRepairMessages(
       detail.meta,
       chapter,
-      "张三在密室里发现了一行旧字。",
+      "角色甲在密室里发现了一行旧字。",
       [
         {
           severity: "critical",
           type: "人物生死状态",
-          evidence: "李四走进来",
-          detail: "李四已在第 2 章死亡。",
+          evidence: "角色乙走进来",
+          detail: "角色乙已在第 2 章死亡。",
         },
       ],
       detail.canon,
@@ -305,13 +307,13 @@ describe("典型小说审校提示词回归", () => {
       chapterRepairMessages(
         detail.meta,
         chapter,
-        "张三在密室里发现了一行旧字。",
+        "角色甲在密室里发现了一行旧字。",
         [
           {
             severity: "critical",
             type: "人物生死状态",
-            evidence: "李四走进来",
-            detail: "李四已在第 2 章死亡。",
+            evidence: "角色乙走进来",
+            detail: "角色乙已在第 2 章死亡。",
           },
         ],
         detail.canon,
@@ -394,13 +396,13 @@ describe("各 Agent 的增量提示词约束", () => {
         detail.plan,
         detail.bible,
         detail.outlineMd,
-        ["第 3 章：张三追查黑衣人。"],
+        ["第 3 章：角色甲追查黑衣人。"],
         2,
         6,
         {
           canon: detail.canon,
           characters: detail.characters,
-          storyContext: "【人物动态状态】张三：在客栈；李四已死亡。",
+          storyContext: "【人物动态状态】角色甲：在测试场景；角色乙已死亡。",
         },
       ),
     );
@@ -410,7 +412,7 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("【核心人物档案】");
     expect(text).toContain("张三（主角）");
     expect(text).toContain("【剧情台账（人物状态、关系、事件与未回收伏笔）】");
-    expect(text).toContain("张三：在客栈；李四已死亡。");
+    expect(text).toContain("角色甲：在测试场景；角色乙已死亡。");
     expect(text).toContain("不得推翻或改写已经发生的事实");
     expect(text).toContain("尚未回收的伏笔");
     expect(text).toContain("相邻章节之间要有合理的因果联系");
@@ -453,7 +455,7 @@ describe("各 Agent 的增量提示词约束", () => {
           {
             index: 30,
             title: "旧标题",
-            summary: "张三进入密室，发现暗门。",
+            summary: "角色甲进入密室，发现暗门。",
             keyBeats: ["发现机关", "打开暗门"],
           },
         ],
@@ -487,13 +489,13 @@ describe("各 Agent 的增量提示词约束", () => {
         detail.bible,
         detail.characters,
         detail.plan.chapters[3],
-        "上一章结尾：张三推开门。",
-        ["前情：张三发现玉佩。"],
+        "上一章结尾：角色甲推开门。",
+        ["前情：角色甲发现测试物品。"],
         {
           canon: detail.canon,
-          memoryContext: "【未回收伏笔】玉佩的秘密。",
-          storyContext: "【人物动态状态】张三：在客栈。",
-          planContext: "第 4 章计划事件：张三进入密室（未执行）。",
+          memoryContext: "【未回收伏笔】测试物品的秘密。",
+          storyContext: "【人物动态状态】角色甲：在测试场景。",
+          planContext: "第 4 章计划事件：角色甲进入密室（未执行）。",
         },
       ),
     );
@@ -509,7 +511,7 @@ describe("各 Agent 的增量提示词约束", () => {
     expect(text).toContain("【长期记忆（来自已写章节，按当前章节相关度检索）】");
     expect(text).toContain("【剧情台账（人物动态状态、关系、事件与伏笔，按当前章节相关度检索）】");
     expect(text).toContain("【本章计划台账（创作计划，不代表已经发生）】");
-    expect(text).toContain("张三进入密室");
+    expect(text).toContain("角色甲进入密室");
     expect(text).toContain("正文没有实际写出的计划事件");
     expect(text).toContain("计划与事实台账或实际剧情冲突时");
     expect(text).toContain("事实台账 > 实际剧情台账/长期记忆 > 计划台账");
@@ -536,7 +538,7 @@ describe("各 Agent 的增量提示词约束", () => {
         detail.meta,
         detail.bible,
         detail.plan.chapters[3],
-        "张三把玉佩放在桌上，怀疑李四是凶手，但没有任何证据。",
+        "角色甲把测试物品放在桌上，怀疑角色乙是凶手，但没有任何证据。",
         detail.canon,
       ),
     );
@@ -560,6 +562,26 @@ describe("各 Agent 的增量提示词约束", () => {
           canon: detail.canon,
           characters: detail.characters,
         }),
+      ],
+      [
+        "wrapup-plan",
+        wrapUpMessages(detail.meta, detail.plan, detail.bible, detail.outlineMd, [], 2, 6, {
+          canon: detail.canon,
+          characters: detail.characters,
+          brief: "必须回收主线伏笔",
+          openForeshadows: [
+            { text: "测试伏笔甲", plantChapter: 1, plannedResolveChapter: 0, planted: true },
+          ],
+        }),
+      ],
+      [
+        "foreshadow-classify",
+        foreshadowClassifyMessages(
+          detail.meta,
+          [{ id: "fs-1", text: "测试伏笔甲", plantedChapter: 1 }],
+          "第 1 章：旧测试物品出现裂痕",
+          3,
+        ),
       ],
       [
         "title-repair",
@@ -599,6 +621,8 @@ describe("各 Agent 的增量提示词约束", () => {
     const expectedFragments: Record<string, string[]> = {
       architect: ['"logline"', '"chapters"'],
       "extend-plan": ['"chapters"'],
+      "wrapup-plan": ['"chapters"', '"planLedger"', "尚未回收的伏笔"],
+      "foreshadow-classify": ['"items"', '"verdict"', "拿不准一律 open"],
       "title-repair": ['"titles"'],
       "character-designer": ['"characters"'],
       writer: ["直接开始正文"],
@@ -618,7 +642,8 @@ describe("各 Agent 的增量提示词约束", () => {
   });
 
   it("所有模型 Agent 都有稳定的内置提示词版本", () => {
-    expect(PROMPT_AGENTS).toHaveLength(8);
+    // 10 个写作/审校 Agent（含收尾大纲、伏笔分类）+ 3 个技能 Agent（命名、塑造、文风）。
+    expect(PROMPT_AGENTS).toHaveLength(13);
     for (const agent of PROMPT_AGENTS) {
       expect(PROMPT_CATALOG[agent].version).toMatch(/^\d{4}\./);
       expect(PROMPT_CATALOG[agent].label.length).toBeGreaterThan(0);

@@ -6,6 +6,9 @@ import { matchesPublishWork } from "@/lib/publish-ledger";
 import type { ProjectDetail, StartJobFn } from "@/lib/types";
 import { errorMessage } from "@/lib/utils";
 
+// 发布记录分视图展示：未发布/已发布各自一章一列表格太长，用标签隔离。
+type PublishView = "unpublished" | "published" | "uncertain" | "history";
+
 export function PublishTab({
   detail,
   onStartJob,
@@ -36,6 +39,9 @@ export function PublishTab({
   const [refreshing, setRefreshing] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [resolving, setResolving] = useState<number | null>(null);
+  const [markingAll, setMarkingAll] = useState(false);
+  const [releasingAll, setReleasingAll] = useState(false);
+  const [historyView, setHistoryView] = useState<PublishView>("unpublished");
   const [historyError, setHistoryError] = useState("");
   const [historyNotice, setHistoryNotice] = useState("");
 
@@ -77,11 +83,27 @@ export function PublishTab({
       !published.has(chapter.index) &&
       !uncertainChapters.has(chapter.index),
   ).length;
+  // 从未进过台账的已写章节：纯手动发布或自动发布没跑过时，需要能在这里补标记。
+  const unpublishedWritten = detail.chapters.filter(
+    (chapter) =>
+      chapter.written &&
+      chapter.content.trim().length > 0 &&
+      !published.has(chapter.index) &&
+      !uncertainChapters.has(chapter.index),
+  );
   const requestedCount = Number(publishCount);
   const publishLimit =
     Number.isInteger(requestedCount) && requestedCount > 0
       ? Math.min(requestedCount, publishable)
       : publishable;
+  const historyViews: { key: PublishView; label: string; count: number }[] = [
+    { key: "unpublished", label: "未发布", count: unpublishedWritten.length },
+    { key: "published", label: "已发布", count: publishedEntries.length },
+    ...(uncertain.length
+      ? [{ key: "uncertain" as const, label: "待确认", count: uncertain.length }]
+      : []),
+    { key: "history", label: "操作日志", count: history.length },
+  ];
 
   async function persist(showNotice: boolean): Promise<boolean> {
     // 没改过设置就不要回写：旧页面停留太久时，回写会把别处更新过的书名覆盖成旧值。
@@ -179,23 +201,88 @@ export function PublishTab({
       : "标记后下次发布会重新尝试提交该章。";
     if (!window.confirm(`确定将第 ${chapter} 章${action}？\n\n${effect}`)) return;
 
+    // 标记会写到当前书名/书号下，先把未保存的发布设置落盘，避免记到旧书名上。
+    if (!(await persist(false))) return;
+
     setResolving(chapter);
     setHistoryError("");
     setHistoryNotice("");
     try {
-      const response = await fetch(`/api/projects/${slug}/publish/records`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chapter, published: publishedNow, confirm: true }),
-      });
-      const data = (await response.json()) as { error?: string };
-      if (!response.ok) throw new Error(data.error ?? "更新发布状态失败");
+      await requestPublishState(chapter, publishedNow);
       await onRefresh();
       setHistoryNotice(`第 ${chapter} 章已${action}`);
     } catch (err) {
       setHistoryError(errorMessage(err));
     } finally {
       setResolving(null);
+    }
+  }
+
+  async function requestPublishStates(chapters: number[], published: boolean) {
+    const response = await fetch(`/api/projects/${slug}/publish/records`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapters, published, confirm: true }),
+    });
+    const data = (await response.json()) as { error?: string };
+    if (!response.ok) throw new Error(data.error ?? "更新发布状态失败");
+  }
+
+  async function requestPublishState(chapter: number, published: boolean) {
+    await requestPublishStates([chapter], published);
+  }
+
+  // 老书搬平台时往往一次发了几十章，逐章点太慢；批量接口一次写完台账。
+  async function handleMarkAll() {
+    if (markingAll || releasingAll || resolving !== null || disabled) return;
+    const targets = unpublishedWritten.map((chapter) => chapter.index);
+    if (!targets.length) return;
+    if (!(await persist(false))) return;
+    if (
+      !window.confirm(
+        `确定把 ${targets.length} 个未发布章节全部标记为已发布？\n\n标记后自动发布会跳过这些章节；如果某章实际没发出去，可以到「已发布」标签里单独或全部释放。`,
+      )
+    ) {
+      return;
+    }
+    setMarkingAll(true);
+    setHistoryError("");
+    setHistoryNotice("");
+    try {
+      await requestPublishStates(targets, true);
+      await onRefresh();
+      setHistoryNotice(`已把 ${targets.length} 章标记为已发布`);
+    } catch (err) {
+      setHistoryError(errorMessage(err));
+    } finally {
+      setMarkingAll(false);
+    }
+  }
+
+  // 反向批量：把当前书名下的已发布记录全部释放，重新进入待发布队列。
+  async function handleReleaseAll() {
+    if (markingAll || releasingAll || resolving !== null || disabled) return;
+    const targets = publishedEntries.map((entry) => entry.chapter);
+    if (!targets.length) return;
+    if (!(await persist(false))) return;
+    if (
+      !window.confirm(
+        `确定把 ${targets.length} 个已发布章节全部标记为未发布？\n\n标记后这些章节会重新进入待发布队列，下次自动发布会再次提交；如果番茄后台其实已经发布，重复提交可能产生重复章节。建议先在番茄后台核对。`,
+      )
+    ) {
+      return;
+    }
+    setReleasingAll(true);
+    setHistoryError("");
+    setHistoryNotice("");
+    try {
+      await requestPublishStates(targets, false);
+      await onRefresh();
+      setHistoryNotice(`已把 ${targets.length} 章标记为未发布`);
+    } catch (err) {
+      setHistoryError(errorMessage(err));
+    } finally {
+      setReleasingAll(false);
     }
   }
 
@@ -412,7 +499,100 @@ export function PublishTab({
         <div className="panel-body">
           {historyError ? <p className="form-error">{historyError}</p> : null}
           {historyNotice ? <p className="form-note">{historyNotice}</p> : null}
-          {uncertain.length ? (
+          <div className="segmented overview-tabs" role="tablist" aria-label="发布记录视图">
+            {historyViews.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={historyView === item.key}
+                className={`segmented-item ${historyView === item.key ? "active" : ""}`}
+                onClick={() => setHistoryView(item.key)}
+              >
+                {item.label}
+                <span className="segmented-count">{item.count}</span>
+              </button>
+            ))}
+          </div>
+          {historyView === "unpublished" && unpublishedWritten.length ? (
+            <div className="rejected-drafts">
+              <p className="canon-label">
+                未发布章节（手动标记为已发布；标记后自动发布会跳过该章）
+              </p>
+              <div className="button-row">
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => void handleMarkAll()}
+                  disabled={
+                    markingAll ||
+                    releasingAll ||
+                    resolving !== null ||
+                    disabled ||
+                    !bookName.trim()
+                  }
+                >
+                  {markingAll ? (
+                    <BusyLabel>标记中…</BusyLabel>
+                  ) : (
+                    `全部标记为已发布（${unpublishedWritten.length} 章）`
+                  )}
+                </button>
+              </div>
+              <div className="continuity-list">
+                {unpublishedWritten.map((chapter) => (
+                  <article
+                    className="continuity-chapter"
+                    key={`unpublished-${chapter.index}`}
+                  >
+                    <div className="continuity-chapter-head">
+                      <div>
+                        <span className="plan-index">
+                          {String(chapter.index).padStart(2, "0")}
+                        </span>{" "}
+                        <span className="canon-name">
+                          第 {chapter.index} 章《{chapter.title}》
+                        </span>
+                      </div>
+                      <div className="panel-head-tools">
+                        <span className="muted small">{chapter.words} 字</span>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() =>
+                            void handleResolve(chapter.index, true)
+                          }
+                          disabled={
+                            resolving !== null ||
+                            disabled ||
+                            !bookName.trim()
+                          }
+                          title={
+                            bookName.trim()
+                              ? "在本地台账登记为已发布"
+                              : "请先填写并保存番茄书名"
+                          }
+                        >
+                          {resolving === chapter.index ? (
+                            <BusyLabel>处理中…</BusyLabel>
+                          ) : (
+                            "标记已发布"
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              {!bookName.trim() ? (
+                <p className="hint">
+                  标记前需要先填写番茄书名并保存，台账按书名/书号归组。
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {historyView === "unpublished" && !unpublishedWritten.length ? (
+            <p className="muted">没有待标记的未发布章节。</p>
+          ) : null}
+          {historyView === "uncertain" && uncertain.length ? (
             <div className="rejected-drafts">
               <p className="canon-label">待人工确认（提交结果不明，已暂停自动重发）</p>
               <div className="continuity-list">
@@ -458,11 +638,35 @@ export function PublishTab({
               </div>
             </div>
           ) : null}
-          {publishedEntries.length ? (
+          {historyView === "published" && publishedEntries.length ? (
             <div className="rejected-drafts">
               <p className="canon-label">
                 已发布章节（本地台账；番茄后台删除后不会自动感知）
               </p>
+              <div className="button-row">
+                <button
+                  className="btn btn-ghost btn-sm danger-text"
+                  onClick={() => void handleReleaseAll()}
+                  disabled={
+                    markingAll ||
+                    releasingAll ||
+                    resolving !== null ||
+                    disabled ||
+                    !bookName.trim()
+                  }
+                  title={
+                    bookName.trim()
+                      ? "把当前书名下登记的已发布章节全部释放，重新进入待发布队列"
+                      : "请先填写并保存番茄书名"
+                  }
+                >
+                  {releasingAll ? (
+                    <BusyLabel>释放中…</BusyLabel>
+                  ) : (
+                    `全部标记为未发布（${publishedEntries.length} 章）`
+                  )}
+                </button>
+              </div>
               <div className="continuity-list">
                 {publishedEntries.map((entry) => (
                   <article
@@ -498,7 +702,13 @@ export function PublishTab({
               </div>
             </div>
           ) : null}
-          {history.length ? (
+          {historyView === "published" && !publishedEntries.length ? (
+            <p className="muted">还没有登记已发布的章节。</p>
+          ) : null}
+          {historyView === "uncertain" && !uncertain.length ? (
+            <p className="muted">没有待确认的发布记录。</p>
+          ) : null}
+          {historyView === "history" && history.length ? (
             <div className="table-scroll">
               <table className="data-table">
                 <thead>
@@ -527,9 +737,9 @@ export function PublishTab({
                 </tbody>
               </table>
             </div>
-          ) : (
+          ) : historyView === "history" ? (
             <p className="muted">暂无发布日志。</p>
-          )}
+          ) : null}
         </div>
       </section>
     </div>

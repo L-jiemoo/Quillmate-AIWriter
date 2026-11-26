@@ -1,7 +1,11 @@
 import {
+  analyzeFormulaicPassage,
+  formulaicOpeningSuspicion,
   normalizeArchitectureFacts,
   normalizeExtractedFacts,
   normalizeReviewResult,
+  openingImagerySuspicion,
+  openingStructureSuspicion,
 } from "./canon";
 import { getRuntimeConfig } from "./config";
 import {
@@ -33,7 +37,11 @@ import {
   characterMessages,
   extendMessages,
   factExtractorMessages,
+  foreshadowClassifyMessages,
+  openingRepairMessages,
+  styleRepairMessages,
   titleRepairMessages,
+  wrapUpMessages,
   writerMessages,
 } from "./prompts";
 import {
@@ -61,6 +69,7 @@ import {
   assertValidPlanLedger,
   emptyPlanLedger,
   ensureItemRegistryCoverage,
+  foreshadowTextKey,
   mergePlanLedgers,
   normalizePlanItemRegistry,
   normalizePlanRelations,
@@ -88,6 +97,7 @@ import type {
   ProjectMeta,
   ProjectPlan,
   ReviewResult,
+  WrapUpForeshadowItem,
 } from "./types";
 import type { GeneratedPlan } from "./mock";
 
@@ -357,10 +367,27 @@ function safeIdPart(value: string): string {
   return cleaned || "id";
 }
 
-function namespaceLedgerIds(ledger: PlanLedger, namespace: string): PlanLedger {
+export function namespaceLedgerIds(
+  ledger: PlanLedger,
+  namespace: string,
+  reservedIds: Iterable<string> = [],
+): PlanLedger {
+  const used = new Set(reservedIds);
   const eventIds = new Map<string, string>();
   const mapId = (id: string) => {
-    if (!eventIds.has(id)) eventIds.set(id, `${namespace}-${safeIdPart(id)}`);
+    if (!eventIds.has(id)) {
+      // 同一批次重复生成时模型仍会从 plan-wrapup-char-1 开始编号，
+      // 一旦撞上既有台账就加序号，避免整批任务因为 ID 冲突被拒。
+      const base = `${namespace}-${safeIdPart(id)}`;
+      let candidate = base;
+      let sequence = 2;
+      while (used.has(candidate)) {
+        candidate = `${base}-${sequence}`;
+        sequence += 1;
+      }
+      used.add(candidate);
+      eventIds.set(id, candidate);
+    }
     return eventIds.get(id)!;
   };
   const remap = (ids: string[]) => ids.map((id) => eventIds.get(id) ?? id);
@@ -1008,6 +1035,25 @@ export interface ExtendedPlanResult {
 export interface ExtendPlanOptions {
   onProgress?: ProgressReporter;
   client?: LLMClient;
+  // 既有台账的全部计划 ID；新批次撞上时自动加序号，避免整批被冲突检查拒掉。
+  reservedPlanIds?: string[];
+  // wrapup：按「收束全书、逐条回收伏笔」的提示词生成，而不是普通续排。
+  mode?: "extend" | "wrapup";
+  wrapUp?: {
+    // 作者自定义收尾要求，作为硬约束写进提示词。
+    brief?: string;
+    // 尚未真正回收的伏笔：含从未排期的，也含排过期但正文没收的。
+    openForeshadows?: WrapUpForeshadowItem[];
+    // 正文已写到第几章，用来告诉模型当前进度。
+    writtenThrough?: number;
+  };
+}
+
+interface WrapUpBatchContext {
+  brief: string;
+  foreshadows: WrapUpForeshadowItem[];
+  writtenThrough: number;
+  finalBatch: boolean;
 }
 
 async function extendPlanBatch(
@@ -1025,24 +1071,29 @@ async function extendPlanBatch(
   llm: LLMClient,
   maxTokens: number,
   onProgress: (event: LLMProgressEvent) => void,
+  options: { mode: "extend" | "wrapup"; wrapUp?: WrapUpBatchContext } = { mode: "extend" },
 ): Promise<ExtendedPlanResult> {
   const startIndex = plan.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
+  const label = options.mode === "wrapup" ? "收尾" : "续排";
 
-  const data = await llm.json<Record<string, unknown>>(
-    extendMessages(
-      meta,
-      plan,
-      bible,
-      outlineMd,
-      recentSummaries,
-      count,
-      startIndex,
-      context,
-    ),
-    { agent: "extend-plan", maxTokens, onProgress },
-  );
+  const messages =
+    options.mode === "wrapup"
+      ? wrapUpMessages(meta, plan, bible, outlineMd, recentSummaries, count, startIndex, {
+          ...context,
+          brief: options.wrapUp?.brief ?? "",
+          openForeshadows: options.wrapUp?.foreshadows ?? [],
+          writtenThrough: options.wrapUp?.writtenThrough ?? 0,
+          finalBatch: options.wrapUp?.finalBatch ?? true,
+        })
+      : extendMessages(meta, plan, bible, outlineMd, recentSummaries, count, startIndex, context);
+
+  const data = await llm.json<Record<string, unknown>>(messages, {
+    agent: options.mode === "wrapup" ? "wrapup-plan" : "extend-plan",
+    maxTokens,
+    onProgress,
+  });
   const raw = Array.isArray(data.chapters) ? data.chapters : [];
   // 模型可能多返回几章或夹带空标题的行：丢掉无效项后必须凑够请求数量，
   // 再按 startIndex 重新编号，避免章节号断档或重复。
@@ -1085,7 +1136,7 @@ async function extendPlanBatch(
   const rawLedger = data.planLedger ?? data.plan_ledger;
   const rawRecord = (rawLedger ?? {}) as Record<string, unknown>;
   if (!Array.isArray(rawRecord.events) && !Array.isArray(rawRecord.foreshadows)) {
-    throw new Error("续排没有返回结构化计划台账（planLedger），本次新章节未提交");
+    throw new Error(`${label}没有返回结构化计划台账（planLedger），本次新章节未提交`);
   }
   // 模型可能漏掉某一章的计划事件；用章节细纲补齐，保证每个新章节都有可执行的本章计划。
   const planLedger = ensureLedgerCoverage(
@@ -1094,7 +1145,7 @@ async function extendPlanBatch(
     () => undefined,
   );
   if (!planLedger.events.length) {
-    throw new Error("续排计划台账为空，本次新章节未提交");
+    throw new Error(`${label}计划台账为空，本次新章节未提交`);
   }
   assertValidPlanLedger(planLedger, {
     ...plan,
@@ -1120,16 +1171,35 @@ export async function extendPlan(
   const startIndex = plan.chapters.length
     ? Math.max(...plan.chapters.map((chapter) => chapter.index)) + 1
     : 1;
+  const mode = options.mode ?? "extend";
+  const label = mode === "wrapup" ? "收尾大纲" : "续排";
 
   if (isMock()) {
     const chapters = mockExtendedChapters(meta, startIndex, count);
-    return {
-      chapters,
-      planLedger: {
-        ...emptyPlanLedger(),
-        events: planEntriesForChapters(chapters),
-      },
-    };
+    const events = planEntriesForChapters(chapters);
+    if (mode !== "wrapup") {
+      return { chapters, planLedger: { ...emptyPlanLedger(), events } };
+    }
+    // mock 模式没有真实模型：把第一条未回收伏笔安排到最后一批章里，便于本地验证收尾链路。
+    const firstForeshadow = (options.wrapUp?.openForeshadows ?? [])
+      .map((item) => item.text.trim())
+      .filter(Boolean)[0];
+    const planLedger = sanitizeGeneratedPlanLedger({
+      events,
+      foreshadows: firstForeshadow
+        ? [
+            {
+              id: "plan-wrapup-foreshadow-mock",
+              text: firstForeshadow,
+              plantChapter: 1,
+              resolveChapter: startIndex + count - 1,
+              purpose: "收尾回收",
+              resolveCondition: "",
+            },
+          ]
+        : [],
+    });
+    return { chapters, planLedger };
   }
 
   const runtime = getRuntimeConfig();
@@ -1142,19 +1212,29 @@ export async function extendPlan(
   const workPlan: ProjectPlan = { ...plan, chapters: [...plan.chapters] };
   const chapters: ChapterPlan[] = [];
   let planLedger = emptyPlanLedger();
+  // 既有计划的 ID 全部占位；同一次续排内部再逐批累加，避免重复生成时撞车。
+  const reservedPlanIds = new Set(options.reservedPlanIds ?? []);
+  // 收尾模式：已经排定回收章节的伏笔不再塞进下一批提示词，避免重复登记。
+  let pendingForeshadows =
+    mode === "wrapup"
+      ? (options.wrapUp?.openForeshadows ?? [])
+          .map((item) => ({ ...item, text: item.text.trim() }))
+          .filter((item) => item.text)
+      : [];
 
   report(
-    `续排：模型 ${runtime.model}，输出预算 ${budget} Tokens，共 ${count} 章，分 ${totalBatches} 批。`,
+    `${label}：模型 ${runtime.model}，输出预算 ${budget} Tokens，共 ${count} 章，分 ${totalBatches} 批。`,
   );
   if (needsHigherTier("chapter-batch", runtime.maxTokens)) {
-    report("提示：当前为标准档 8192 Tokens，续排会分批生成；如仍截断请提高输出档位。");
+    report(`提示：当前为标准档 8192 Tokens，${label}会分批生成；如仍截断请提高输出档位。`);
   }
 
   for (let offset = 0; offset < count; offset += batchSize) {
     const batchNo = Math.floor(offset / batchSize) + 1;
     const size = Math.min(batchSize, count - offset);
+    const finalBatch = offset + size >= count;
     report(
-      `续排第 ${batchNo}/${totalBatches} 批：从第 ${
+      `${label}第 ${batchNo}/${totalBatches} 批：从第 ${
         Math.max(...workPlan.chapters.map((chapter) => chapter.index), 0) + 1
       } 章起新增 ${size} 章。`,
     );
@@ -1169,8 +1249,31 @@ export async function extendPlan(
       client,
       budget,
       onProgress,
+      {
+        mode,
+        wrapUp: {
+          brief: options.wrapUp?.brief ?? "",
+          foreshadows: pendingForeshadows,
+          writtenThrough: options.wrapUp?.writtenThrough ?? 0,
+          finalBatch,
+        },
+      },
     );
-    const part = namespaceLedgerIds(result.planLedger, `extend-b${batchNo}`);
+    if (mode === "wrapup" && pendingForeshadows.length) {
+      const planned = new Set(
+        result.planLedger.foreshadows
+          .filter((item) => item.resolveChapter > 0)
+          .map((item) => foreshadowTextKey(item.text)),
+      );
+      pendingForeshadows = pendingForeshadows.filter(
+        (item) => !planned.has(foreshadowTextKey(item.text)),
+      );
+    }
+    const part = namespaceLedgerIds(
+      result.planLedger,
+      `extend-b${batchNo}`,
+      reservedPlanIds,
+    );
     chapters.push(...result.chapters);
     workPlan.chapters.push(...result.chapters);
     planLedger = mergePlanLedgers(planLedger, part);
@@ -1203,7 +1306,161 @@ export async function writeChapter(
     writerMessages(meta, bible, characters, chapter, previousEnding, history, options),
     { agent: "writer", chapter: chapter.index },
   );
-  return stripFences(raw);
+  const draft = stripFences(raw);
+  // 先处理开头，再处理全章套话：开头改动会影响第一段的套话密度。
+  const withOpening = await refineOpening(
+    llm,
+    draft,
+    chapter.index,
+    options.previousOpenings ?? [],
+    characters.map((item) => item.name),
+  );
+  return refineFormulaicStyle(llm, withOpening, chapter.index);
+}
+
+// 开头自检：命中公式化/骨架重复/意象重复时只重写第一段，其余正文必须保留。
+async function refineOpening(
+  llm: LLMClient,
+  text: string,
+  chapterIndex: number,
+  previousOpenings: { index: number; opening: string }[],
+  knownNames: string[],
+): Promise<string> {
+  const previousChapters = previousOpenings.map((item) => ({
+    index: item.index,
+    content: item.opening,
+  }));
+  const problems = [
+    ...formulaicOpeningSuspicion(text, previousChapters),
+    ...openingStructureSuspicion(text, previousChapters),
+    ...openingImagerySuspicion(text, previousChapters, knownNames),
+  ].map((issue) => `${issue.type}：${issue.detail}`);
+  if (!problems.length) return text;
+
+  try {
+    const fixedRaw = await llm.chat(
+      openingRepairMessages(text, problems),
+      { agent: "writer", chapter: chapterIndex },
+    );
+    const fixed = stripFences(fixedRaw);
+    return acceptOpeningRewrite(text, fixed) ? fixed : text;
+  } catch {
+    return text;
+  }
+}
+
+// 只允许第一段变化：长度和段落数偏离太多，说明模型动了正文，宁可保留原稿。
+function acceptOpeningRewrite(original: string, fixed: string): boolean {
+  if (fixed.length < original.length * 0.9) return false;
+  if (fixed.length > original.length * 1.3) return false;
+  const paragraphCount = (value: string): number =>
+    value.split(/\n+/u).filter((item) => item.trim()).length;
+  return Math.abs(paragraphCount(fixed) - paragraphCount(original)) <= 1;
+}
+
+// 写作完成后的文风自检：套话密度超标就带清单做一次定点重写，
+// 把问题挡在入库之前，而不是等审校再提示。
+// 重写失败、或重写稿明显变短（说明删了剧情）时保留原稿，不影响正常写作。
+async function refineFormulaicStyle(
+  llm: LLMClient,
+  text: string,
+  chapterIndex: number,
+): Promise<string> {
+  const report = analyzeFormulaicPassage(text);
+  if (!report.shouldRewrite) return text;
+  try {
+    const fixedRaw = await llm.chat(styleRepairMessages(text, report), {
+      agent: "writer",
+      chapter: chapterIndex,
+    });
+    const fixed = stripFences(fixedRaw);
+    if (fixed.length < text.length * 0.85) return text;
+    return fixed;
+  } catch {
+    return text;
+  }
+}
+
+export interface ForeshadowVerdict {
+  id: string;
+  verdict: "open" | "resolved" | "abandoned";
+  chapter: number;
+  evidence: string;
+  confidence: "high" | "medium" | "low";
+}
+
+const FORESHADOW_VERDICTS = new Set(["open", "resolved", "abandoned"]);
+const VERDICT_CONFIDENCE = new Set(["high", "medium", "low"]);
+
+function parseForeshadowVerdicts(raw: unknown): ForeshadowVerdict[] {
+  if (!Array.isArray(raw)) return [];
+  const parsed: ForeshadowVerdict[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    const verdict = typeof record.verdict === "string" ? record.verdict : "";
+    if (!id || !FORESHADOW_VERDICTS.has(verdict)) continue;
+    const confidence = typeof record.confidence === "string" ? record.confidence : "";
+    parsed.push({
+      id,
+      verdict: verdict as ForeshadowVerdict["verdict"],
+      chapter: Math.max(0, Math.round(Number(record.chapter) || 0)),
+      evidence:
+        typeof record.evidence === "string" ? record.evidence.trim().slice(0, 300) : "",
+      confidence: (VERDICT_CONFIDENCE.has(confidence)
+        ? confidence
+        : "low") as ForeshadowVerdict["confidence"],
+    });
+  }
+  return parsed;
+}
+
+// 让模型对照正文摘要判断每条伏笔是否已经回收，返回逐条结论；写回由调用方决定。
+export async function classifyForeshadows(
+  meta: ProjectMeta,
+  foreshadows: { id: string; text: string; plantedChapter: number }[],
+  chapterDigests: string,
+  latestChapter: number,
+  options: { onProgress?: ProgressReporter; client?: LLMClient } = {},
+): Promise<ForeshadowVerdict[]> {
+  if (!foreshadows.length) return [];
+  if (isMock()) {
+    // mock 模式没有真实模型：一律判未回收，避免本地演示把伏笔误标成已回收。
+    return foreshadows.map((item) => ({
+      id: item.id,
+      verdict: "open" as const,
+      chapter: 0,
+      evidence: "",
+      confidence: "low" as const,
+    }));
+  }
+
+  const runtime = getRuntimeConfig();
+  const budget = tokenBudgetForTask("small-json", runtime.maxTokens);
+  const client = options.client ?? new LLMClient();
+  const report = reporter(options.onProgress);
+  const onProgress = llmProgress(report);
+  const batchSize = 25;
+  const totalBatches = Math.ceil(foreshadows.length / batchSize);
+  const verdicts: ForeshadowVerdict[] = [];
+
+  report(
+    `伏笔分类：模型 ${runtime.model}，共 ${foreshadows.length} 条，分 ${totalBatches} 批判定。`,
+  );
+  for (let offset = 0; offset < foreshadows.length; offset += batchSize) {
+    const batchNo = Math.floor(offset / batchSize) + 1;
+    const batch = foreshadows.slice(offset, offset + batchSize);
+    const data = await client.json<Record<string, unknown>>(
+      foreshadowClassifyMessages(meta, batch, chapterDigests, latestChapter),
+      { agent: "foreshadow-classify", maxTokens: budget, onProgress },
+    );
+    verdicts.push(...parseForeshadowVerdicts(data.items));
+    report(
+      `伏笔分类第 ${batchNo}/${totalBatches} 批完成：累计判定 ${verdicts.length}/${foreshadows.length} 条。`,
+    );
+  }
+  return verdicts;
 }
 
 export async function extractChapterFacts(

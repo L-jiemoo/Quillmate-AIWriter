@@ -37,6 +37,9 @@ function parseParams(value: string): JobParams {
     }
     if (typeof raw.instruction === "string") params.instruction = raw.instruction.slice(0, 500);
     if (typeof raw.useReview === "boolean") params.useReview = raw.useReview;
+    if (typeof raw.wrapUpBrief === "string" && raw.wrapUpBrief.trim()) {
+      params.wrapUpBrief = raw.wrapUpBrief.trim().slice(0, 2000);
+    }
     if (raw.source === "review" || raw.source === "audit") params.source = raw.source;
     return params;
   } catch {

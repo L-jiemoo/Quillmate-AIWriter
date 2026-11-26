@@ -1296,6 +1296,61 @@ export function clearChapterAnnotations(slug: string, index: number, at: string)
   });
 }
 
+// 删除最后一章时一次性清理章节行、状态、审校、草稿、版本和各类台账，
+// 避免出现“大纲已删但记忆/剧情仍指向旧章节”的半删除状态。
+export function deleteChapterRecords(
+  slug: string,
+  index: number,
+  input: {
+    plan: ProjectPlan;
+    canon: CanonFacts;
+    memory?: ProjectMemory | null;
+    story?: StoryLedger | null;
+    planLedger?: PlanLedger | null;
+    at: string;
+  },
+): void {
+  withTransaction((db) => {
+    db.prepare("DELETE FROM chapters WHERE slug = ? AND chapter_index = ?").run(
+      slug,
+      index,
+    );
+    db.prepare(
+      "UPDATE projects SET target_chapters = ?, updated_at = ?, state_updated_at = ? WHERE slug = ?",
+    ).run(input.plan.chapters.length, input.at, input.at, slug);
+    db.prepare(
+      "DELETE FROM chapter_states WHERE slug = ? AND chapter_index = ?",
+    ).run(slug, index);
+    // review_issues 依赖 reviews 并有级联删除。
+    db.prepare("DELETE FROM reviews WHERE slug = ? AND chapter_index = ?").run(
+      slug,
+      index,
+    );
+    db.prepare(
+      "DELETE FROM rejected_drafts WHERE slug = ? AND chapter_index = ?",
+    ).run(slug, index);
+    db.prepare(
+      "DELETE FROM chapter_repairs WHERE slug = ? AND chapter_index = ?",
+    ).run(slug, index);
+    db.prepare(
+      "DELETE FROM chapter_versions WHERE slug = ? AND chapter_index = ?",
+    ).run(slug, index);
+
+    if (input.memory) {
+      replaceMemoryInTransaction(db, slug, input.memory);
+    } else {
+      db.prepare(
+        "DELETE FROM chapter_memories WHERE slug = ? AND chapter_index = ?",
+      ).run(slug, index);
+    }
+    if (input.story) replaceStoryInTransaction(db, slug, input.story);
+    if (input.planLedger) {
+      replacePlanLedgerInTransaction(db, slug, input.planLedger);
+    }
+    replaceCanonInTransaction(db, slug, input.canon);
+  });
+}
+
 export function setChapterWrittenState(
   slug: string,
   index: number,

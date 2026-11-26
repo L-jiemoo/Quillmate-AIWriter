@@ -18,7 +18,7 @@ const themeScript = `(function(){try{var t=localStorage.getItem("quillmate-theme
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
+    <html lang="zh-CN" data-scroll-behavior="smooth" suppressHydrationWarning>
       <head>
         <meta name="theme-color" content="#080a12" />
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
